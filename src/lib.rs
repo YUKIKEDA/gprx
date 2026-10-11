@@ -103,3 +103,15 @@ mod tests {
     #[test]
     fn crate_compiles() {}
 }
+
+/// The code blocks of `README.md`, run as doctests so the crates.io page
+/// stays true to the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
+/// The code blocks of `README.ja.md`, run as doctests (the same blocks as
+/// `README.md`).
+#[cfg(doctest)]
+#[doc = include_str!("../README.ja.md")]
+pub struct ReadmeJaDoctests;

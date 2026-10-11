@@ -308,7 +308,7 @@ x, y = t["x"], t["y"]          # (n, d) と (n,)。fit に渡したまま
 
 `order="F"` が、`x[i, j]` を「点 `i` の特徴 `j` の値」にする。既定の行優先で読むと、`d > 1` のときは、同じバイト列が入れ替わった行列になる。
 
-## 10. 供給された距離のモデル
+## 10. 与えられた二乗距離のモデル
 
 `DistanceKernel` のモデル（カーネルが、呼び出し側が渡す二乗距離を読む: `ScalarDistance`、`ArdDistance`）も、同じ `save` / `save_with_factor` で同じ 2 つのファイルに保存する。足すのは、モデルが持つ学習の `d²` と slot の表である。読み込むと、カーネルは**新しい slot** を持つ。保存前の `ScalarDistance` や `ArdDistance` は、そのどれも指さない。読み込んだモデルの `slots()`（保存したカーネルの `DistanceKernel::slots` の順）か `to_kernel()` から slot を取り、予測の source をそれに結び付ける。
 

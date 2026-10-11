@@ -4,7 +4,7 @@
 
 Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
 
-`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。供給する距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
+`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。与えられた二乗距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
 
 ```toml
 [dependencies]
@@ -387,9 +387,9 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-### 与えられた距離（`ScalarDistance`、`ArdDistance`）
+### 与えられた二乗距離（`ScalarDistance`、`ArdDistance`）
 
-カーネルの葉は、座標の代わりに、与えた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
+カーネルの葉は、座標の代わりに、与えられた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
 結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。右に `KernelSpec` を置いた `DistanceKernel` は `WithPoints`。座標の項を左に置くときは `DistanceKernel::from(spec)`（スロットの無い `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないので、`KernelSpec + leaf.into()` は座標の和として推論される。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
@@ -413,7 +413,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロック。距離のモデルでは、`to_kernel()` が `DistanceKernel` のコピーを、`slots()` がそのスロットを返す。`d` と `x` は `WithPoints` にだけある。`into_online` は距離のモデルも変換する。その `insert` はスロットごとに、今の点から新しい点への二乗距離の `n × 1` の列（`point_ids` の順）を、上のどのソースからでも受け取る。ARD のスロットはこの列を `d` 本受け取る。`DistanceOnly` は `insert(sources, y_new)`、`WithPoints` は `insert(sources, x_new, y_new)`。列は学習の正方行列と同じく検査し（`tidy` なら直し）、保持する。`delete(id)` は、保持した二乗距離からその点をその場で除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。モデルが一度伸びた後は、どちらも確保しない（scalar の正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に伸びる）。ただし、ワーカーが 2 つ以上の Rayon のプールで大きな削除をするときは、因子の更新の横で動かすジョブを 1 つ積む。
 
-距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順。`OnlineSgpr` では `inducing_points()` が返す `PointId` の順で、削除してもずれない）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`into_online` はブロックを持ったまま変換する。`insert` はスロットごとに、誘導点から新しい点への `m × 1` の二乗距離を受け取る。`insert_inducing` は学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を受け取って、持っている組と照らして検査する。誘導点である点は、`delete_inducing` で外すまで `delete` できない。factor は、座標のモデルが `n · d` 個の座標から計算する組を、供給された `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+距離を受け取る Sparse のモデルは、誘導点を学習点の添字で指定する。`inducing` に重複なく並べ、`fit` / `factor` の各ソースは学習点からそれらへの `n × m` のブロックとする（列 `a` が学習点 `inducing[a]`）。`K_mm` はそのブロックの誘導点の行を読む。モデルはブロックを渡されたまま持つ（所有ごと渡した表はコピーせず、借用した表は 1 回コピーする）。予測の `cross` は、誘導点（`inducing()` の順。`OnlineSgpr` では `inducing_points()` が返す `PointId` の順で、削除してもずれない）からクエリへの `m × q` のブロックで、`square` は上と同じ。`FreeInducing` は座標を動かすので、距離のモデルは誘導点を動かさない。`into_online` はブロックを持ったまま変換する。`insert` はスロットごとに、誘導点から新しい点への `m × 1` の二乗距離を受け取る。`insert_inducing` は学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を受け取って、持っている組と照らして検査する。誘導点である点は、`delete_inducing` で外すまで `delete` できない。factor は、座標のモデルが `n · d` 個の座標から計算する組を、与えられた `d · n · m` 個の値から読む。そのため ARD のスロットでは座標の factor より時間がかかる。勾配と予測は座標以下である（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{
@@ -614,7 +614,7 @@ fn main() -> Result<(), GprError> {
         .map_err(|(_, e)| e)?;
     assert_eq!((svgp.inducing(), svgp.slots()), (&[0, 2][..], vec![DistanceSlot::Scalar(image)]));
     let _ = svgp.to_kernel();
-    let dir = std::env::temp_dir().join("gprx-readme-distance-svgp");
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-svgp-ja-{}", std::process::id()));
     svgp.save(&dir)?;
     let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
     assert_eq!((loaded.n(), loaded.inducing()), (4, &[0, 2][..]));
@@ -623,14 +623,16 @@ fn main() -> Result<(), GprError> {
         return Err(GprError::EmptyInput);
     };
     let _ = loaded.predict([slot.borrow(&cross_z)], 2)?;
+    let _ = std::fs::remove_dir_all(&dir);
     let online = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
         .with_optimizer(Fixed)
         .factor([image.from_vec(train_z)], 4, &y, &[0, 2])
         .map_err(|(_, e)| e)?
         .into_online();
-    let dir = std::env::temp_dir().join("gprx-readme-distance-online-sgpr");
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-online-sgpr-ja-{}", std::process::id()));
     online.save(&dir)?;
     let _ = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 ```
@@ -812,7 +814,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `FORMAT_VERSION` は `1`。`RESERVED_PREFIX` は `"gprx."`。呼び出し側の `persist_id` はこの接頭辞を使わない。
 
-`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` は座標のモデルのディレクトリを読み込む。供給された距離のモデルのディレクトリは `LoadedDistanceGpr::<C>::load`、`LoadedDistanceSgpr::<C>::load`、`LoadedDistanceSvgp::<C>::load` が読む（下）。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
+`LoadedGpr::load(dir, registry)`、`LoadedSgpr::load`、`LoadedSvgp::load` は座標のモデルのディレクトリを読み込む。与えられた二乗距離のモデルのディレクトリは `LoadedDistanceGpr::<C>::load`、`LoadedDistanceSgpr::<C>::load`、`LoadedDistanceSvgp::<C>::load` が読む（下）。`PersistRegistry::new` は空。組み込みの登録は不要。読み込む前に、自作のカーネルか変換を登録する。
 
 - `register_kernel`
 - `register_unfitted_input`、`register_fitted_input`
@@ -833,7 +835,7 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let dir = std::env::temp_dir().join("gprx-readme-save");
+    let dir = std::env::temp_dir().join(format!("gprx-readme-save-ja-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
     assert_eq!(FORMAT_VERSION, 1);
@@ -852,7 +854,7 @@ fn main() -> Result<(), gprx::GprError> {
     };
     let mut model = model.with_optimizer(Lbfgs::new());
     model.refit()?;
-    let factor_dir = std::env::temp_dir().join("gprx-readme-factor");
+    let factor_dir = std::env::temp_dir().join(format!("gprx-readme-factor-ja-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&factor_dir);
     model.save_with_factor(&factor_dir)?;
     let _ = pred.mean[0];
@@ -867,7 +869,7 @@ fn main() -> Result<(), gprx::GprError> {
     let sparse = gprx::Sgpr::new(kernel.clone(), likelihood.clone())
         .fit(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
-    let sparse_dir = std::env::temp_dir().join("gprx-readme-sgpr");
+    let sparse_dir = std::env::temp_dir().join(format!("gprx-readme-sgpr-ja-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sparse_dir);
     sparse.save(&sparse_dir)?;
     let loaded = LoadedSgpr::load(&sparse_dir, &PersistRegistry::new())?;
@@ -887,7 +889,7 @@ fn main() -> Result<(), gprx::GprError> {
     let svgp = gprx::Svgp::new(kernel, likelihood)
         .factor(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
-    let svgp_dir = std::env::temp_dir().join("gprx-readme-svgp");
+    let svgp_dir = std::env::temp_dir().join(format!("gprx-readme-svgp-ja-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&svgp_dir);
     svgp.save(&svgp_dir)?;
     let loaded = LoadedSvgp::load(&svgp_dir, &PersistRegistry::new())?;
@@ -903,7 +905,7 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-供給された距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-供給された距離のモデル)。
+与えられた二乗距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-与えられた二乗距離のモデル)。
 
 ```rust
 use gprx::kernel::{
@@ -924,7 +926,7 @@ fn scalar(slots: &[DistanceSlot]) -> Result<ScalarDistance, GprError> {
 
 fn main() -> Result<(), GprError> {
     let registry = PersistRegistry::new();
-    let dir = std::env::temp_dir().join("gprx-readme-distance");
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-ja-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let image = ScalarDistance::new();
     // Three samples at 0, 1, 2: their 3 × 3 squared distances.
@@ -1022,7 +1024,7 @@ fn main() -> Result<(), GprError> {
 | `OptimizationNotConverged { iterations }` | ソルバが判定の前に止まった |
 | `InvalidHyperparameter { reason }` | カーネルパラメータが定義域の外 |
 | `ShapeMismatch { reason }` | 行列の形が違う |
-| `InvalidDistance { slot, dim, pair, reason }` | 与えた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
+| `InvalidDistance { slot, dim, pair, reason }` | 与えられた二乗距離が有限でない、負、または正方行列の対角が 0 でない・対称でない。`slot` は表の `slots()` での位置、`dim` は ARD の次元、`pair` は渡したブロックの `(row, col)`。分からないものは `None` |
 | `DistanceSlot { kind, slot }` | 供給がカーネルのスロットと合わない。`SlotErrorKind::NotRead`（カーネルが読まないスロット。保存前のスロットなど）、`Duplicate`、`Missing`。`slot` は、供給が 2 つか無いスロットの `slots()` での位置で、`NotRead` では `None` |
 | `LengthMismatch { reason }` | スライスの長さが違う |
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
