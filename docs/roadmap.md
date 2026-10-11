@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) is done. D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) is open, D2-1 first. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) follows D2.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) is next: its row is set after Grill on #491.
 
 ## Dependencies
 
@@ -260,11 +260,11 @@ The decision for each item is on the Issue.
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| D2-1 | Task | `ScalarDistance` without `Default`; `Hash` on the distance handles | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
-| D2-2 | Task | Online SGPR inducing points held as `PointId`; the sparse views typed by `Held` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
-| D2-3 | Task | Persist memory: scalar saves streamed, sparse loads borrow their blocks (an `f32` load keeps its `f64` copy: checked, needed) | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
-| D2-4 | Docs | README code blocks as doctests; Japanese terms made consistent | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
-| D2-5 | Task | `tests/alloc.rs` as its own release CI job | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
+| D2-1 | Task | `ScalarDistance` without `Default`; `Hash` on the distance handles | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | done |
+| D2-2 | Task | Online SGPR inducing points held as `PointId`; the sparse views typed by `Held` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | done |
+| D2-3 | Task | Persist memory: scalar saves streamed, sparse loads borrow their blocks (an `f32` load keeps its `f64` copy: checked, needed); a save's bytes pinned in `tests/alloc.rs` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | done |
+| D2-4 | Docs | README code blocks as doctests; Japanese terms made consistent | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | done |
+| D2-5 | Task | `tests/alloc.rs` as its own release CI job | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | done |
 
 ## Intentionally out of scope
 
