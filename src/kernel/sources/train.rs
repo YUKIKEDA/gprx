@@ -220,21 +220,26 @@ impl<T: KernelScalar> Default for TrainSources<T> {
 /// runs; an ARD slot is one run, borrowed when it is stored packed and a
 /// packed copy when it is stored dense or as rows.
 pub(crate) enum PackedRuns<'a, T: Clone> {
-    /// The lower triangle of a square, column by column.
-    Columns(Vec<&'a [T]>),
+    /// The lower triangle of the first `n` columns of a column-major
+    /// `square` whose columns are `cap` long, column by column: column
+    /// `col` is rows `col..n` ([`lower_column`]). A save slices each run
+    /// as it writes it, so the `n` columns need no list.
+    Columns {
+        /// The square.
+        square: &'a [T],
+        /// The columns, and the rows of each.
+        n: usize,
+        /// The length of a column of `square`.
+        cap: usize,
+    },
     /// Every value in one run.
     Whole(Cow<'a, [T]>),
 }
 
-impl<T: Clone> PackedRuns<'_, T> {
-    /// The runs, in order.
-    pub(crate) fn runs(&self) -> impl Iterator<Item = &[T]> {
-        let (columns, whole) = match self {
-            Self::Columns(runs) => (&runs[..], None),
-            Self::Whole(all) => (&[][..], Some(all.as_ref())),
-        };
-        columns.iter().copied().chain(whole)
-    }
+/// The values of column `col` of [`PackedRuns::Columns`] in its square:
+/// rows `col..n` of a column `cap` long.
+pub(crate) fn lower_column(col: usize, n: usize, cap: usize) -> std::ops::Range<usize> {
+    col * cap + col..col * cap + n
 }
 
 impl<T: KernelScalar> TrainSources<T> {
@@ -566,11 +571,11 @@ impl<T: KernelScalar> TrainSources<T> {
         if let Some((_, square)) = self.scalar.iter().find(|(id, _)| *id == slot) {
             // The column runs of the square, read in place: a save writes
             // them one after another, with no packed copy.
-            return Some(PackedRuns::Columns(
-                (0..n)
-                    .map(|col| &square[col * cap + col..col * cap + n])
-                    .collect(),
-            ));
+            return Some(PackedRuns::Columns {
+                square: &square[..],
+                n,
+                cap,
+            });
         }
         self.ard
             .iter()
