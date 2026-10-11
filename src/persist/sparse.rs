@@ -158,7 +158,7 @@ fn write_sparse<P: GpScalar, K: ModelKernel>(
     for (name, shape, values) in &d2 {
         tensors.push((name.as_str(), shape.clone(), values));
     }
-    write_f64_tensors(dir, &tensors, &[])?;
+    write_f64_tensors(dir, &tensors, Vec::new())?;
     super::write_config(dir, &json)
 }
 

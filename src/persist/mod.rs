@@ -60,7 +60,9 @@ use std::path::Path;
 use crate::error::GprError;
 use crate::error::PersistErrorKind;
 use crate::gpr::{FittedGpr, GprCore, OnlineGpr, Policies};
-use crate::kernel::{DistanceSlot, KernelSpec, ModelKernel, ModelKernelParts, SourceStore};
+use crate::kernel::{
+    DistanceSlot, KernelSpec, ModelKernel, ModelKernelParts, PackedRuns, SourceStore,
+};
 use crate::optimizer::Fixed;
 use crate::precision::GpScalar;
 use crate::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
@@ -74,7 +76,7 @@ use config::{
 };
 use kernel::KernelJson;
 use tensors::{
-    FactorBytes, RawTensor, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes,
+    ByteRuns, FactorBytes, RawTensor, pack_lower, read_matrix, read_scalars, read_xy, scalar_bytes,
     write_tensors,
 };
 
@@ -408,7 +410,7 @@ type SavedScalar<P> = <<P as crate::precision::ModelPrecision>::Sources as Sourc
 struct KernelSave<'a, T: Clone> {
     kernel: KernelJson,
     distance: Option<DistanceJson>,
-    d2: Vec<(String, Vec<usize>, crate::kernel::PackedRuns<'a, T>)>,
+    d2: Vec<(String, Vec<usize>, PackedRuns<'a, T>)>,
 }
 
 impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
@@ -420,7 +422,15 @@ impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
                 name: name.as_str(),
                 dtype: <T as ScalarOps>::DTYPE,
                 shape: shape.clone(),
-                runs: values.runs().map(scalar_bytes).collect(),
+                runs: match values {
+                    PackedRuns::Columns { square, n, cap } => ByteRuns::Lower {
+                        square: scalar_bytes(square),
+                        n: *n,
+                        cap: *cap,
+                        width: std::mem::size_of::<T>(),
+                    },
+                    PackedRuns::Whole(all) => ByteRuns::List(vec![scalar_bytes(all)]),
+                },
             })
             .collect()
     }
@@ -536,7 +546,7 @@ fn save_exact(dir: &Path, save: ExactSave<'_>) -> Result<(), GprError> {
         alpha_dtype: packed.alpha_dtype,
         alpha: packed.alpha.as_slice(),
     });
-    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs, &save.d2)?;
+    write_tensors(dir, save.x, save.y, save.n, save.d, factor_refs, save.d2)?;
     write_config(dir, &json)
 }
 

@@ -174,14 +174,49 @@ pub(super) struct RawTensor<'a> {
     pub name: &'a str,
     pub dtype: Dtype,
     pub shape: Vec<usize>,
-    pub runs: Vec<&'a [u8]>,
+    pub runs: ByteRuns<'a>,
+}
+
+/// The bytes of a tensor as runs that follow one another.
+pub(super) enum ByteRuns<'a> {
+    /// The runs, listed.
+    List(Vec<&'a [u8]>),
+    /// The lower triangle of a column-major square of `width`-byte values,
+    /// column by column, as [`crate::kernel::PackedRuns::Columns`]: the
+    /// runs are sliced as they are written, so the `n` columns need no
+    /// list.
+    Lower {
+        square: &'a [u8],
+        n: usize,
+        cap: usize,
+        width: usize,
+    },
+}
+
+impl<'a> ByteRuns<'a> {
+    /// The runs, in order.
+    fn iter(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
+        let (list, square, n, cap, width) = match self {
+            Self::List(list) => (&list[..], &[][..], 0, 0, 0),
+            Self::Lower {
+                square,
+                n,
+                cap,
+                width,
+            } => (&[][..], *square, *n, *cap, *width),
+        };
+        list.iter().copied().chain((0..n).map(move |col| {
+            let values = crate::kernel::lower_column(col, n, cap);
+            &square[values.start * width..values.end * width]
+        }))
+    }
 }
 
 impl<'a> RawTensor<'a> {
-    fn body(&self) -> Result<(&'a str, Body<'a>), GprError> {
+    fn into_body(self) -> Result<(&'a str, Body<'a>), GprError> {
         Ok((
             self.name,
-            Body::new(self.name, self.dtype, self.shape.clone(), self.runs.clone())?,
+            Body::new(self.name, self.dtype, self.shape, self.runs)?,
         ))
     }
 }
@@ -192,7 +227,7 @@ impl<'a> RawTensor<'a> {
 pub(super) struct Body<'a> {
     dtype: Dtype,
     shape: Vec<usize>,
-    runs: Vec<&'a [u8]>,
+    runs: ByteRuns<'a>,
     len: usize,
 }
 
@@ -207,7 +242,7 @@ impl<'a> Body<'a> {
         name: &str,
         dtype: Dtype,
         shape: Vec<usize>,
-        runs: Vec<&'a [u8]>,
+        runs: ByteRuns<'a>,
     ) -> Result<Self, GprError> {
         let len = runs
             .iter()
@@ -236,7 +271,7 @@ impl<'a> Body<'a> {
         Self {
             dtype: view.dtype(),
             shape: view.shape().to_vec(),
-            runs: vec![view.data()],
+            runs: ByteRuns::List(vec![view.data()]),
             len: view.data().len(),
         }
     }
@@ -275,7 +310,7 @@ fn write_views(dir: &Path, mut views: Vec<(&str, Body<'_>)>) -> Result<(), GprEr
         let mut out = std::io::BufWriter::new(file);
         out.write_all(&header).map_err(io)?;
         for (_, body) in &views {
-            for run in &body.runs {
+            for run in body.runs.iter() {
                 out.write_all(run).map_err(io)?;
             }
         }
@@ -330,7 +365,7 @@ pub(super) fn write_tensors(
     n: usize,
     d: usize,
     factor: Option<FactorBytes<'_>>,
-    extra: &[RawTensor<'_>],
+    extra: Vec<RawTensor<'_>>,
 ) -> Result<(), GprError> {
     if x.len() != n * d {
         return Err(persist_err(
@@ -401,7 +436,7 @@ pub(super) fn write_tensors(
     };
     let mut views = views;
     for tensor in extra {
-        views.push(tensor.body()?);
+        views.push(tensor.into_body()?);
     }
     write_views(dir, views)
 }
@@ -599,7 +634,7 @@ unsafe fn f64_slice_unchecked(bytes: &[u8]) -> &[f64] {
 pub(super) fn write_f64_tensors(
     dir: &Path,
     tensors: &[(&str, Vec<usize>, &[f64])],
-    extra: &[RawTensor<'_>],
+    extra: Vec<RawTensor<'_>>,
 ) -> Result<(), GprError> {
     let mut views = Vec::with_capacity(tensors.len());
     for (name, shape, values) in tensors {
@@ -617,7 +652,7 @@ pub(super) fn write_f64_tensors(
         views.push((*name, Body::of_view(&view)));
     }
     for tensor in extra {
-        views.push(tensor.body()?);
+        views.push(tensor.into_body()?);
     }
     write_views(dir, views)
 }
@@ -653,7 +688,7 @@ pub(super) fn read_f64(
 mod tests {
     use safetensors::tensor::{Dtype, TensorView};
 
-    use super::{Body, TENSOR_FILE, TensorFile, write_views};
+    use super::{Body, ByteRuns, TENSOR_FILE, TensorFile, scalar_bytes, write_views};
     use crate::error::{GprError, PersistErrorKind};
 
     fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -690,7 +725,7 @@ mod tests {
         let bodies = vec![
             (
                 "y",
-                Body::new("y", Dtype::F64, vec![3], vec![y0, y1]).expect("y"),
+                Body::new("y", Dtype::F64, vec![3], ByteRuns::List(vec![y0, y1])).expect("y"),
             ),
             ("s", Body::of_view(&views()[1].1)),
             ("x", Body::of_view(&views()[2].1)),
@@ -702,18 +737,37 @@ mod tests {
     }
 
     #[test]
+    fn lower_runs_are_the_packed_triangle_in_bytes() {
+        // A 3 × 3 square in columns of 4 `f32` values: the fourth row is
+        // room for a point, not a value.
+        let square: [f32; 12] = [
+            0.0, 1.0, 2.0, -1.0, 1.0, 0.0, 3.0, -1.0, 2.0, 3.0, 0.0, -1.0,
+        ];
+        let runs = ByteRuns::Lower {
+            square: scalar_bytes(&square),
+            n: 3,
+            cap: 4,
+            width: std::mem::size_of::<f32>(),
+        };
+        let written: Vec<u8> = runs.iter().flatten().copied().collect();
+        let packed = [0.0_f32, 1.0, 2.0, 0.0, 3.0, 0.0];
+        assert_eq!(written, scalar_bytes(&packed));
+        assert!(Body::new("t", Dtype::F32, vec![6], runs).is_ok());
+    }
+
+    #[test]
     fn runs_that_miss_the_shape_are_refused() {
         let a = bytes_of(&[1.0, 2.0]);
         assert!(matches!(
-            Body::new("t", Dtype::F64, vec![3], vec![&a]),
+            Body::new("t", Dtype::F64, vec![3], ByteRuns::List(vec![&a])),
             Err(GprError::PersistFailed {
                 kind: PersistErrorKind::Tensor,
                 ..
             })
         ));
         // An empty tensor is its empty runs, or none.
-        assert!(Body::new("e", Dtype::F64, vec![0], vec![]).is_ok());
-        assert!(Body::new("e", Dtype::F64, vec![0], vec![&[]]).is_ok());
+        assert!(Body::new("e", Dtype::F64, vec![0], ByteRuns::List(vec![])).is_ok());
+        assert!(Body::new("e", Dtype::F64, vec![0], ByteRuns::List(vec![&[]])).is_ok());
     }
 
     #[test]

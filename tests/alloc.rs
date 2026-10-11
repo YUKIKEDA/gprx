@@ -1448,6 +1448,89 @@ fn a_covariance_on_supplied_distances_copies_no_query_square() {
     }
 }
 
+/// Bytes one `save` of an Exact model may allocate at `n = 1024`: the
+/// header, the JSON config, and the paths, whatever `n`. A save streams each
+/// tensor from the model's own buffers (a scalar slot's square as its
+/// column runs, sliced as they are written) after a header built from the
+/// tensor shapes. It allocated the whole file (8.4 MB for a scalar slot at
+/// `n = 1024`) while `safetensors::serialize` built it (#503 item 13), and
+/// a list of the `n` column runs after that. Do not raise without an Issue.
+const MAX_SAVE_BYTES: usize = 16 * 1024;
+
+/// Bytes a `save` at `n = 1024` may allocate beyond one at `n = 64`: the
+/// wider numbers in the header and the config (each growth of a buffer
+/// counts its new size), nothing per point. One `&[u8]` per point would be
+/// 15 KB more.
+const SAVE_BYTES_GROWTH_SLACK: usize = 1024;
+
+/// The bytes of one `save` of an Exact model on `n` points in two
+/// dimensions, by model (coordinates, a scalar slot, an ARD slot), after a
+/// save into the same directory.
+fn save_bytes(n: usize) -> Vec<(&'static str, usize)> {
+    const DIMS: usize = 2;
+    let x = fill_column_major(n, DIMS, SEED);
+    let mut rng = seeded_rng(SEED ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let y: Vec<f64> = (0..n).map(|_| open_unit(&mut rng)).collect();
+    let square = |k: usize| -> Vec<f64> {
+        (0..n)
+            .flat_map(|j| (0..n).map(move |i| (i, j)))
+            .map(|(i, j)| (x[i + k * n] - x[j + k * n]).powi(2))
+            .collect()
+    };
+    let squares: Vec<Vec<f64>> = (0..DIMS).map(square).collect();
+    let sum: Vec<f64> = (0..n * n)
+        .map(|at| squares[0][at] + squares[1][at])
+        .collect();
+    let refs: Vec<&[f64]> = squares.iter().map(Vec::as_slice).collect();
+    let lik = || GaussianLikelihood::new(NOISE).expect("noise");
+    let dir = std::env::temp_dir().join(format!("gprx-alloc-save-{}", std::process::id()));
+    let counted = |save: &dyn Fn() -> Result<(), GprError>| {
+        save().expect("warmup save");
+        let mut result = Ok(());
+        let bytes = bytes_in(|| result = save());
+        result.expect("counted save");
+        bytes
+    };
+    let coordinate = Gpr::new(KernelSpec::from(RbfKernel::new(ELL).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor(&x, n, DIMS, &y)
+        .expect("factor");
+    let image = ScalarDistance::new();
+    let scalar = Gpr::new(image.kernel(RbfKernel::new(ELL).expect("ell")), lik())
+        .with_optimizer(Fixed)
+        .factor([image.borrow(&sum)], n, &y)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[ELL, 2.0 * ELL]).expect("ell"));
+    let ard = Gpr::new(ard, lik())
+        .with_optimizer(Fixed)
+        .factor([bands.borrow(&refs)], n, &y)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let out = vec![
+        ("coordinate_rbf", counted(&|| coordinate.save(&dir))),
+        ("supplied_rbf", counted(&|| scalar.save(&dir))),
+        ("supplied_rbf_ard", counted(&|| ard.save(&dir))),
+    ];
+    std::fs::remove_dir_all(&dir).expect("remove the save directory");
+    out
+}
+
+fn save_bytes_do_not_grow_with_n() {
+    ensure_one_rayon_worker();
+    for ((label, small), (_, large)) in save_bytes(64).into_iter().zip(save_bytes(1024)) {
+        eprintln!("save/{label}: bytes n=64 {small}, n=1024 {large}, cap {MAX_SAVE_BYTES}");
+        assert!(
+            large <= MAX_SAVE_BYTES,
+            "save/{label}: {large} bytes at n=1024, cap={MAX_SAVE_BYTES}; do not raise it without an Issue"
+        );
+        assert!(
+            large <= small + SAVE_BYTES_GROWTH_SLACK,
+            "save/{label}: {large} bytes at n=1024 and {small} at n=64: a save allocates per point"
+        );
+    }
+}
+
 /// The checks `$name`, each paired with its name.
 macro_rules! checks {
     ($($name:ident),* $(,)?) => {
@@ -1458,7 +1541,7 @@ macro_rules! checks {
 /// Every check of this binary, in the order [`main`] runs them. A new
 /// check goes in this list: without the harness `#[test]` runs nothing, and
 /// a check left out is dead code, which `clippy -D warnings` refuses.
-const CHECKS: [(&str, fn()); 19] = checks![
+const CHECKS: [(&str, fn()); 20] = checks![
     mll_and_grad_allocs_after_workspace,
     fast_approx_mll_and_grad_allocs_after_workspace,
     predict_100_allocs_after_workspace,
@@ -1477,6 +1560,7 @@ const CHECKS: [(&str, fn()); 19] = checks![
     supplied_distances_allocate_no_more_than_coordinates,
     svgp_gradient_with_points_allocates_no_more_than_coordinates,
     a_covariance_on_supplied_distances_copies_no_query_square,
+    save_bytes_do_not_grow_with_n,
     arguments_select_as_libtest_does,
 ];
 

@@ -420,12 +420,12 @@ fn packed_runs_read_back_the_packed_values() {
                 store.reserve_point().expect("room");
             }
             let joined = |slot: DistanceSlot| -> Vec<f64> {
-                store
-                    .packed(slot.id())
-                    .expect("slot")
-                    .runs()
-                    .flat_map(|run| run.iter().copied())
-                    .collect()
+                match store.packed(slot.id()).expect("slot") {
+                    PackedRuns::Columns { square, n, cap } => (0..n)
+                        .flat_map(|col| square[lower_column(col, n, cap)].iter().copied())
+                        .collect(),
+                    PackedRuns::Whole(all) => all.into_owned(),
+                }
             };
             assert_eq!(
                 joined(slots[0]),
