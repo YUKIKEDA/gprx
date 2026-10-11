@@ -45,7 +45,7 @@ pub use compiled::CompiledKernel;
 pub(crate) use compiled::CrossViews;
 pub(crate) use compiled::ensure_nested_levels;
 pub(crate) use compiled::gram::GramInputs;
-pub(crate) use compiled::supplied::{NO_SLOTS, RectSlots, SquareSlots, unbound};
+pub(crate) use compiled::supplied::unbound;
 pub(crate) use compiled::weighted::{DiagAccum, WeightedWalk};
 pub use constant::ConstantKernel;
 pub(crate) use dist::ArdSqDiffBuf;

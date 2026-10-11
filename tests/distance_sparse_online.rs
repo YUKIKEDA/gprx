@@ -318,6 +318,7 @@ macro_rules! check {
         assert_eq!($online.inducing_points().collect::<Vec<_>>(), want);
         assert_eq!($online.n(), live.points.len());
         assert_eq!($online.m(), live.inducing.len());
+        assert_eq!($online.inducing_ids().len(), live.inducing.len());
         let (kernel, dims) = &$coords;
         let mut reference = Sgpr::new(kernel.clone(), lik())
             .with_precision::<$p>()

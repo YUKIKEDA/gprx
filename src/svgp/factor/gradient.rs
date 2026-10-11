@@ -138,18 +138,24 @@ where
         xz,
         ks,
     } = bufs;
-    let supply = core.supply().map(crate::sparse::SparseSupply::exact);
+    let supply = <K::Supply as crate::kernel::SupplyViews>::map_held(
+        core.supply_held(),
+        crate::sparse::SparseSupply::exact,
+    );
     // Every point in order reads the stored blocks; a batch reads its rows.
-    let xz: Option<&BlockStore<f64>> = supply.map(|supply| {
-        if b == n && batch.iter().enumerate().all(|(i, &row)| i == row) {
+    let in_order = b == n && batch.iter().enumerate().all(|(i, &row)| i == row);
+    let xz_held = <K::Supply as crate::kernel::SupplyViews>::map_held(supply.clone(), |supply| {
+        if in_order {
             &supply.xz
         } else {
             supply.xz.rows_into(batch, xz);
             &*xz
         }
     });
-    let xz = crate::sparse::rects_of::<f64, K::Supply>(xz);
-    let zz = crate::sparse::squares_of::<f64, K::Supply>(supply.map(|supply| &supply.zz));
+    let xz = crate::sparse::rects_of::<f64, K::Supply>(xz_held);
+    let zz = crate::sparse::squares_of::<f64, K::Supply>(
+        <K::Supply as crate::kernel::SupplyViews>::map_held(supply, |supply| &supply.zz),
+    );
     let mut k_mm_l = view(k_mm_l, m, m);
     for j in 0..m {
         for i in j..m {

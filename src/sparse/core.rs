@@ -92,24 +92,20 @@ pub(crate) struct PersistedSparse<U: Supply = NoSupply> {
     pub(crate) supplied: <U as SupplyViews>::Held<SparseSupplied>,
 }
 
-/// The squares `store` holds as kind `U` reads them: none for a
-/// coordinate kernel, which has no store.
-pub(crate) fn squares_of<T: KernelScalar, U: Supply>(
-    store: Option<&BlockStore<T>>,
-) -> U::Squares<'_, T> {
-    U::squares(
-        store.map_or(&crate::kernel::NO_SLOTS as &dyn SquareSlots<T>, |store| {
-            store
-        }),
-    )
+/// The squares `store` holds as kind `U` reads them: a coordinate kernel
+/// holds no store and reads none.
+pub(crate) fn squares_of<'a, T: KernelScalar, U: Supply>(
+    store: <U as SupplyViews>::Held<&'a BlockStore<T>>,
+) -> U::Squares<'a, T> {
+    U::held_squares(store)
 }
 
-/// The blocks `store` holds as kind `U` reads them: none for a coordinate
-/// kernel, which has no store.
-pub(crate) fn rects_of<T: KernelScalar, U: Supply>(
-    store: Option<&BlockStore<T>>,
-) -> U::Rects<'_, T> {
-    U::rects(store.map_or(&crate::kernel::NO_SLOTS as &dyn RectSlots<T>, |store| store))
+/// The blocks `store` holds as kind `U` reads them: a coordinate kernel
+/// holds no store and reads none.
+pub(crate) fn rects_of<'a, T: KernelScalar, U: Supply>(
+    store: <U as SupplyViews>::Held<&'a BlockStore<T>>,
+) -> U::Rects<'a, T> {
+    U::held_rects(store)
 }
 
 /// What a sparse model of a kernel on supplied distances holds beside its
@@ -127,20 +123,28 @@ pub(crate) struct SparseSupplied {
 /// read: `x` (`n × d`, column-major; `d` is `0` for a kernel on supplied
 /// distances alone), `y`, the inducing points `z` (`m × d`), and the
 /// supplied `d²` (none for a coordinate kernel).
-#[derive(Clone, Copy)]
-pub(crate) struct SparseData<'a> {
+pub(crate) struct SparseData<'a, U: Supply> {
     pub(crate) x: &'a [f64],
     pub(crate) n: usize,
     pub(crate) d: usize,
     pub(crate) y: &'a [f64],
     pub(crate) z: &'a [f64],
     pub(crate) m: usize,
-    /// The supply of a kernel on supplied distances; `None` for a
-    /// coordinate kernel.
-    pub(crate) supply: Option<&'a SparseSupply>,
+    /// The supply of a kernel on supplied distances; a coordinate kernel
+    /// has none.
+    pub(crate) supply: <U as SupplyViews>::Held<&'a SparseSupply>,
 }
 
-impl SparseData<'_> {
+impl<U: Supply> Clone for SparseData<'_, U> {
+    fn clone(&self) -> Self {
+        Self {
+            supply: self.supply.clone(),
+            ..*self
+        }
+    }
+}
+
+impl<U: Supply> SparseData<'_, U> {
     /// Checks the shapes and values.
     ///
     /// # Errors
@@ -149,7 +153,7 @@ impl SparseData<'_> {
     /// no feature (`d = 0`, a kernel on supplied distances alone), only
     /// `n`, `m`, and `y` are checked.
     pub(crate) fn validate(&self) -> Result<(), GprError> {
-        if self.d == 0 && self.supply.is_some() {
+        if self.d == 0 && U::held(&self.supply).is_some() {
             crate::data::require_nonempty(self.n)?;
             crate::data::require_nonempty(self.m)?;
             crate::data::require_count(self.x.len(), 0, "feature values")?;
@@ -167,7 +171,7 @@ impl SparseData<'_> {
     ///
     /// The errors of [`validate_inducing`]; with no feature, only `m`.
     pub(crate) fn validate_inducing(&self) -> Result<(), GprError> {
-        if self.d == 0 && self.supply.is_some() {
+        if self.d == 0 && U::held(&self.supply).is_some() {
             crate::data::require_nonempty(self.m)?;
             return crate::data::require_count(self.z.len(), 0, "inducing feature values");
         }
@@ -197,12 +201,16 @@ impl<T: KernelScalar, U: Supply> Copy for SparseSets<'_, T, U> {}
 impl<'a, T: KernelScalar, U: Supply> SparseSets<'a, T, U> {
     /// The sets `x` and `z` with the supply `at`; a coordinate kernel has
     /// none.
-    pub(crate) fn new(x: MatRef<'a, T>, z: MatRef<'a, T>, at: Option<&'a SupplyAt<T>>) -> Self {
+    pub(crate) fn new<'s: 'a>(
+        x: MatRef<'a, T>,
+        z: MatRef<'a, T>,
+        at: <U as SupplyViews>::Held<&'s SupplyAt<T>>,
+    ) -> Self {
         Self {
             x,
             z,
-            zz: squares_of::<T, U>(at.map(|at| &at.zz)),
-            xz: rects_of::<T, U>(at.map(|at| &at.xz)),
+            zz: U::shorter_squares(squares_of::<T, U>(U::map_held(at.clone(), |at| &at.zz))),
+            xz: U::shorter_rects(rects_of::<T, U>(U::map_held(at, |at| &at.xz))),
         }
     }
 
@@ -493,7 +501,7 @@ impl<U: Supply> SparseCore<U> {
     }
 
     /// The transformed training data and the supply.
-    pub(crate) fn data(&self) -> SparseData<'_> {
+    pub(crate) fn data(&self) -> SparseData<'_, U> {
         SparseData {
             x: &self.x_train,
             n: self.n,
@@ -501,7 +509,7 @@ impl<U: Supply> SparseCore<U> {
             y: &self.y_train,
             z: &self.z_train,
             m: self.m,
-            supply: self.supply(),
+            supply: self.supply_held(),
         }
     }
 
@@ -509,6 +517,12 @@ impl<U: Supply> SparseCore<U> {
     /// coordinate kernel.
     pub(crate) fn supply(&self) -> Option<&SparseSupply> {
         U::held(&self.supplied).map(|held| &held.supply)
+    }
+
+    /// The supplied `d²` of a kernel on supplied distances, as the kind
+    /// holds it: a coordinate kernel has none.
+    pub(crate) fn supply_held(&self) -> <U as SupplyViews>::Held<&SparseSupply> {
+        U::map_held(U::held_ref(&self.supplied), |held| &held.supply)
     }
 
     /// [`Self::supply`], to change.

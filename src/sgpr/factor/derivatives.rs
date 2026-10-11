@@ -307,11 +307,10 @@ where
     let sets = SparseSets::<P::Storage, K::Supply>::new(
         x,
         z,
-        model
-            .core
-            .supply()
-            .map(crate::sparse::SparseSupply::at)
-            .transpose()?,
+        <K::Supply as crate::kernel::SupplyViews>::try_map_held(
+            model.core.supply_held(),
+            crate::sparse::SparseSupply::at,
+        )?,
     );
     let adjoint = engine.adjoint();
     let n_kernel = model.core.kernel.num_params();
@@ -423,11 +422,10 @@ where
     let sets = SparseSets::<P::Storage, K::Supply>::new(
         x,
         z,
-        model
-            .core
-            .supply()
-            .map(crate::sparse::SparseSupply::at)
-            .transpose()?,
+        <K::Supply as crate::kernel::SupplyViews>::try_map_held(
+            model.core.supply_held(),
+            crate::sparse::SparseSupply::at,
+        )?,
     );
     let n_kernel = model.core.kernel.num_params();
     let n_theta = n_kernel + model.core.likelihood.num_params();
@@ -564,11 +562,10 @@ where
     let sets = SparseSets::<P::Storage, K::Supply>::new(
         x,
         z,
-        model
-            .core
-            .supply()
-            .map(crate::sparse::SparseSupply::at)
-            .transpose()?,
+        <K::Supply as crate::kernel::SupplyViews>::try_map_held(
+            model.core.supply_held(),
+            crate::sparse::SparseSupply::at,
+        )?,
     );
     let m = model.core.m;
     let n = model.core.n;
@@ -938,7 +935,7 @@ mod adjoint_tests {
         let mut ks = KernelScratch::new();
         for i in 0..model.core.kernel.num_params() {
             let sets =
-                SparseSets::<f64, crate::kernel::NoSupply>::new(xm.as_ref(), zm.as_ref(), None);
+                SparseSets::<f64, crate::kernel::NoSupply>::new(xm.as_ref(), zm.as_ref(), ());
             let var =
                 kernel_theta_var::<Accurate, f64, _>(&compiled, &mut ks, sets, 6, i).expect("var");
             let via_adjoint = adjoint.contract(var.d_kmm.as_ref(), var.d_kmn.as_ref(), var.d_kdiag);

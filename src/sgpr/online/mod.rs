@@ -160,6 +160,40 @@ pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
     ay: Vec<f64>,
     registry: PointRegistry,
     inducing: InducingRegistry,
+    /// The [`PointId`] of each inducing point of a model on supplied
+    /// distances (in inducing order): ids do not move when a delete shifts
+    /// the rows of the training blocks. A coordinate model has none.
+    pub(super) inducing_points: <U as SupplyViews>::Held<Vec<PointId>>,
+}
+
+/// The [`PointId`]s of the inducing points of `core` (a model on supplied
+/// distances) among the training points `registry` names.
+///
+/// # Errors
+///
+/// Returns [`GprError::PersistFailed`] if an inducing index is not a row
+/// of `registry`.
+fn inducing_points_of<S: Supply>(
+    core: &SparseCore<S>,
+    registry: &PointRegistry,
+) -> Result<<S as SupplyViews>::Held<Vec<PointId>>, GprError> {
+    S::try_map_held(core.supply_held(), |supply| {
+        supply
+            .inducing
+            .iter()
+            .map(|&row| {
+                registry.ids().get(row).copied().ok_or_else(|| {
+                    crate::persist::persist_err(
+                        PersistErrorKind::Config,
+                        format!(
+                            "inducing index {row} is not one of the {} points",
+                            registry.len()
+                        ),
+                    )
+                })
+            })
+            .collect()
+    })
 }
 
 impl<O, P, K: ModelKernel> OnlineSgpr<O, P, K>
@@ -203,6 +237,8 @@ where
                 ),
             ));
         }
+        online.state.inducing_points =
+            inducing_points_of::<K::Supply>(&online.state.core, &points)?;
         online.state.registry = points;
         online.state.inducing = inducing;
         Ok(online)
@@ -212,6 +248,16 @@ where
         let registry = PointRegistry::from_count(fitted.core.n);
         let inducing = InducingRegistry::from_count(fitted.core.m);
         let ay = a_times_y(fitted.a.as_ref(), &fitted.core.y_train);
+        // A fresh registry names row `i` as id `i`, so each inducing row's
+        // id follows from the row itself: one id per row, none dropped.
+        let inducing_points =
+            <K::Supply as SupplyViews>::map_held(fitted.core.supply_held(), |supply| {
+                supply
+                    .inducing
+                    .iter()
+                    .map(|&row| <PointId as RegistryId>::from_raw(row as u64))
+                    .collect()
+            });
         Self {
             state: OnlineState {
                 ay,
@@ -225,6 +271,7 @@ where
                 a_frobenius2: fitted.a_frobenius2,
                 registry,
                 inducing,
+                inducing_points,
             },
             scratch: fitted.scratch,
             optimizer: fitted.optimizer,
@@ -870,6 +917,17 @@ where
             });
         }
         let idx = self.state.inducing.index_of(id)?;
+        // One id per inducing point: checked before the model changes.
+        if <K::Supply as SupplyViews>::held(&self.state.inducing_points)
+            .is_some_and(|points| points.len() != self.state.core.m)
+        {
+            return Err(GprError::InvalidConfig {
+                reason:
+                    "the model's inducing point ids do not match its inducing points (an internal \
+                         error)"
+                        .to_owned(),
+            });
+        }
         self.atomically(|model| model.delete_inducing_at(idx))
     }
 
@@ -901,6 +959,11 @@ where
             }
         })?;
         self.state.inducing.remove_at(idx);
+        if let Some(points) = <K::Supply as SupplyViews>::held_mut(&mut self.state.inducing_points)
+            && idx < points.len()
+        {
+            points.remove(idx);
+        }
         Ok(())
     }
 

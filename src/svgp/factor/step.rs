@@ -89,15 +89,17 @@ where
         core.kernel.set_params_in_place(new_k, prev_k)?;
         let factored = (|| {
             step.compiled_storage.set_params_in_place(new_k, prev_k)?;
-            let at = core
-                .supply()
-                .map(crate::sparse::SparseSupply::at::<P::Storage>)
-                .transpose()?;
+            let at = <K::Supply as crate::kernel::SupplyViews>::try_map_held(
+                core.supply_held(),
+                crate::sparse::SparseSupply::at::<P::Storage>,
+            )?;
             step.ks.gram::<M, K::Supply>(
                 &step.compiled_storage,
                 GramInputs::supplied(
                     step.z.as_ref(),
-                    crate::sparse::squares_of::<P::Storage, K::Supply>(at.map(|at| &at.zz)),
+                    crate::sparse::squares_of::<P::Storage, K::Supply>(
+                        <K::Supply as crate::kernel::SupplyViews>::map_held(at, |at| &at.zz),
+                    ),
                 ),
                 step.k_mm.as_mut(),
                 Triangle::Lower,

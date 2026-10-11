@@ -53,7 +53,7 @@ where
 pub(crate) fn assemble_svgp<M: crate::math::KernelMath, T, U: Supply>(
     kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     q: Option<(Vec<f64>, Mat<f64>)>,
     ks: &mut KernelScratch<T>,
 ) -> Result<SvgpState<T>, GprError>
@@ -61,11 +61,12 @@ where
     T: KernelScalar,
 {
     data.validate()?;
-    let k_mm = assemble_kmm::<M, T, U>(kernel, k_mm_jitter, data, ks)?;
+    let k_mm = assemble_kmm::<M, T, U>(kernel, k_mm_jitter, data.clone(), ks)?;
+    let m = data.m;
     let (a, k_diag) = assemble_data_terms::<M, T, U>(kernel, data, k_mm.as_ref(), ks)?;
     let (q_mean, q_l) = match q {
         Some((mean, l)) => (mean, l),
-        None => prior_q(data.m),
+        None => prior_q(m),
     };
     Ok(SvgpState::<T> {
         k_mm_l: k_mm,
@@ -81,7 +82,7 @@ where
 pub(crate) fn assemble_kmm<M: crate::math::KernelMath, T, U: Supply>(
     kernel: &KernelSpec<U>,
     k_mm_jitter: JitterPolicy,
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     ks: &mut KernelScratch<T>,
 ) -> Result<Mat<T>, GprError>
 where
@@ -93,16 +94,13 @@ where
     let z64 = pack_points(data.z, n_inducing, data.d);
     let mut z_cast = T::empty_cols();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
-    let at = data
-        .supply
-        .map(crate::sparse::SparseSupply::at::<T>)
-        .transpose()?;
+    let at = U::try_map_held(data.supply.clone(), crate::sparse::SparseSupply::at::<T>)?;
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M, U>(
         &compiled,
         GramInputs::supplied(
             z_mat,
-            crate::sparse::squares_of::<T, U>(at.map(|at| &at.zz)),
+            crate::sparse::squares_of::<T, U>(U::map_held(at, |at| &at.zz)),
         ),
         k_mm.as_mut(),
         Triangle::Lower,
@@ -121,7 +119,7 @@ where
 /// point: the part of the assembly that costs `O(n)`.
 pub(crate) fn assemble_data_terms<M: crate::math::KernelMath, T, U: Supply>(
     kernel: &KernelSpec<U>,
-    data: SparseData<'_>,
+    data: SparseData<'_, U>,
     k_mm_l: MatRef<'_, T>,
     ks: &mut KernelScratch<T>,
 ) -> Result<(Mat<T>, Vec<T>), GprError>
@@ -138,9 +136,7 @@ where
     let sets = SparseSets::<T, U>::new(
         x_mat,
         z_mat,
-        data.supply
-            .map(crate::sparse::SparseSupply::at::<T>)
-            .transpose()?,
+        U::try_map_held(data.supply.clone(), crate::sparse::SparseSupply::at::<T>)?,
     );
     // Rectangular whatever the values of `Z` and `X` (see the Sgpr VFE).
     let mut a = ks.cross_mn::<M, U>(&compiled, sets)?;
