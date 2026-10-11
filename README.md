@@ -599,7 +599,7 @@ fn main() -> Result<(), GprError> {
         .map_err(|(_, e)| e)?;
     assert_eq!((svgp.inducing(), svgp.slots()), (&[0, 2][..], vec![DistanceSlot::Scalar(image)]));
     let _ = svgp.to_kernel();
-    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-svgp-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-svgp-en-{}", std::process::id()));
     svgp.save(&dir)?;
     let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
     assert_eq!((loaded.n(), loaded.inducing()), (4, &[0, 2][..]));
@@ -614,7 +614,7 @@ fn main() -> Result<(), GprError> {
         .factor([image.from_vec(train_z)], 4, &y, &[0, 2])
         .map_err(|(_, e)| e)?
         .into_online();
-    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-online-sgpr-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-online-sgpr-en-{}", std::process::id()));
     online.save(&dir)?;
     let _ = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
     let _ = std::fs::remove_dir_all(&dir);
@@ -820,7 +820,7 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let dir = std::env::temp_dir().join(format!("gprx-readme-save-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gprx-readme-save-en-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     fitted.save(&dir)?;
     assert_eq!(FORMAT_VERSION, 1);
@@ -839,7 +839,7 @@ fn main() -> Result<(), gprx::GprError> {
     };
     let mut model = model.with_optimizer(Lbfgs::new());
     model.refit()?;
-    let factor_dir = std::env::temp_dir().join(format!("gprx-readme-factor-{}", std::process::id()));
+    let factor_dir = std::env::temp_dir().join(format!("gprx-readme-factor-en-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&factor_dir);
     model.save_with_factor(&factor_dir)?;
     let _ = pred.mean[0];
@@ -854,7 +854,7 @@ fn main() -> Result<(), gprx::GprError> {
     let sparse = gprx::Sgpr::new(kernel.clone(), likelihood.clone())
         .fit(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
-    let sparse_dir = std::env::temp_dir().join(format!("gprx-readme-sgpr-{}", std::process::id()));
+    let sparse_dir = std::env::temp_dir().join(format!("gprx-readme-sgpr-en-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&sparse_dir);
     sparse.save(&sparse_dir)?;
     let loaded = LoadedSgpr::load(&sparse_dir, &PersistRegistry::new())?;
@@ -874,7 +874,7 @@ fn main() -> Result<(), gprx::GprError> {
     let svgp = gprx::Svgp::new(kernel, likelihood)
         .factor(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
-    let svgp_dir = std::env::temp_dir().join(format!("gprx-readme-svgp-{}", std::process::id()));
+    let svgp_dir = std::env::temp_dir().join(format!("gprx-readme-svgp-en-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&svgp_dir);
     svgp.save(&svgp_dir)?;
     let loaded = LoadedSvgp::load(&svgp_dir, &PersistRegistry::new())?;
@@ -911,7 +911,7 @@ fn scalar(slots: &[DistanceSlot]) -> Result<ScalarDistance, GprError> {
 
 fn main() -> Result<(), GprError> {
     let registry = PersistRegistry::new();
-    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("gprx-readme-distance-en-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let image = ScalarDistance::new();
     // Three samples at 0, 1, 2: their 3 × 3 squared distances.
