@@ -261,10 +261,10 @@ The decision for each item is on the Issue.
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
 | D2-1 | Task | `ScalarDistance` without `Default`; `Hash` on the distance handles | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
-| D2-2 | Task | Online SGPR inducing points held as `PointId`; the sparse views typed by `Held` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-1 |
-| D2-3 | Task | Persist memory: no `f64` copy kept by an `f32` load, scalar saves streamed, no ARD copy on a sparse load | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-2 |
-| D2-4 | Docs | README code blocks as doctests; Japanese terms made consistent | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-3 |
-| D2-5 | Task | `tests/alloc.rs` as its own release CI job | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | Set after D2-4 |
+| D2-2 | Task | Online SGPR inducing points held as `PointId`; the sparse views typed by `Held` | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
+| D2-3 | Task | Persist memory: scalar saves streamed, sparse loads borrow their blocks (an `f32` load keeps its `f64` copy: checked, needed) | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
+| D2-4 | Docs | README code blocks as doctests; Japanese terms made consistent | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
+| D2-5 | Task | `tests/alloc.rs` as its own release CI job | [#503](https://github.com/YUKIKEDA/gprx/issues/503) | open |
 
 ## Intentionally out of scope
 
