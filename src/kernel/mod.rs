@@ -65,7 +65,7 @@ pub use scalar::KernelScalar;
 pub(crate) use scalar::sealed::ScalarOps;
 pub(crate) use sources::BlockAt;
 pub(crate) use sources::{
-    BlockStore, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
+    BlockStore, PackedRuns, QueryScratch, QuerySources, RefinedSources, SourceStore, TrainSources,
     bind_inducing, column_into, new_inducing_column, place_in_shape, widened,
 };
 pub use spec::{KernelSpec, ParameterBinding};
