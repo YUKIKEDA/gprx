@@ -33,7 +33,7 @@ All of the following are true for the merge commit above. A failure in the reade
 
 `homepage` is the GitHub repository. `documentation` is `https://docs.rs/gprx`. `[package.metadata.docs.rs]` builds default features, not `bench-internals` or `insert-stages`.
 
-There is no `CHANGELOG.md` at 0.1.0. Add a changelog file in the change that publishes the next version.
+`CHANGELOG.md` (English, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) starts at 0.2.0. The change that publishes a version adds its section: what breaks the previous version, each with how to move, then what is added and changed. Its Verification records `cargo semver-checks` against the previous version, the previous version's tests, examples, benches, and README built and run on that change, and a directory the previous version saved loaded with the same predictions.
 
 ## MSRV
 
@@ -68,6 +68,7 @@ The contract is every item an external crate can name with default features. `Sg
 - `benches/`
 - `compare/goldens/` JSON (integration tests embed these files)
 - `README.md` and `README.ja.md`
+- `CHANGELOG.md`
 - `LICENSE-MIT` and `LICENSE-APACHE`
 
 Root file names in `include` start with `/` (`/README.md`). A pattern without `/` also matches `compare/perf/README.md`.

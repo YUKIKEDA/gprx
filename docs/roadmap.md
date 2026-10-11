@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) is next: its row is set after Grill on #491.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) is open: the change that publishes 0.2.0, then the checks on its merge commit, the tag, and `cargo publish`.
 
 ## Dependencies
 
@@ -235,7 +235,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | Set after Grill on #491 |
+| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | open |
 
 ## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
 

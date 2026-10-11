@@ -4,11 +4,11 @@
 
 Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
 
-`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.1.0**（タグ `v0.1.0`）は既定フィーチャの公開 API である。この README は未リリースの `main` に従う。与えられた二乗距離（`ScalarDistance`、`ArdDistance` とその保存・読み込み）は 0.2.0 で入る。`main` の MSRV は 1.88（0.1.0 では 1.85）。0.x はマイナー番号で、公開 API を壊してよい。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
+`X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.2.0**（タグ `v0.2.0`）は既定フィーチャの公開 API である。MSRV は 1.88。0.x はマイナー番号で、公開 API を壊してよい。0.1.0 から 0.2.0 で変わったことと移行の方法は、[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にある。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
 
 ```toml
 [dependencies]
-gprx = "0.1"
+gprx = "0.2"
 ```
 
 ## 例
