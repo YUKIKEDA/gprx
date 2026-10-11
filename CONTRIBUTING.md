@@ -24,6 +24,6 @@ A branch with no Issue and no pull request is deleted. Do not leave one, locally
 
 ## Gates
 
-- `just lint` is `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+- `just lint` is `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo clippy --test alloc -- -D warnings` (`--all-targets` skips the `test = false` allocation counts)
 - `just test` is `cargo test`, then `cargo test --release --test alloc` (the allocation counts; plain `cargo test` skips them). It does not invoke Python
 - `just bench` is criterion. Speed work without a number is out of scope. Detail: `.cursor/rules/bench.mdc`

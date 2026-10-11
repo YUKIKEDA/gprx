@@ -24,6 +24,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # `tests/alloc.rs` is `test = false`, so `--all-targets` skips it.
+      - run: cargo clippy --test alloc -- -D warnings
       - run: cargo test
 
   alloc:

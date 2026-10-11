@@ -32,8 +32,8 @@ Human procedure: `CONTRIBUTING.md`. Current row: `docs/roadmap.md`. Do not name 
 - Names describe gprx / GPR concepts, not unrelated products or harnesses. Naming: `.cursor/rules/rust-api.mdc`.
 - Spike commits use `chore` or `test`.
 - Local gates (CI runners may be limited; do not treat cloud CI as the DoD):
-  - `just lint` = `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
-  - `just test` = `cargo test` (must not invoke Python)
+  - `just lint` = `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo clippy --test alloc -- -D warnings` (`tests/alloc.rs` is `test = false`)
+  - `just test` = `cargo test`, then `cargo test --release --test alloc` (must not invoke Python)
   - `just gen-goldens` = regenerate sklearn JSON under `compare/goldens/` (manual)
 - Analytic tests and finite differences are the source of truth. Committed sklearn JSON is the second check.
 - Observation noise lives in `GaussianLikelihood`. `WhiteKernel` is opt-in kernel composition. Adding both at large values double-counts noise; that is the caller's choice, not a crate ban.
