@@ -384,3 +384,55 @@ fn owned_ard_tables_move_into_an_f64_store() {
         Err(GprError::InvalidDistance { .. })
     ));
 }
+
+/// A slot's packed runs ([`TrainSources::packed`]) read back the values the
+/// store was made from, in their order: a scalar square's column runs (also
+/// once an insert's room makes its leading dimension wider than `n`) and an
+/// ARD slot's values.
+#[test]
+fn packed_runs_read_back_the_packed_values() {
+    let scalar = ScalarDistance::new();
+    let ard = ArdDistance::of_dims(2);
+    let slots = [DistanceSlot::Scalar(scalar), DistanceSlot::Ard(ard)];
+    for n in [1, 2, 5] {
+        let tri = packed_len(n).expect("tri");
+        let packed = |seed: f64| -> Vec<f64> {
+            (0..n)
+                .flat_map(|col| {
+                    (col..n).map(move |row| {
+                        if row == col {
+                            0.0
+                        } else {
+                            seed + (row * n + col) as f64
+                        }
+                    })
+                })
+                .collect()
+        };
+        let scalar_values = packed(1.0);
+        let ard_values = [packed(100.0), packed(200.0)].concat();
+        assert_eq!((scalar_values.len(), ard_values.len()), (tri, 2 * tri));
+        let mut store =
+            TrainSources::from_packed(&slots, &[&scalar_values, &ard_values], n).expect("store");
+        for widened in [false, true] {
+            if widened {
+                // Room for one more point lays the square out wider than n.
+                store.reserve_point().expect("room");
+            }
+            let joined = |slot: DistanceSlot| -> Vec<f64> {
+                store
+                    .packed(slot.id())
+                    .expect("slot")
+                    .runs()
+                    .flat_map(|run| run.iter().copied())
+                    .collect()
+            };
+            assert_eq!(
+                joined(slots[0]),
+                scalar_values,
+                "n = {n}, widened {widened}"
+            );
+            assert_eq!(joined(slots[1]), ard_values, "n = {n}, widened {widened}");
+        }
+    }
+}

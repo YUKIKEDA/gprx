@@ -209,7 +209,10 @@ impl<'a> Body<'a> {
         shape: Vec<usize>,
         runs: Vec<&'a [u8]>,
     ) -> Result<Self, GprError> {
-        let len = runs.iter().map(|run| run.len()).sum();
+        let len = runs
+            .iter()
+            .try_fold(0_usize, |len, run| len.checked_add(run.len()))
+            .ok_or(GprError::SizeOverflow)?;
         let want = shape
             .iter()
             .try_fold(dtype.bitsize() / 8, |acc, &dim| acc.checked_mul(dim))
@@ -289,22 +292,22 @@ fn safetensors_header(views: &mut [(&str, Body<'_>)]) -> Result<Vec<u8>, GprErro
     views.sort_by(|(lname, left), (rname, right)| {
         right.dtype.cmp(&left.dtype).then(lname.cmp(rname))
     });
-    let mut offset = 0;
+    let mut offset = 0_usize;
     let infos = views
         .iter()
         .map(|(name, body)| {
             let start = offset;
-            offset += body.len;
-            (
+            offset = offset.checked_add(body.len).ok_or(GprError::SizeOverflow)?;
+            Ok((
                 (*name).to_owned(),
                 TensorInfo {
                     dtype: body.dtype,
                     shape: body.shape.clone(),
                     data_offsets: (start, offset),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, GprError>>()?;
     let tensor_err = |err: &dyn std::fmt::Display| {
         persist_err(
             PersistErrorKind::Tensor,
@@ -701,7 +704,16 @@ mod tests {
     #[test]
     fn runs_that_miss_the_shape_are_refused() {
         let a = bytes_of(&[1.0, 2.0]);
-        assert!(Body::new("t", Dtype::F64, vec![3], vec![&a]).is_err());
+        assert!(matches!(
+            Body::new("t", Dtype::F64, vec![3], vec![&a]),
+            Err(GprError::PersistFailed {
+                kind: PersistErrorKind::Tensor,
+                ..
+            })
+        ));
+        // An empty tensor is its empty runs, or none.
+        assert!(Body::new("e", Dtype::F64, vec![0], vec![]).is_ok());
+        assert!(Body::new("e", Dtype::F64, vec![0], vec![&[]]).is_ok());
     }
 
     #[test]

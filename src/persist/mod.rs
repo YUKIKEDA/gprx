@@ -420,7 +420,7 @@ impl<T: crate::kernel::KernelScalar> KernelSave<'_, T> {
                 name: name.as_str(),
                 dtype: <T as ScalarOps>::DTYPE,
                 shape: shape.clone(),
-                runs: values.runs().into_iter().map(scalar_bytes).collect(),
+                runs: values.runs().map(scalar_bytes).collect(),
             })
             .collect()
     }

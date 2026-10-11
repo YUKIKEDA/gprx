@@ -216,8 +216,9 @@ impl<T: KernelScalar> Default for TrainSources<T> {
 }
 
 /// A slot's packed values ([`TrainSources::packed`]) as runs that follow
-/// one another: a scalar square's column runs read in place, or an ARD
-/// slot's values whole.
+/// one another. Only a scalar slot is read in place, as its square's column
+/// runs; an ARD slot is one run, borrowed when it is stored packed and a
+/// packed copy when it is stored dense or as rows.
 pub(crate) enum PackedRuns<'a, T: Clone> {
     /// The lower triangle of a square, column by column.
     Columns(Vec<&'a [T]>),
@@ -227,11 +228,12 @@ pub(crate) enum PackedRuns<'a, T: Clone> {
 
 impl<T: Clone> PackedRuns<'_, T> {
     /// The runs, in order.
-    pub(crate) fn runs(&self) -> Vec<&[T]> {
-        match self {
-            Self::Columns(runs) => runs.clone(),
-            Self::Whole(all) => vec![all.as_ref()],
-        }
+    pub(crate) fn runs(&self) -> impl Iterator<Item = &[T]> {
+        let (columns, whole) = match self {
+            Self::Columns(runs) => (&runs[..], None),
+            Self::Whole(all) => (&[][..], Some(all.as_ref())),
+        };
+        columns.iter().copied().chain(whole)
     }
 }
 
