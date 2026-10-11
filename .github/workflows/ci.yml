@@ -24,7 +24,17 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # `tests/alloc.rs` is `test = false`, so `--all-targets` skips it.
+      - run: cargo clippy --test alloc -- -D warnings
       - run: cargo test
+
+  alloc:
+    name: alloc (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test alloc
 
   coverage:
     name: coverage (stable)

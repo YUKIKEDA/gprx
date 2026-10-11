@@ -71,6 +71,10 @@ stats_alloc = "0.1.10"
 # another without the libtest harness's threads (#494).
 name = "alloc"
 harness = false
+# Counted in release, as its own CI job (`just alloc`): in debug its O(n³)
+# checks at n = 512 took about 3m20s. `cargo test` skips it; `just lint` and
+# the CI test job still clippy it (`--test alloc`), on 1.88 and stable.
+test = false
 
 [[bench]]
 name = "exact"

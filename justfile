@@ -3,12 +3,18 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 lint:
     cargo fmt --check
     cargo clippy --all-targets -- -D warnings
+    cargo clippy --test alloc -- -D warnings
 
 fmt:
     cargo fmt
 
 test:
     cargo test
+    cargo test --release --test alloc
+
+# The allocation counts alone (`tests/alloc.rs`), as the CI job runs them.
+alloc:
+    cargo test --release --test alloc
 
 # Line coverage of src/ from the default-feature tests. Not part of `test`.
 # The floor is the integer part of the percent measured when this gate was added.
