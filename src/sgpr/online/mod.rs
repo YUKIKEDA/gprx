@@ -177,9 +177,10 @@ fn inducing_points_of<S: Supply>(
     core: &SparseCore<S>,
     registry: &PointRegistry,
 ) -> Result<<S as SupplyViews>::Held<Vec<PointId>>, GprError> {
-    S::try_hold(|| {
-        let rows = core.supply().map_or(&[][..], |supply| &supply.inducing);
-        rows.iter()
+    S::try_map_held(core.supply_held(), |supply| {
+        supply
+            .inducing
+            .iter()
             .map(|&row| {
                 registry.ids().get(row).copied().ok_or_else(|| {
                     crate::persist::persist_err(
@@ -247,21 +248,16 @@ where
         let registry = PointRegistry::from_count(fitted.core.n);
         let inducing = InducingRegistry::from_count(fitted.core.m);
         let ay = a_times_y(fitted.a.as_ref(), &fitted.core.y_train);
-        // A fitted model's inducing indices are rows of its training
-        // blocks, each below `n`: their ids are found.
-        let inducing_points = <K::Supply as SupplyViews>::hold(|| {
-            fitted
-                .core
-                .supply()
-                .map(|supply| {
-                    supply
-                        .inducing
-                        .iter()
-                        .filter_map(|&row| registry.ids().get(row).copied())
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
+        // A fresh registry names row `i` as id `i`, so each inducing row's
+        // id follows from the row itself: one id per row, none dropped.
+        let inducing_points =
+            <K::Supply as SupplyViews>::map_held(fitted.core.supply_held(), |supply| {
+                supply
+                    .inducing
+                    .iter()
+                    .map(|&row| <PointId as RegistryId>::from_raw(row as u64))
+                    .collect()
+            });
         Self {
             state: OnlineState {
                 ay,
@@ -921,6 +917,17 @@ where
             });
         }
         let idx = self.state.inducing.index_of(id)?;
+        // One id per inducing point: checked before the model changes.
+        if <K::Supply as SupplyViews>::held(&self.state.inducing_points)
+            .is_some_and(|points| points.len() != self.state.core.m)
+        {
+            return Err(GprError::InvalidConfig {
+                reason:
+                    "the model's inducing point ids do not match its inducing points (an internal \
+                         error)"
+                        .to_owned(),
+            });
+        }
         self.atomically(|model| model.delete_inducing_at(idx))
     }
 
@@ -953,6 +960,7 @@ where
         })?;
         self.state.inducing.remove_at(idx);
         if let Some(points) = <K::Supply as SupplyViews>::held_mut(&mut self.state.inducing_points)
+            && idx < points.len()
         {
             points.remove(idx);
         }
