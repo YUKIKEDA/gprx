@@ -1390,6 +1390,7 @@ fn run_mixed_sequence(kernel: &KernelSpec, lengthscales: &[f64], seed: u64) -> M
 // step is compared: from such a factor it assembles the system again, so
 // what an `X` step left behind does not reach a later inducing step.
 // Over the same 40 seeds the largest checked difference was `6e-12`.
+// Comparing these steps too is R8-2 (#525).
 fn run_mixed_seeds(kernel: &KernelSpec, lengthscales: &[f64], label: &str) {
     let worst = MIXED_SEEDS
         .map(|seed| run_mixed_sequence(kernel, lengthscales, seed))
