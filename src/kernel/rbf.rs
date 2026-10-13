@@ -25,11 +25,45 @@ use faer::{MatMut, MatRef};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::RbfKernel;
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{RbfKernel, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Parameters: `θ = log(ℓ)`; the bounds are on `ℓ` itself.
 /// let rbf = RbfKernel::new(1.5)?;
-/// assert!(rbf.lengthscale() > 0.0);
+/// assert!((rbf.lengthscale() - 1.5).abs() < 1e-12);
+/// let same = RbfKernel::from_log_lengthscale(1.5_f64.ln())?;
+/// assert!((same.log_lengthscale() - rbf.log_lengthscale()).abs() < 1e-12);
+/// let mut rbf = rbf.with_bounds(Interval::new(0.1, 10.0)?)?;
+/// assert!((rbf.bounds().hi() - 10.0).abs() < 1e-12);
+/// let mut theta = vec![0.0; rbf.num_params()];
+/// rbf.get_params(&mut theta)?;
+/// rbf.set_params(&[0.0])?; // ℓ = 1
+///
+/// // Squared distances between the points 0, 1, and 2.
+/// let x = [0.0_f64, 1.0, 2.0];
+/// let dist = Mat::from_fn(3, 3, |i, j| (x[i] - x[j]).powi(2));
+/// let mut k = Mat::<f64>::zeros(3, 3);
+/// rbf.apply(dist.as_ref(), k.as_mut(), Triangle::Lower)?;
+/// assert!((k[(1, 0)] - (-0.5_f64).exp()).abs() < 1e-12);
+/// // Train × query, for one query at 0.5.
+/// let cross = Mat::from_fn(3, 1, |i, _| (x[i] - 0.5).powi(2));
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// rbf.apply_cross(cross.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0_f64; 3];
+/// rbf.fill_diag(&mut diag);
+/// assert!((diag[0] - 1.0).abs() < 1e-12);
+///
+/// // ∂K/∂θ and ∂²K/∂θ², then ∂K(x, x')/∂x' from the coordinates.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// rbf.grad(dist.as_ref(), d_k.as_mut(), 0, Triangle::Lower)?;
+/// assert!((d_k[(1, 0)] - k[(1, 0)]).abs() < 1e-12); // k · s / ℓ² at s = 1
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// rbf.hess(dist.as_ref(), d2_k.as_mut(), 0, 0, Triangle::Lower)?;
+/// let points = Mat::from_fn(3, 1, |i, _| x[i]);
+/// let mut d_x = Mat::<f64>::zeros(3, 3);
+/// rbf.grad_wrt_coord_dim(points.as_ref(), points.as_ref(), d_x.as_mut(), 0)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -44,7 +78,9 @@ impl RbfKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `lengthscale` is not
-    /// finite or not strictly positive.
+    /// finite or not strictly positive, or [`GprError::InvalidInterval`] if
+    /// it is not inside [`Interval::DEFAULT_POSITIVE`], the bounds a new leaf
+    /// starts with.
     ///
     /// See the example on [`RbfKernel`].
     pub fn new(lengthscale: f64) -> Result<Self, GprError> {
@@ -59,7 +95,9 @@ impl RbfKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
-    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero, or
+    /// [`GprError::InvalidInterval`] if `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`RbfKernel`].
     pub fn from_log_lengthscale(log_lengthscale: f64) -> Result<Self, GprError> {
@@ -129,7 +167,9 @@ impl RbfKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
-    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    /// [`GprError::InvalidHyperparameter`] if the new `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if the new `ℓ` is not inside
+    /// [`Self::bounds`].
     ///
     /// See the example on [`RbfKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -146,8 +186,9 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, not square, or size
-    /// mismatched, or if `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `dist` is not square or `out` is not
+    /// its shape, [`GprError::EmptyInput`] if they are empty, or
+    /// [`GprError::NonFiniteInput`] if `dist` holds a value that is not finite.
     ///
     /// See the example on [`RbfKernel`].
     pub fn apply<T: KernelScalar>(
@@ -178,8 +219,9 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
-    /// `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `out` is not the shape of `dist`,
+    /// [`GprError::EmptyInput`] if they are empty, or [`GprError::NonFiniteInput`]
+    /// if `dist` holds a value that is not finite.
     ///
     /// See the example on [`RbfKernel`].
     pub fn apply_cross<T: KernelScalar>(
@@ -369,10 +411,12 @@ impl RbfKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::EmptyInput`] or [`GprError::DimensionMismatch`] when
-    /// the views are empty or `dim` is out of range, [`GprError::NonFiniteInput`]
-    /// when a coordinate is not finite, or [`GprError::ShapeMismatch`]
-    /// when `d_k` is the wrong shape.
+    /// Returns [`GprError::EmptyInput`] if a view is empty,
+    /// [`GprError::DimensionMismatch`] if `x1` and `x2` have different column
+    /// counts, [`GprError::IndexOutOfRange`] if `dim` is not a column,
+    /// [`GprError::ShapeMismatch`] if `d_k` is not `x1.nrows() × x2.nrows()`,
+    /// [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a derivative is not finite.
     ///
     /// See the example on [`RbfKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(

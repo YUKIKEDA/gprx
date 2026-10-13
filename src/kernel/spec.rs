@@ -42,16 +42,60 @@ pub struct ParameterBinding {
 /// Built-in leaves are stored directly. Sum and product nest until
 /// [`Self::compile`] flattens associative chains into [`super::CompiledKernel`].
 /// `S` is [`NoSupply`] for every tree a caller builds: a coordinate tree.
+/// `+` builds [`Self::Sum`] and `*` builds [`Self::Product`]. The example on
+/// [`super::KernelTerm`] builds a [`Self::Custom`] leaf.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::kernel::{
+///     ConstantKernel, KernelSpec, LinearKernel, MaternArdKernel, MaternKernel, MaternNu,
+///     ParameterBinding, PeriodicKernel, RationalQuadraticArdKernel, RationalQuadraticKernel,
+///     RbfArdKernel, RbfKernel, WhiteKernel,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let spec = KernelSpec::from(RbfKernel::new(1.0)?)
 ///     + KernelSpec::from(RbfKernel::new(2.0)?);
 /// assert_eq!(spec.num_params(), 2);
+///
+/// // Every built-in leaf, as a variant: `KernelSpec::from(leaf)` builds the same.
+/// let leaves: Vec<KernelSpec> = vec![
+///     KernelSpec::Rbf(RbfKernel::new(1.0)?),
+///     KernelSpec::RbfArd(RbfArdKernel::new(&[1.0, 2.0])?),
+///     KernelSpec::Matern(MaternKernel::new(1.0, MaternNu::FiveHalves)?),
+///     KernelSpec::MaternArd(MaternArdKernel::new(&[1.0, 2.0], MaternNu::ThreeHalves)?),
+///     KernelSpec::Periodic(PeriodicKernel::new(1.0, 2.0)?),
+///     KernelSpec::RationalQuadratic(RationalQuadraticKernel::new(1.0, 1.5)?),
+///     KernelSpec::RationalQuadraticArd(RationalQuadraticArdKernel::new(&[1.0, 2.0], 1.5)?),
+///     KernelSpec::Constant(ConstantKernel::new(2.0)?),
+///     KernelSpec::Linear(LinearKernel::new(0.5)?),
+///     KernelSpec::White(WhiteKernel::new(0.01)?),
+/// ];
+/// let counts: Vec<usize> = leaves.iter().map(KernelSpec::num_params).collect();
+/// assert_eq!(counts, [1, 2, 1, 2, 2, 2, 3, 1, 1, 1]);
+///
+/// // `(c · rbf) + (white + linear)`, built from the variants.
+/// let mut tree: KernelSpec = KernelSpec::Product(
+///     Box::new(KernelSpec::from(ConstantKernel::new(2.0)?)),
+///     Box::new(KernelSpec::from(RbfKernel::new(1.0)?)),
+/// ) + KernelSpec::Sum(
+///     Box::new(KernelSpec::from(WhiteKernel::new(0.01)?)),
+///     Box::new(KernelSpec::from(LinearKernel::new(0.5)?)),
+/// );
+/// // Flattened `θ` in depth-first, left-to-right leaf order, in log space.
+/// let mut theta = vec![0.0; tree.num_params()];
+/// tree.get_params(&mut theta)?;
+/// assert!((theta[0] - 2.0_f64.ln()).abs() < 1e-12);
+/// theta[1] = 0.5_f64.ln(); // the RBF lengthscale
+/// tree.set_params(&theta)?;
+/// assert_eq!(
+///     tree.parameter_bindings()[1],
+///     ParameterBinding { index: 1, leaf_id: 1, local_index: 0 }
+/// );
+/// // The same tree for an `f32` compute scalar.
+/// let single = tree.compile_as::<f32>();
+/// assert_eq!(single.num_params(), 4);
 /// # Ok(())
 /// # }
 /// ```
@@ -175,12 +219,15 @@ impl<S: Supply> Mul for KernelSpec<S> {
 impl KernelSpec {
     /// Wraps a user [`super::KernelTerm`] as a distance leaf.
     ///
-    /// The leaf clones into [`super::CompiledKernel`] at [`Self::compile`].
-    /// Sum and product with other distance leaves work. Mixing with
-    /// points-mode leaves (Linear, ARD) evaluates each leaf in its own mode.
+    /// This is `Self::Custom(CustomKernel::new(term))`. The leaf clones into
+    /// [`super::CompiledKernel`] at [`Self::compile`]. Sum and product with
+    /// other distance leaves work. Mixing with points-mode leaves (Linear,
+    /// ARD) evaluates each leaf in its own mode.
     ///
-    /// One generic `impl<T: KernelScalar> KernelTerm<T>` serves both
-    /// precisions. See [`super::KernelTerm`] for a Sum example.
+    /// One generic `impl<T: KernelScalar> KernelTerm<T>` on a `Clone` type
+    /// serves both precisions.
+    ///
+    /// See the example on [`super::KernelTerm`].
     pub fn custom<K>(term: K) -> Self
     where
         K: super::KernelTerm<f64>
@@ -247,8 +294,9 @@ impl<S: Supply> KernelSpec<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
-    /// or a custom leaf rejects the write.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not
+    /// [`Self::num_params`] long, or the error a [`Self::Custom`] leaf's
+    /// [`super::KernelTerm::get_params`] returns.
     ///
     /// See the example on [`KernelSpec`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
@@ -263,8 +311,11 @@ impl<S: Supply> KernelSpec<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length or a leaf rejects its slice.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not
+    /// [`Self::num_params`] long, or the error of the first leaf that rejects
+    /// its slice: [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidInterval`] from a built-in leaf, or whatever a
+    /// [`Self::Custom`] leaf's [`super::KernelTerm::set_params`] returns.
     ///
     /// See the example on [`KernelSpec`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {

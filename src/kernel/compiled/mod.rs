@@ -102,24 +102,126 @@ impl<'a, T: KernelScalar> CrossViews<'a, T> {
 
 /// Represents the compiled kernel.
 ///
-/// Built-ins are enum arms; Sum/Product are flattened lists.
+/// Built-ins are enum arms; Sum/Product are flattened lists. Build one with
+/// [`KernelSpec::compile`] (`T = f64`) or [`KernelSpec::compile_as`].
 ///
-/// [`Self::apply`] and [`Self::grad`] take a scratch buffer of the same size
-/// as `out`. A lone RBF does not write it. Nested rest terms that are
-/// themselves sums or products may allocate one extra `n×n` buffer. Fit
-/// will pass Workspace storage for the caller scratch. Cloning copies the
-/// whole tree.
+/// The evaluation methods take the `exp` algebra as a type parameter `M`:
+/// [`crate::Accurate`] or [`crate::FastApprox`]. Methods that take `dist`
+/// read squared Euclidean distances; the `_points` methods read the `n×d`
+/// coordinates and evaluate each leaf in its own mode. [`Self::apply`] and
+/// [`Self::grad`] take a scratch buffer of the same size as `out`. A lone
+/// RBF does not write it. Nested rest terms that are themselves sums or
+/// products may allocate one extra `n×n` buffer. Cloning copies the whole
+/// tree.
 ///
 /// # Examples
 ///
+/// Compiling flattens associative chains:
+///
 /// ```rust
-/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::kernel::{
+///     CompiledKernel, ConstantKernel, KernelSpec, MaternKernel, MaternNu, RbfKernel, WhiteKernel,
+/// };
+///
+/// /// Names a compiled node.
+/// fn name(term: &CompiledKernel) -> &'static str {
+///     match term {
+///         CompiledKernel::Rbf(_) => "rbf",
+///         CompiledKernel::RbfArd(_) => "rbf-ard",
+///         CompiledKernel::Matern(_) => "matern",
+///         CompiledKernel::MaternArd(_) => "matern-ard",
+///         CompiledKernel::Periodic(_) => "periodic",
+///         CompiledKernel::RationalQuadratic(_) => "rq",
+///         CompiledKernel::RationalQuadraticArd(_) => "rq-ard",
+///         CompiledKernel::Constant(_) => "constant",
+///         CompiledKernel::Linear(_) => "linear",
+///         CompiledKernel::White(_) => "white",
+///         CompiledKernel::Custom(_) => "custom",
+///         CompiledKernel::Sum(_) => "sum",
+///         CompiledKernel::Product(_) => "product",
+///         _ => "other",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let spec = KernelSpec::from(RbfKernel::new(1.0)?)
 ///     + KernelSpec::from(RbfKernel::new(2.0)?);
 /// let compiled = spec.compile();
 /// assert_eq!(compiled.num_params(), 2);
+///
+/// // `(c · rbf) · matern + white` is a sum of one three-term product and a leaf.
+/// let spec = KernelSpec::from(ConstantKernel::new(2.0)?) * KernelSpec::from(RbfKernel::new(1.0)?)
+///     * KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves)?)
+///     + KernelSpec::from(WhiteKernel::new(0.01)?);
+/// let CompiledKernel::Sum(terms) = spec.compile() else {
+///     return Ok(());
+/// };
+/// assert_eq!(terms.iter().map(name).collect::<Vec<_>>(), ["product", "white"]);
+/// let CompiledKernel::Product(factors) = &terms[0] else {
+///     return Ok(());
+/// };
+/// assert_eq!(factors.iter().map(name).collect::<Vec<_>>(), ["constant", "rbf", "matern"]);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Evaluating `c · rbf` and its derivatives:
+///
+/// ```rust
+/// use faer::Mat;
+/// use gprx::Accurate;
+/// use gprx::kernel::{ConstantKernel, KernelSpec, RbfKernel, Triangle};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let mut k = (KernelSpec::from(ConstantKernel::new(2.0)?)
+///     * KernelSpec::from(RbfKernel::new(1.0)?))
+/// .compile();
+/// // Flattened `θ = [log(c), log(ℓ)]`.
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// theta[0] = 3.0_f64.ln();
+/// k.set_params(&theta)?; // c = 3
+///
+/// // Three points 0, 1, 2 (one feature), their squared distances, and one query.
+/// let x = Mat::from_fn(3, 1, |i, _| i as f64);
+/// let dist = Mat::from_fn(3, 3, |i, j| (i as f64 - j as f64).powi(2));
+/// let xs = Mat::from_fn(1, 1, |_, _| 0.5);
+/// let cross_dist = Mat::from_fn(3, 1, |i, _| (i as f64 - 0.5).powi(2));
+/// let mut scratch = Mat::<f64>::zeros(3, 3);
+/// let mut cross_scratch = Mat::<f64>::zeros(3, 1);
+///
+/// // K from distances and from coordinates.
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply::<Accurate>(dist.as_ref(), gram.as_mut(), Triangle::Lower, scratch.as_mut())?;
+/// assert!((gram[(1, 0)] - 3.0 * (-0.5_f64).exp()).abs() < 1e-12);
+/// let mut from_points = Mat::<f64>::zeros(3, 3);
+/// k.apply_points::<Accurate>(x.as_ref(), from_points.as_mut(), Triangle::Lower, scratch.as_mut())?;
+/// assert!((from_points[(1, 0)] - gram[(1, 0)]).abs() < 1e-12);
+/// // Train × query.
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross::<Accurate>(cross_dist.as_ref(), k_cross.as_mut(), cross_scratch.as_mut())?;
+/// k.apply_cross_points::<Accurate>(
+///     x.as_ref(),
+///     xs.as_ref(),
+///     k_cross.as_mut(),
+///     cross_scratch.as_mut(),
+/// )?;
+/// // The diagonal.
+/// let mut diag = [0.0_f64; 3];
+/// k.fill_diag(&mut diag)?;
+/// assert!((diag[0] - 3.0).abs() < 1e-12);
+/// k.fill_diag_points(x.as_ref(), &mut diag)?;
+///
+/// // ∂K/∂θ_1 and ∂²K/∂θ_0 ∂θ_1, from distances and from coordinates.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad::<Accurate>(dist.as_ref(), d_k.as_mut(), 1, Triangle::Lower, scratch.as_mut())?;
+/// k.grad_points::<Accurate>(x.as_ref(), d_k.as_mut(), 1, Triangle::Lower, scratch.as_mut())?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess::<Accurate>(dist.as_ref(), d2_k.as_mut(), 0, 1, Triangle::Lower, scratch.as_mut())?;
+/// k.hess_points::<Accurate>(x.as_ref(), d2_k.as_mut(), 0, 1, Triangle::Lower, scratch.as_mut())?;
+/// // ∂K(x, xs)/∂xs along feature 0.
+/// let mut d_x = Mat::<f64>::zeros(3, 1);
+/// k.grad_wrt_coord_dim::<Accurate>(x.as_ref(), xs.as_ref(), d_x.as_mut(), 0)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -262,8 +364,9 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
-    /// or a custom leaf rejects the write.
+    /// Returns [`GprError::LengthMismatch`] if `out` is not
+    /// [`Self::num_params`] long, or the error a [`Self::Custom`] leaf's
+    /// [`super::KernelTerm::get_params`] returns.
     ///
     /// See the example on [`CompiledKernel`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
@@ -278,8 +381,11 @@ impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length or a leaf rejects its slice.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not
+    /// [`Self::num_params`] long, or the error of the first leaf that rejects
+    /// its slice: [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidInterval`] from a built-in leaf, or whatever a
+    /// [`Self::Custom`] leaf's [`super::KernelTerm::set_params`] returns.
     ///
     /// See the example on [`CompiledKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {

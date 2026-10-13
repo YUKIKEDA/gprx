@@ -29,11 +29,42 @@ use wide::f64x4;
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::RationalQuadraticArdKernel;
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{RationalQuadraticArdKernel, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Parameters: `[log(ℓ_1), …, log(ℓ_d), log(α)]`; the bounds are on `ℓ_d` and `α`.
 /// let k = RationalQuadraticArdKernel::new(&[1.0, 2.5], 1.5)?;
 /// assert_eq!(k.num_params(), 3);
+/// assert!((k.alpha() - 1.5).abs() < 1e-12);
+/// assert!((k.lengthscale(1)? - 2.5).abs() < 1e-12);
+/// assert_eq!(k.lengthscales().num_params(), 2);
+/// let same = RationalQuadraticArdKernel::from_log_lengthscales(k.log_lengthscales(), k.log_alpha())?;
+/// assert!((same.alpha() - 1.5).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(0.1, 10.0)?, Interval::new(0.1, 100.0)?)?;
+/// assert!((k.alpha_bounds().hi() - 100.0).abs() < 1e-12);
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[0.0, 2.0_f64.ln(), 0.0])?; // ℓ = [1, 2], α = 1
+///
+/// // Three points with two features, one point per row (column-major).
+/// let x = Mat::from_fn(3, 2, |i, d| [[0.0, 0.0], [1.0, 2.0], [2.0, 0.0]][i][d]);
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(x.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// // (1 + r² / 2)^(−1) with r² = 2 between the first two points.
+/// assert!((gram[(1, 0)] - 0.5).abs() < 1e-12);
+/// let xs = Mat::from_fn(1, 2, |_, d| [0.5, 0.5][d]);
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(x.as_ref(), xs.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0; 3];
+/// k.fill_diag(&mut diag);
+///
+/// // ∂K/∂θ_2 (`α`) and ∂²K/∂θ_0 ∂θ_2.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(x.as_ref(), d_k.as_mut(), 2, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(x.as_ref(), d2_k.as_mut(), 0, 2, Triangle::Lower)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -49,7 +80,9 @@ impl RationalQuadraticArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
-    /// value is invalid.
+    /// value is not finite and strictly positive, or
+    /// [`GprError::InvalidInterval`] if one is not inside
+    /// [`Interval::DEFAULT_POSITIVE`], the bounds a new leaf starts with.
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn new(lengthscales: &[f64], alpha: f64) -> Result<Self, GprError> {
@@ -65,7 +98,9 @@ impl RationalQuadraticArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
-    /// `θ` is invalid.
+    /// `θ` is not finite or its `exp` overflows or underflows to zero, or
+    /// [`GprError::InvalidInterval`] if an `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn from_log_lengthscales(
@@ -120,7 +155,7 @@ impl RationalQuadraticArdKernel {
         })
     }
 
-    /// Returns the shared ARD lengthscale mouth.
+    /// Returns the per-feature lengthscales.
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn lengthscales(&self) -> &ArdLengthscales {
@@ -189,7 +224,8 @@ impl RationalQuadraticArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
+    /// length, [`GprError::InvalidHyperparameter`] if a `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if a new value is not inside its bounds.
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -218,8 +254,11 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if `x` is empty, `d` does not match the
-    /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if `x` is empty,
+    /// [`GprError::DimensionMismatch`] if `x` does not have one column per
+    /// lengthscale, [`GprError::ShapeMismatch`] if `out` is not `n×n`,
+    /// [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn apply<T: KernelScalar>(
@@ -241,8 +280,11 @@ impl RationalQuadraticArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
-    /// `out` is the wrong shape, or a coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if a matrix is empty,
+    /// [`GprError::DimensionMismatch`] if `x` or `xs` does not have one column per
+    /// lengthscale, [`GprError::ShapeMismatch`] if `out` is not `x.nrows() ×
+    /// xs.nrows()`, [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`RationalQuadraticArdKernel`].
     pub fn apply_cross<T: KernelScalar>(

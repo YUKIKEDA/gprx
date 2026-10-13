@@ -24,12 +24,43 @@ use faer::{MatMut, MatRef};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::RationalQuadraticKernel;
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{RationalQuadraticKernel, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let k = RationalQuadraticKernel::new(1.0, 1.5)?;
-/// assert!(k.lengthscale() > 0.0);
-/// assert!(k.alpha() > 0.0);
+/// // Parameters: `θ = [log(ℓ), log(α)]`; the bounds are on `ℓ` and `α`.
+/// let k = RationalQuadraticKernel::new(1.5, 2.0)?;
+/// assert!((k.lengthscale() - 1.5).abs() < 1e-12);
+/// assert!((k.alpha() - 2.0).abs() < 1e-12);
+/// let same = RationalQuadraticKernel::from_log(1.5_f64.ln(), 2.0_f64.ln())?;
+/// assert!((same.log_lengthscale() - k.log_lengthscale()).abs() < 1e-12);
+/// assert!((same.log_alpha() - k.log_alpha()).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(0.1, 10.0)?, Interval::new(0.1, 100.0)?)?;
+/// assert!((k.lengthscale_bounds().hi() - 10.0).abs() < 1e-12);
+/// assert!((k.alpha_bounds().hi() - 100.0).abs() < 1e-12);
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[0.0, 0.0])?; // ℓ = 1, α = 1
+///
+/// // Squared distances between the points 0, 1, and 2.
+/// let x = [0.0_f64, 1.0, 2.0];
+/// let dist = Mat::from_fn(3, 3, |i, j| (x[i] - x[j]).powi(2));
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(dist.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// // (1 + 1 / 2)^(−1) at distance 1.
+/// assert!((gram[(1, 0)] - 2.0 / 3.0).abs() < 1e-12);
+/// let cross = Mat::from_fn(3, 1, |i, _| (x[i] - 0.5).powi(2));
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(cross.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0; 3];
+/// k.fill_diag(&mut diag);
+///
+/// // ∂K/∂θ_1 (`α`) and ∂²K/∂θ_0 ∂θ_1.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(dist.as_ref(), d_k.as_mut(), 1, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(dist.as_ref(), d2_k.as_mut(), 0, 1, Triangle::Lower)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -45,7 +76,9 @@ impl RationalQuadraticKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if either value is not
-    /// finite or not strictly positive.
+    /// finite or not strictly positive, or [`GprError::InvalidInterval`] if
+    /// one is not inside [`Interval::DEFAULT_POSITIVE`], the bounds a new
+    /// leaf starts with.
     ///
     /// See the example on [`RationalQuadraticKernel`].
     pub fn new(lengthscale: f64, alpha: f64) -> Result<Self, GprError> {
@@ -62,7 +95,9 @@ impl RationalQuadraticKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if a `θ` is not finite, if
-    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero, or
+    /// [`GprError::InvalidInterval`] if an `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`RationalQuadraticKernel`].
     pub fn from_log(log_lengthscale: f64, log_alpha: f64) -> Result<Self, GprError> {
@@ -165,7 +200,8 @@ impl RationalQuadraticKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 2,
-    /// or [`GprError::InvalidHyperparameter`] if a `θ` is invalid.
+    /// [`GprError::InvalidHyperparameter`] if a `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if a new value is not inside its bounds.
     ///
     /// See the example on [`RationalQuadraticKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -186,8 +222,10 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, not square, or size
-    /// mismatched, or if `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `dist` is not square or `out` is not
+    /// its shape, [`GprError::EmptyInput`] if they are empty,
+    /// [`GprError::NonFiniteInput`] if `dist` holds a value that is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`RationalQuadraticKernel`].
     pub fn apply<T: KernelScalar>(
@@ -215,8 +253,10 @@ impl RationalQuadraticKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
-    /// `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `out` is not the shape of `dist`,
+    /// [`GprError::EmptyInput`] if they are empty, [`GprError::NonFiniteInput`] if
+    /// `dist` holds a value that is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`RationalQuadraticKernel`].
     pub fn apply_cross<T: KernelScalar>(

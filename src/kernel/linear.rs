@@ -15,11 +15,40 @@ use faer::{MatMut, MatRef};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::LinearKernel;
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{LinearKernel, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let k = LinearKernel::new(1.0)?;
-/// assert!(k.variance() > 0.0);
+/// // Parameter: `θ = log(σ²)`; the bounds are on `σ²`.
+/// let k = LinearKernel::new(1.5)?;
+/// assert!((k.variance() - 1.5).abs() < 1e-12);
+/// let same = LinearKernel::from_log_variance(k.log_variance())?;
+/// assert!((same.variance() - 1.5).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(0.01, 100.0)?)?;
+/// assert!((k.bounds().lo() - 0.01).abs() < 1e-12);
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[2.0_f64.ln()])?; // σ² = 2
+///
+/// // Three points with one feature: 1, 2, and 3.
+/// let x = Mat::from_fn(3, 1, |i, _| (i + 1) as f64);
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(x.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// assert!((gram[(1, 0)] - 2.0 * 1.0 * 2.0).abs() < 1e-12);
+/// let xs = Mat::from_fn(1, 1, |_, _| 0.5);
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(x.as_ref(), xs.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0_f64; 3];
+/// k.fill_diag_points(x.as_ref(), &mut diag)?;
+/// assert!((diag[2] - 2.0 * 9.0).abs() < 1e-12);
+///
+/// // ∂K/∂θ = K and ∂²K/∂θ² = K.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(x.as_ref(), d_k.as_mut(), 0, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(x.as_ref(), d2_k.as_mut(), 0, 0, Triangle::Lower)?;
+/// assert!((d2_k[(1, 0)] - gram[(1, 0)]).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -34,7 +63,9 @@ impl LinearKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `variance` is not finite
-    /// or not strictly positive.
+    /// or not strictly positive, or [`GprError::InvalidInterval`] if it is
+    /// not inside [`Interval::DEFAULT_POSITIVE`], the bounds a new leaf
+    /// starts with.
     ///
     /// See the example on [`LinearKernel`].
     pub fn new(variance: f64) -> Result<Self, GprError> {
@@ -49,7 +80,9 @@ impl LinearKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
-    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero, or
+    /// [`GprError::InvalidInterval`] if `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`LinearKernel`].
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
@@ -119,7 +152,9 @@ impl LinearKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
-    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    /// [`GprError::InvalidHyperparameter`] if the new `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if the new `σ²` is not inside
+    /// [`Self::bounds`].
     ///
     /// See the example on [`LinearKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -133,8 +168,10 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if `x` is empty, `out` is not `n×n`, or a
-    /// coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if `x` has no row or no column,
+    /// [`GprError::ShapeMismatch`] if `out` is not `n×n`,
+    /// [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`LinearKernel`].
     pub fn apply<T: KernelScalar>(
@@ -154,8 +191,11 @@ impl LinearKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
-    /// `out` is the wrong shape, or a coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if a matrix is empty,
+    /// [`GprError::DimensionMismatch`] if `x` and `xs` differ in feature count,
+    /// [`GprError::ShapeMismatch`] if `out` is not `x.nrows() × xs.nrows()`,
+    /// [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`LinearKernel`].
     pub fn apply_cross<T: KernelScalar>(
