@@ -423,6 +423,21 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// use gprx::persist::{LoadedSgpr, PersistRegistry};
 /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedSgpr) -> &'static str {
+///     match model {
+///         LoadedSgpr::Double(_) => "f64",
+///         LoadedSgpr::Single(_) => "f32",
+///         LoadedSgpr::Mixed(_) => "mixed",
+///         LoadedSgpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedSgpr::OnlineDouble(_) => "online f64",
+///         LoadedSgpr::OnlineSingle(_) => "online f32",
+///         LoadedSgpr::OnlineMixed(_) => "online mixed",
+///         LoadedSgpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Sgpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
@@ -438,6 +453,7 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// // Three training points, two inducing points, one feature.
 /// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
 /// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
 /// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
 /// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
 /// assert_eq!(
@@ -452,20 +468,36 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 #[non_exhaustive]
 pub enum LoadedSgpr {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Double(FittedSgpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Single(FittedSgpr<Fixed, FixedInducing, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Mixed(FittedSgpr<Fixed, FixedInducing, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Reevaluate(FittedSgpr<Fixed, FixedInducing, crate::MixedPrecision<crate::ReevaluateKernel>>),
     /// Marks a [`crate::DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineDouble(OnlineSgpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineSingle(OnlineSgpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineMixed(OnlineSgpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineReevaluate(OnlineSgpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
@@ -613,6 +645,17 @@ impl LoadedSgpr {
 /// use gprx::persist::{LoadedSvgp, PersistRegistry};
 /// use gprx::{GaussianLikelihood, PredictOptions, Svgp, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedSvgp) -> &'static str {
+///     match model {
+///         LoadedSvgp::Double(_) => "f64",
+///         LoadedSvgp::Single(_) => "f32",
+///         LoadedSvgp::Mixed(_) => "mixed",
+///         LoadedSvgp::Reevaluate(_) => "mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Svgp::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
@@ -626,6 +669,7 @@ impl LoadedSgpr {
 /// let loaded = LoadedSvgp::load(&dir, &PersistRegistry::new())?;
 /// // Three training points, two inducing points, one feature.
 /// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
+/// assert_eq!(describe(&loaded), "f64");
 /// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
 /// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
 /// assert_eq!(
@@ -640,12 +684,20 @@ impl LoadedSgpr {
 #[non_exhaustive]
 pub enum LoadedSvgp {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Double(FittedSvgp),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Single(FittedSvgp<crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Mixed(FittedSvgp<crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Reevaluate(FittedSvgp<crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 

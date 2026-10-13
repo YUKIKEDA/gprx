@@ -45,6 +45,21 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
 /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceGpr<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceGpr::Double(_) => "f64",
+///         LoadedDistanceGpr::Single(_) => "f32",
+///         LoadedDistanceGpr::Mixed(_) => "mixed",
+///         LoadedDistanceGpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedDistanceGpr::OnlineDouble(_) => "online f64",
+///         LoadedDistanceGpr::OnlineSingle(_) => "online f32",
+///         LoadedDistanceGpr::OnlineMixed(_) => "online mixed",
+///         LoadedDistanceGpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
 /// let train = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
@@ -57,6 +72,7 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
 /// assert_eq!(loaded.n(), 3);
 /// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
 /// // The loaded kernel has slots of its own: bind the query to them.
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
@@ -111,20 +127,36 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 #[non_exhaustive]
 pub enum LoadedDistanceGpr<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Double(FittedGpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Single(FittedGpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Mixed(FittedGpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Reevaluate(FittedGpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
     /// Marks a [`DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineDouble(OnlineGpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineSingle(OnlineGpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineMixed(OnlineGpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineReevaluate(OnlineGpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 
@@ -320,6 +352,21 @@ impl LoadedDistanceGpr<WithPoints> {
 /// use gprx::persist::{LoadedDistanceSgpr, PersistRegistry};
 /// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceSgpr<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceSgpr::Double(_) => "f64",
+///         LoadedDistanceSgpr::Single(_) => "f32",
+///         LoadedDistanceSgpr::Mixed(_) => "mixed",
+///         LoadedDistanceSgpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedDistanceSgpr::OnlineDouble(_) => "online f64",
+///         LoadedDistanceSgpr::OnlineSingle(_) => "online f32",
+///         LoadedDistanceSgpr::OnlineMixed(_) => "online mixed",
+///         LoadedDistanceSgpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
 /// // Three samples at 0, 1, 2; the inducing points are samples 0 and 2.
@@ -353,6 +400,7 @@ impl LoadedDistanceGpr<WithPoints> {
 /// online.save(&dir)?;
 /// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
 /// assert!(loaded.is_online());
+/// assert_eq!(describe(&loaded), "online f64");
 /// assert_eq!(loaded.inducing(), None);
 /// let points: Option<Vec<_>> = loaded.inducing_points().map(Iterator::collect);
 /// assert_eq!(points, Some(vec![ids[0], ids[2]]));
@@ -400,22 +448,38 @@ impl LoadedDistanceGpr<WithPoints> {
 #[non_exhaustive]
 pub enum LoadedDistanceSgpr<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Double(FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Single(FittedSgpr<Fixed, FixedInducing, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Mixed(FittedSgpr<Fixed, FixedInducing, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Reevaluate(
         FittedSgpr<Fixed, FixedInducing, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>,
     ),
     /// Marks a [`DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineDouble(OnlineSgpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineSingle(OnlineSgpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineMixed(OnlineSgpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineReevaluate(OnlineSgpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 
@@ -646,6 +710,17 @@ impl LoadedDistanceSgpr<WithPoints> {
 /// use gprx::persist::{LoadedDistanceSvgp, PersistRegistry};
 /// use gprx::{GaussianLikelihood, PredictOptions, Svgp, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceSvgp<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceSvgp::Double(_) => "f64",
+///         LoadedDistanceSvgp::Single(_) => "f32",
+///         LoadedDistanceSvgp::Mixed(_) => "mixed",
+///         LoadedDistanceSvgp::Reevaluate(_) => "mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
 /// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
@@ -658,6 +733,7 @@ impl LoadedDistanceSgpr<WithPoints> {
 /// let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
 /// assert_eq!((loaded.n(), loaded.m()), (3, 2));
 /// assert_eq!(loaded.inducing(), &[0, 2]);
+/// assert_eq!(describe(&loaded), "f64");
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
 /// };
@@ -712,12 +788,20 @@ impl LoadedDistanceSgpr<WithPoints> {
 #[non_exhaustive]
 pub enum LoadedDistanceSvgp<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Double(FittedSvgp<DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Single(FittedSvgp<SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Mixed(FittedSvgp<MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Reevaluate(FittedSvgp<MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 

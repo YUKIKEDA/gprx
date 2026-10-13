@@ -177,6 +177,21 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// use gprx::persist::{LoadedGpr, PersistRegistry};
 /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
 ///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedGpr) -> &'static str {
+///     match model {
+///         LoadedGpr::Double(_) => "f64",
+///         LoadedGpr::Single(_) => "f32",
+///         LoadedGpr::Mixed(_) => "mixed",
+///         LoadedGpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedGpr::OnlineDouble(_) => "online f64",
+///         LoadedGpr::OnlineSingle(_) => "online f32",
+///         LoadedGpr::OnlineMixed(_) => "online mixed",
+///         LoadedGpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
+///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Gpr::new(
 ///     KernelSpec::from(RbfKernel::new(1.0)?),
@@ -194,6 +209,7 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// // Two training points of one feature, factored with `llt`.
 /// assert_eq!((loaded.n(), loaded.d()), (2, 1));
 /// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
 /// // Observation variance by default; latent variance with options.
 /// let pred = loaded.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred, fitted.predict(&[0.5], 1, 1)?);
@@ -213,20 +229,36 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 #[non_exhaustive]
 pub enum LoadedGpr {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Double(FittedGpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Single(FittedGpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Mixed(FittedGpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Reevaluate(FittedGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
     /// Marks a [`crate::DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineDouble(OnlineGpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineSingle(OnlineGpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineMixed(OnlineGpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineReevaluate(OnlineGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
