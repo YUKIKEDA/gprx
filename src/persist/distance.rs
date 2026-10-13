@@ -335,8 +335,8 @@ impl LoadedDistanceGpr<WithPoints> {
 }
 
 /// Represents the prediction-only SGPR of a [`DistanceKernel`] loaded from
-/// a persist directory written by [`crate::FittedSgpr::save`] or
-/// [`crate::OnlineSgpr::save`].
+/// a persist directory written by `save` on a [`crate::FittedSgpr`] or
+/// [`crate::OnlineSgpr`] of that kernel.
 ///
 /// One variant per precision and model, as [`super::LoadedSgpr`]. The
 /// training blocks are bound to new slots, as [`LoadedDistanceGpr`] binds
@@ -695,7 +695,8 @@ impl LoadedDistanceSgpr<WithPoints> {
 }
 
 /// Represents the prediction-only SVGP of a [`DistanceKernel`] loaded from
-/// a persist directory written by [`crate::FittedSvgp::save`].
+/// a persist directory written by `save` on a [`crate::FittedSvgp`] of that
+/// kernel.
 ///
 /// One variant per precision, as [`super::LoadedSvgp`]. The training blocks
 /// are bound to new slots ([`Self::slots`]); `K_mm` is factored again at
