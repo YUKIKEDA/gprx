@@ -34,7 +34,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` と `factor` の戻り値は `Result<Fitted, (Trainer, GprError)>`。`Gpr` では `?` を使うとトレーナーは捨てられ、`GprError` だけが残る（`From<(Gpr<O, P, K>, GprError)> for GprError`）。`Sgpr` と `Svgp` にはこの変換が無いので、下の例のように `.map_err(|(_, e)| e)?` と書く。同じトレーナーでやり直すなら、`Err((trainer, err))` を照合する。
 
-モデルのメソッドは値に対して呼ぶ（`fitted.predict(..)`）。距離のモデルにも同じ名前があるメソッド（`fit`、`factor`、`predict` / 共分散 / `sample` の系統、`insert`、`insert_inducing`、疎なモデルの `save`）は、`FittedGpr::predict(&fitted, ..)` のように型パラメータを書かずに型のパスから呼ぶと、コンパイルできない（`E0034`）。パスだけでは、同じ名前のどのメソッドか決まらないためである。値が持つ型パラメータを書く。既定の型パラメータの `FittedGpr` なら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったものなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
+モデルのメソッドは値に対して呼ぶ（`fitted.predict(..)`）。距離のモデルにも同じ名前があるメソッド（`fit`、`factor`、`predict` / 共分散 / `sample` の系統、`insert`、`insert_inducing`、疎なモデルの `into_online` と `save`）は、`FittedGpr::predict(&fitted, ..)` のように型パラメータを書かずに型のパスから呼ぶと、コンパイルできない（`E0034`）。パスだけでは、同じ名前のどのメソッドか決まらないためである。値が持つ型パラメータを書く。既定の型パラメータの `FittedGpr` なら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったものなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
 
 `X` と誘導点 `Z` は列優先の `f64` である。特徴 0 の全行、次に特徴 1。`n_rows` が点数、`n_cols` が特徴数。`y` の長さは `n_rows`。空、長さが `n_rows * n_cols` でない、`NaN` か `Inf` は `GprError`。
 
