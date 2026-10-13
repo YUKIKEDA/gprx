@@ -34,13 +34,13 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` と `factor` の戻り値は `Result<Fitted, (Trainer, GprError)>`。`Gpr` では `?` を使うとトレーナーは捨てられ、`GprError` だけが残る（`From<(Gpr<O, P, K>, GprError)> for GprError`）。`Sgpr` と `Svgp` にはこの変換が無いので、下の例のように `.map_err(|(_, e)| e)?` と書く。同じトレーナーでやり直すなら、`Err((trainer, err))` を照合する。
 
-モデルのメソッドは値に対して呼ぶ（`fitted.predict(..)`）。`FittedGpr::predict(&fitted, ..)` のように型パラメータを書かずに型のパスから呼ぶと、コンパイルできない（`E0034`）。座標のモデルと距離のモデルが、同じ名前のメソッドを持つためである。既定の型パラメータで呼ぶなら `<FittedGpr>::predict(&fitted, ..)` と書く。
+モデルのメソッドは値に対して呼ぶ（`fitted.predict(..)`）。距離のモデルにも同じ名前があるメソッド（`fit`、`factor`、`predict` / 共分散 / `sample` の系統、`insert`、`insert_inducing`、疎なモデルの `save`）は、`FittedGpr::predict(&fitted, ..)` のように型パラメータを書かずに型のパスから呼ぶと、コンパイルできない（`E0034`）。パスだけでは、同じ名前のどのメソッドか決まらないためである。値が持つ型パラメータを書く。既定の型パラメータの `FittedGpr` なら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったものなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
 
 `X` と誘導点 `Z` は列優先の `f64` である。特徴 0 の全行、次に特徴 1。`n_rows` が点数、`n_cols` が特徴数。`y` の長さは `n_rows`。空、長さが `n_rows * n_cols` でない、`NaN` か `Inf` は `GprError`。
 
 `n_jobs` は scikit-learn のスレッド数のノブで、gprx には無い。距離の計算はプロセス全体の Rayon プールを使い、そのプールの大きさがスレッド数になる。プロセス開始前の `RAYON_NUM_THREADS` か、最初の `fit` か `predict` の前に呼ぶ `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` で決まる。プールの初期化は一度だけ。ワーカーが 1 つなら、計算は逐次になる。
 
-学習のコレスキー分解と、勾配に要る `n` 個の右辺の求解は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散は三角行列 `L` への代入で、その並列度はさらに `n · m / 16384` と `m / 12` で頭打ちにする。カーネルを埋める処理は、プール全体を使う。
+`n` 行 `k` 列の分解や求解は、線形代数側を `min(プール, n / 64, n · k / 16384, k / 12)` 個（少なくとも 1 個）のワーカーで動かす。学習のコレスキー分解と、勾配に要る `n` 個の右辺の求解は `k = n`。予測と共分散の求解は、クエリ点 1 つにつき 1 列。カーネルを埋める処理は、プール全体を使う。
 
 `gprx::internals`（`bench-internals`、`insert-stages`）はセマンティックバージョニングの対象外である。直接依存してはならない。
 
@@ -168,7 +168,7 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`save(dir)` は因子なしで `config.json` と `model.safetensors` を書く。`save_with_factor` は列優先の `L` と `α` も書く。
+`save(dir)` は因子なしで `config.json` と `model.safetensors` を書く。`save_with_factor` は因子と `α` も書く。`FittedGpr` なら列優先の `L`、`OnlineGpr` なら詰めた LDLT の因子。
 
 `fit` の前に、`Gpr` で次を呼ぶ。
 
@@ -262,7 +262,7 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`fit` と `factor` の引数は `(x, n_rows, n_cols, y, z, n_inducing)`。`z` は `n_inducing` 点で、特徴数は `n_cols` と同じ列優先。`factor` は `θ` も `Z` も動かさない。自由な誘導点では、パラメータの並びがカーネルの `θ`、尤度の `θ`、列優先の `Z` になる。各座標の範囲は学習データの範囲で、各特徴の幅の 10%、少なくとも `0.1` だけ広げる。Matérn の `ν = 1/2` には、自由な `Z` の座標微分がない（`GprError::CoordGradientUnsupported`）。
+`fit` と `factor` の引数は `(x, n_rows, n_cols, y, z, n_inducing)`。`z` は `n_inducing` 点で、特徴数は `n_cols` と同じ列優先。`factor` は `θ` も `Z` も動かさない。自由な誘導点では、パラメータの並びがカーネルの `θ`、尤度の `θ`、列優先の `Z` になる。各座標の範囲は、入力の変換をかけたあとの学習データから作る。データの範囲を、両側にその幅の 10%（少なくとも `0.1`）だけ広げ、下端が `0` より大きければ `0` まで下げる。Matérn の `ν = 1/2` には、自由な `Z` の座標微分がない（`GprError::CoordGradientUnsupported`）。
 
 `FittedSgpr` の予測、共分散、サンプル、leave-one-out は `FittedGpr` と同じ。目的関数も同じで、`neg_log_marginal_likelihood`、`num_params`、`get_params`、`set_params`、`value_and_gradient_into`、`hessian_into` がある。モデルからは `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` を取得できる。`z` は、元の座標の誘導点。
 
@@ -363,13 +363,13 @@ fn main() -> Result<(), gprx::GprError> {
 
 最適化の座標から作るメソッドは、カーネルの葉ごとに違う。`from_log_lengthscale` と `from_log_lengthscales` は長さ尺度。`from_log_variance` は分散、`from_log_constant` は定数。`from_log` は 2 つをまとめて受け取る。周期なら log 長さ尺度と log 周期、有理二次なら log 長さ尺度と log `α`。
 
-`bounds` が 1 つだけのカーネルの葉は、RBF、Matérn、定数、線形、ホワイトである。周期は `lengthscale_bounds` と `period_bounds` に分かれ、`with_bounds` は両方の区間を取る。有理二次は `lengthscale_bounds` と `alpha_bounds` に分かれ、`with_bounds` は両方を取る。
+`bounds` が 1 つだけのカーネルの葉は、等方の RBF と Matérn、定数、線形、ホワイトである。ARD の葉は、長さスケールの区間を `ArdLengthscales` で持つ。周期は `lengthscale_bounds` と `period_bounds` に分かれ、`with_bounds` は両方の区間を取る。有理二次は `lengthscale_bounds` と `alpha_bounds` に分かれ、`with_bounds` は両方を取る。
 
 ARD の `lengthscale(dim)` は、1 つの `ℓ_d` を返す。`log_lengthscales` は保存されたベクトル。`lengthscales()` は `ArdLengthscales` を返す。そのメソッドは `new`、`from_log_lengthscales`、`with_bounds`、`lengthscale(dim)`、`log_lengthscales`、`num_params`、`get_params`、`set_params`。ARD の `with_bounds` は、すべての `ℓ_d` に同じ区間を 1 つ渡す。有理二次 ARD の `with_bounds` は、長さ尺度の区間と `α` の区間を取る。
 
-カーネルの葉と `CompiledKernel` は、`faer` の行列（`MatRef` / `MatMut`。呼ぶには `faer = "0.24"` を足す）の上で、`apply`、`apply_cross`、`grad`、`hess` で評価する。`LinearKernel` 以外の葉は、対角を `fill_diag` で書く。`LinearKernel` は座標を読むので、対角は `fill_diag_points` で書く。`ConstantKernel` と `WhiteKernel` には `apply_points`、`apply_cross_points`、`grad_points`、`hess_points` もあり、RBF、Matérn、白色ノイズの葉には `grad_wrt_coord_dim` もある。
+カーネルの葉と `CompiledKernel` は、`faer` の行列（`MatRef` / `MatMut`。呼ぶには `faer = "0.24"` を足す）の上で、`apply`、`apply_cross`、`grad`、`hess` で評価する。`LinearKernel` 以外の葉は、そこで二乗距離を読み、対角を `fill_diag` で書く。`LinearKernel` はこの 4 つのメソッドで座標を読み、対角は `fill_diag_points` で書く。`ConstantKernel` と `WhiteKernel` には `apply_points`、`apply_cross_points`、`grad_points`、`hess_points` もあり、`RbfKernel`、`RbfArdKernel`、等方の `MaternKernel`、`WhiteKernel` には `grad_wrt_coord_dim` もある。
 
-書く要素は `Triangle` で選ぶ。`Triangle::Lower` はコレスキーで、ほかに `Upper` と `Full` がある。カーネルの葉は `exp` を `Accurate` で計算する。`CompiledKernel::apply::<M>` とその他のメソッドは、`KernelMath` の型 `M` と、出力と同じ形の作業用の行列を取る。`Accurate` は libm / SIMD の `exp`。`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は、`f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` は、この選択を使わない。
+書く要素は `Triangle` で選ぶ。`Triangle::Lower` はコレスキーで、ほかに `Upper` と `Full` がある。カーネルの葉は `exp` を `Accurate` で計算する。`CompiledKernel::apply::<M>` と、評価するその他のメソッド（`fill_diag` / `fill_diag_points` を除く）は、`KernelMath` の型 `M` と、出力と同じ形の作業用の行列を取る。`Accurate` は libm / SIMD の `exp`。`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は、`f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` は、この選択を使わない。
 
 `KernelTerm<T>` は、二乗距離を読む自作のカーネルの葉のトレイト。実装するのは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`、`clone_box`。疎なモデルには、さらに `grad_cross` と `hess_cross` が要る。自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` も要る。保存するなら `persist_id` と `persist_state` も実装する（`serde_json::Value` を返すので、`serde_json = "1"` を足す）。実装は、すべての `T: KernelScalar` について一度だけ書く。モデルには、その葉が `f64` と `f32` で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` であることが必要である。`CustomKernel::new(term)` が `Box` に入れ、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` が木に入れる。疎なモデルが要る微分の無いカーネルの葉は `CoordGradientUnsupported`。下の保存と読み込みの例で 1 つ実装している。
 
