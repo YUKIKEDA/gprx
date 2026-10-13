@@ -40,13 +40,18 @@ crate can name); `gprx::internals` is outside that contract.
   A `KernelSpec` passed as a value, as in the 0.1.0 README and examples,
   builds unchanged.
 - **A method called by its type's path without the type's parameters**
-  (`FittedGpr::predict(&model, ..)`) can fail with `E0034` (multiple
-  applicable items). The models now have the same method for coordinate
-  and distance kernels, and the bare path does not say which. Calls that
-  built in 0.1.0 and fail now include `Gpr::fit`,
-  `FittedSgpr::into_online`, and `predict` on `FittedGpr`, `OnlineGpr`,
-  `FittedSgpr`, `OnlineSgpr`, and `FittedSvgp`. Call the method on the value, or name the type in
-  angle brackets so its defaults apply:
+  (`FittedGpr::predict(&model, ..)`) fails with `E0034` (multiple
+  applicable items) when the distance models have a method of the same
+  name: the bare path does not say which. That is `fit` and `factor` on
+  `Gpr`, `Sgpr`, and `Svgp`; the `predict` / `predict_covariance` /
+  `sample` family on every fitted and online model; `insert` on
+  `OnlineGpr` and `OnlineSgpr`; `insert_inducing`; `into_online` on
+  `FittedSgpr`; and `save` on `FittedSgpr`, `OnlineSgpr`, and
+  `FittedSvgp`. Methods that only the coordinate models have, such as
+  `FittedGpr::save` or `loo_predict`, build as before. Call the method on
+  the value, or name the type with the parameters the value has
+  (`<FittedGpr>::predict` for the defaults, `<FittedGpr<Fixed>>::predict`
+  for a model from `factor`, `<Svgp<Adam>>::fit`):
 
   ```rust
   # use gprx::kernel::{KernelSpec, RbfKernel};
