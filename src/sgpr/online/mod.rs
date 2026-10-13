@@ -107,11 +107,10 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
 /// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
-/// by that identifier. An inducing insert borders the factors of `K_mm`
-/// and `B` with one row (assembling the enlarged set again when the
-/// bordered pivot is not positive); an inducing delete removes the row
-/// from the factor of `K_mm` with a trailing update and rebuilds `A` and
-/// `B`. Neither moves `X` or `θ`.
+/// by that identifier. Each inducing insert or delete assembles the VFE
+/// system again on the changed inducing set (`O(n·m²)`), so its cost does
+/// not depend on whether the factors could have been updated in place.
+/// Neither moves `X` or `θ`.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
 ///
@@ -919,9 +918,8 @@ where
 
     /// Removes the inducing point identified by `id` and packs every buffer.
     ///
-    /// Updates `K_mm` with a trailing cholupdate and rebuilds `A` / `B`
-    /// from the reduced inducing set. The last remaining inducing point
-    /// cannot be deleted.
+    /// Assembles the VFE system again on the reduced inducing set
+    /// (`O(n·m²)`). The last remaining inducing point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -1460,14 +1458,14 @@ impl<O, P> OnlineSgpr<O, P>
 where
     P: crate::precision::GpScalar,
 {
-    /// Appends one inducing point at the current `θ` with a bordered VFE update.
+    /// Appends one inducing point at the current `θ` and assembles the VFE system again.
     ///
     /// `z_new` has length [`Self::d`], in the original coordinates of `X`;
     /// it goes through the input transform fitted at training. Training
     /// `X` / `y` are not moved.
     /// The returned [`InducingId`] is new and is never reused after a later
-    /// [`Self::delete_inducing`]. If the bordered Schur complement is
-    /// non-positive, the enlarged inducing set is assembled again.
+    /// [`Self::delete_inducing`]. The VFE system of the enlarged inducing
+    /// set is assembled again (`O(n·m²)`).
     ///
     /// # Errors
     ///
@@ -1476,8 +1474,8 @@ where
     /// [`GprError::EmptyInput`] if `d` is zero,
     /// [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left (only a
     /// loaded `next_inducing_id` near `u64::MAX` reaches this), or
-    /// [`GprError::CholeskyFailed`] if the full reassemble of the enlarged
-    /// inducing set fails.
+    /// [`GprError::CholeskyFailed`] if the enlarged inducing set does not
+    /// factor under [`Self::jitter_policy`].
     ///
     /// # Examples
     ///

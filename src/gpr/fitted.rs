@@ -637,8 +637,10 @@ where
     /// [`Self::num_params`] long or `out` is not its square, the parameter
     /// errors of [`Self::set_params`] ([`GprError::InvalidHyperparameter`],
     /// [`GprError::InvalidNoiseVariance`], [`GprError::InvalidInterval`]) if
-    /// `params` is rejected, or [`GprError::CholeskyFailed`] if `A` cannot
-    /// be factored. A custom kernel leaf returns its own error.
+    /// `params` is rejected, [`GprError::CholeskyFailed`] if `A` cannot be
+    /// factored, or [`GprError::UnsupportedKernelOperation`] if the kernel
+    /// cannot evaluate its second derivatives at this `θ`. A custom kernel
+    /// leaf returns its own error.
     ///
     /// # Examples
     ///

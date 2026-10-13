@@ -400,8 +400,8 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// each inducing point equals the one the training blocks hold for that
     /// pair (a [`DistanceSource::tidy`] source repairs both to their mean).
     /// The column is kept as a new column of the training blocks, and the
-    /// VFE system is assembled again, as the coordinate `insert_inducing`
-    /// does when its bordered update is not taken. The returned
+    /// VFE system is assembled again on the enlarged inducing set, as the
+    /// coordinate `insert_inducing` does. The returned
     /// [`InducingId`] is never reused after a later
     /// [`Self::delete_inducing`].
     ///
