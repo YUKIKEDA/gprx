@@ -203,6 +203,12 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R7-5 | Task | `OnlineSgpr` undoes a failed update from one state value, not a field list | [#392](https://github.com/YUKIKEDA/gprx/issues/392) | done |
 | R7-6 | Task | Decode `precision` and `residual` into one type once when loading | [#393](https://github.com/YUKIKEDA/gprx/issues/393) | done |
 
+## R8 (after the 0.2.0 publish review, [#520](https://github.com/YUKIKEDA/gprx/issues/520))
+
+| ID | Kind | Title | Issue | Status |
+| --- | --- | --- | --- | --- |
+| R8-1 | Bug | OnlineSgpr inducing insert / delete use ADR 0005's incremental update | [#520](https://github.com/YUKIKEDA/gprx/issues/520) | open |
+
 ## B (real-dataset comparison)
 
 | ID | Kind | Title | Issue | Status |
