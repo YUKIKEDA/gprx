@@ -159,7 +159,7 @@ libgp has two behaviors the comparison code avoids. The variance from `predict` 
 
 The numbers in this section are one comparison, on one PC, with the same training setup in every library.
 
-Exact GP and SGPR (512 inducing points) use L-BFGS for at most 100 iterations. The minibatch model uses Adam, learning rate 0.01, 1024 points at a time, and three passes over the data. None of the libraries is trained with the optimizer settings it ships with.
+Exact GP and SGPR (512 inducing points) use L-BFGS for at most 100 iterations. The minibatch model uses Adam, learning rate 0.01, 1024 points at a time, and three passes over the data. Apart from gprx's L-BFGS, whose defaults are already these limits, no library is trained with the optimizer settings it ships with.
 
 Exact GP is Snelson, Mauna Loa, yacht, and energy. SGPR is wine, power plant, and naval (20 splits), kin40k (5 splits), and 3droad and song (1 split). The minibatch model is kin40k, 3droad, song, and HouseElectric (1 split each).
 

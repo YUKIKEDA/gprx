@@ -104,8 +104,9 @@ crate can name); `gprx::internals` is outside that contract.
   loads in 0.2.0 and predicts the same values (an online exact model to
   within a relative 1e-14), and a coordinate model 0.2.0 saves loads in
   0.1.0.
-- The 0.1.0 README, examples, and tests build and pass against 0.2.0
-  without changes.
+- The 0.1.0 README and examples build and run against 0.2.0 without
+  changes. So do its tests, except `tests/custom_kernel.rs`, whose
+  `KernelTerm` impls define `clone_box` (see above).
 
 ## [0.1.0] - 2026-10-06
 
