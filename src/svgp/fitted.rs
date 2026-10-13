@@ -23,13 +23,61 @@ use super::factor::{
 
 /// Represents the factored stochastic variational GPR at the `θ` used by [`crate::Svgp<Fixed>::factor`] or [`crate::Svgp<crate::Adam>::fit`].
 ///
+/// The type parameters are the precision `P` and the kernel `K` of the
+/// [`crate::Svgp`] it came from. A [`KernelSpec`] model holds inducing
+/// coordinates `Z` ([`Self::z`]); a [`crate::kernel::DistanceKernel`] model
+/// holds the indices of the training points that are its inducing points,
+/// and the supplied `n × m` squared distances to them (see
+/// [`crate::Svgp`]).
+///
 /// Stores the LLT of `K_mm = k(Z, Z)` and a whitened variational posterior
 /// `q(v) = N(m, L Lᵀ)` used by [`Self::predict`] and [`Self::neg_elbo`].
 /// Observation noise is not added to `K_mm`. Hyperparameters are kernel `θ`,
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
 ///
-/// See the example on [`Self::predict`].
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{
+///     GaussianLikelihood, JitterPolicy, KernelExp, PredictOptions, Prediction, Svgp, VarianceKind,
+/// };
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// // Column-major `X` (n = 4, d = 1) and the inducing coordinates `Z` (m = 2).
+/// let (x, y, z) = ([0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 0.5, 0.25], [0.5, 2.5]);
+/// let mut fitted = Svgp::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .factor(&x, 4, 1, &y, &z, 2)
+///     .map_err(|(_, e)| e)?;
+///
+/// // The training data, `Z`, and the settings carried from the trainer.
+/// assert_eq!((fitted.n(), fitted.m(), fitted.d()), (4, 2, 1));
+/// assert_eq!(fitted.x(), &x);
+/// assert_eq!(fitted.y(), &y);
+/// assert_eq!(fitted.z(), &z);
+/// assert_eq!(fitted.math(), KernelExp::Accurate);
+/// assert!(matches!(fitted.jitter_policy(), JitterPolicy::Adaptive(_)));
+///
+/// // Kernel θ, likelihood θ, the whitened mean (m), then packed `L` (m(m + 1) / 2).
+/// let mut params = vec![0.0; fitted.num_params()];
+/// fitted.get_params(&mut params)?;
+/// assert_eq!(params.len(), fitted.kernel().num_params() + 1 + 2 + 3);
+/// assert!((params[1] - fitted.likelihood().log_noise_variance()).abs() < 1e-12);
+///
+/// // Latent variance (no σn²) for each kind of query.
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let xs = [0.25, 0.75];
+/// let mut out = Prediction::default();
+/// fitted.predict_with_into(&xs, 2, 1, latent, &mut out)?;
+/// assert_eq!(out, fitted.predict_with(&xs, 2, 1, latent)?);
+/// let cov = fitted.predict_covariance_with(&xs, 2, 1, latent)?;
+/// assert_eq!(cov.covariance.len(), 4);
+/// assert_eq!(fitted.sample(&xs, 2, 1, 3, 7)?.len(), 6);
+/// assert_eq!(fitted.sample_with(&xs, 2, 1, latent, 3, 7)?.len(), 6);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct FittedSvgp<P: ModelPrecision = DoublePrecision, K: ModelKernel = KernelSpec> {
     pub(super) core: SparseCore<K::Supply>,
@@ -67,7 +115,7 @@ where
     /// Kernel `θ`, likelihood `θ`, the whitened mean (`m` scalars), then the
     /// packed lower triangle of `L` (`m(m + 1) / 2` scalars).
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn num_params(&self) -> usize {
         self.core.theta_len() + q_param_len(self.core.m)
     }
@@ -82,7 +130,7 @@ where
     /// Returns [`GprError::LengthMismatch`] if `out` is the wrong length
     /// or a custom leaf rejects the write.
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
         crate::data::require_count(out.len(), self.num_params(), "parameters")?;
         let n_theta = self.core.theta_len();
@@ -108,8 +156,14 @@ where
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
     /// length or an `L` diagonal entry is not positive,
     /// [`GprError::NonFiniteInput`] if a variational value is not finite,
-    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid, or
-    /// [`GprError::CholeskyFailed`] if `K_mm` cannot be factored. A rejected
+    /// [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidNoiseVariance`] if a kernel or likelihood `θ` is
+    /// not finite or its `exp` is not a positive finite value,
+    /// [`GprError::InvalidInterval`] if a value is outside the interval of
+    /// its parameter (see [`crate::BoundedParam`] and
+    /// [`crate::GaussianLikelihood::bounds`]), or
+    /// [`GprError::CholeskyFailed`] if `K_mm` cannot be factored. A custom
+    /// kernel leaf returns its own error. A rejected
     /// slice or a Cholesky failure leaves stored `θ` and `q` unchanged.
     ///
     /// # Examples
@@ -247,8 +301,11 @@ where
     /// Returns [`GprError::LengthMismatch`] if a slice length is wrong
     /// or an `L` diagonal entry is not positive,
     /// [`GprError::NonFiniteInput`] if a variational value is not finite,
-    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
-    /// or [`GprError::CholeskyFailed`] if `K_mm` cannot be factored.
+    /// the parameter errors of [`Self::set_params`]
+    /// ([`GprError::InvalidHyperparameter`],
+    /// [`GprError::InvalidNoiseVariance`], [`GprError::InvalidInterval`]) if
+    /// a `θ` is rejected, or [`GprError::CholeskyFailed`] if `K_mm` cannot
+    /// be factored.
     ///
     /// # Examples
     ///
@@ -332,7 +389,7 @@ where
     /// not stored; [`crate::LoadedSvgp::load`] factors the system again at the saved `θ`
     /// and `Z`. Caller-defined kernels and transforms need their
     /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
-    /// The optimizer and the inducing-point search are not stored.
+    /// The optimizer is not stored.
     ///
     /// # Errors
     ///
@@ -511,7 +568,7 @@ where
     ///
     /// Same as [`Self::predict`].
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn predict_covariance_with(
         &self,
         xs: &[f64],
@@ -551,7 +608,7 @@ where
     /// posterior covariance cannot be factored after the retries of
     /// [`Self::jitter_policy`].
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn sample(
         &self,
         xs: &[f64],
@@ -569,7 +626,7 @@ where
     ///
     /// Same as [`Self::sample`].
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn sample_with(
         &self,
         xs: &[f64],
@@ -632,7 +689,7 @@ where
     ///
     /// Same as [`Self::predict`].
     ///
-    /// See the example on [`Self::predict`].
+    /// See the example on [`FittedSvgp`].
     pub fn predict_with_into(
         &mut self,
         xs: &[f64],

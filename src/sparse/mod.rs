@@ -53,31 +53,43 @@ macro_rules! sparse_core_accessors {
     };
     ($($core:ident).+) => {
         /// Returns the number of training points.
+        ///
+        /// See the example on [`Self`].
         pub fn n(&self) -> usize {
             self.$($core).+.n
         }
 
         /// Returns the number of inducing points.
+        ///
+        /// See the example on [`Self`].
         pub fn m(&self) -> usize {
             self.$($core).+.m
         }
 
         /// Returns the observation-noise model.
+        ///
+        /// See the example on [`Self`].
         pub fn likelihood(&self) -> &$crate::GaussianLikelihood {
             &self.$($core).+.likelihood
         }
 
         /// Returns the jitter retries used when `K_mm` fails to factor.
+        ///
+        /// See the example on [`Self`].
         pub fn jitter_policy(&self) -> $crate::JitterPolicy {
             self.$($core).+.jitter
         }
 
         /// Returns the kernel `exp` mode the trainer set with `with_math`.
+        ///
+        /// See the example on [`Self`].
         pub fn math(&self) -> $crate::KernelExp {
             self.$($core).+.math
         }
 
         /// Returns the original training targets.
+        ///
+        /// See the example on [`Self`].
         pub fn y(&self) -> &[f64] {
             &self.$($core).+.y_obs
         }
@@ -92,16 +104,22 @@ macro_rules! sparse_point_accessors {
     };
     ($($core:ident).+) => {
         /// Returns the feature dimension.
+        ///
+        /// See the example on [`Self`].
         pub fn d(&self) -> usize {
             self.$($core).+.d
         }
 
         /// Returns the original training features in column-major order.
+        ///
+        /// See the example on [`Self`].
         pub fn x(&self) -> &[f64] {
             &self.$($core).+.x_obs
         }
 
         /// Returns the inducing features in column-major order, in the original coordinates of `X`.
+        ///
+        /// See the example on [`Self`].
         pub fn z(&self) -> &[f64] {
             &self.$($core).+.z_obs
         }
@@ -115,6 +133,8 @@ macro_rules! sparse_kernel_accessor {
     };
     ($($core:ident).+) => {
         /// Returns the kernel whose hyperparameters this model owns.
+        ///
+        /// See the example on [`Self`].
         pub fn kernel(&self) -> &$crate::kernel::KernelSpec {
             &self.$($core).+.kernel
         }

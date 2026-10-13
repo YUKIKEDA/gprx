@@ -29,14 +29,20 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use super::shared::{ExactSupplied, Query};
 use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fit_buffers};
 
-/// Stores a fitted Exact GPR: `L`, `α`, training `X` / `y`, kernel, and transforms.
+/// Stores a fitted Exact GPR: `L`, `α`, the training data, kernel, and transforms.
+///
+/// The type parameters are those of the [`Gpr`] it came from: the
+/// optimizer `O` that [`Self::refit`] runs, the precision `P`, and the
+/// kernel `K`. The training data is the coordinates `X` and targets `y` of a
+/// [`KernelSpec`] model, or the supplied squared distances (plus `X` for the
+/// coordinate leaves) and `y` of a [`DistanceKernel`] model.
 ///
 /// [`Self::neg_log_marginal_likelihood`] is
 /// `½ yᵀ α + ½ log|A| + (n/2) log(2π)` with `log|A| = 2 Σ log(L_ii)`.
 /// [`Self::value_and_gradient_into`] rebuilds `L`, `α`, and `W` once and
 /// writes `∂L/∂θ = -½ ⟨W, ∂A/∂θ⟩`. [`Self::predict`] returns the mean and
 /// a diagonal variance; [`Self::predict_into`] writes into a reused
-/// [`Prediction`](crate::Prediction) and crate-private query buffers (not the fit workspace).
+/// [`Prediction`](crate::Prediction) and query buffers the model keeps (not the fit workspace).
 /// [`Self::predict_covariance`] returns the query–query matrix as
 /// [`PredictiveCovariance`](crate::PredictiveCovariance). [`Self::sample`] draws from that posterior.
 /// [`Self::loo_predict`] is the GPML leave-one-out at every
@@ -52,16 +58,65 @@ use super::{ExactFit, Gpr, GprCore, LdltStore, LltStore, OnlineGpr, Policies, fi
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Gpr, GaussianLikelihood};
+/// use gprx::{
+///     CholeskyBuffer, DistanceCachePolicy, Fixed, GaussianLikelihood, Gpr, JitterPolicy,
+///     KernelExp, PredictOptions, Prediction, VarianceKind,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let fitted = Gpr::new(kernel, likelihood)
-///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// // Column-major `X` with n = 3 points and d = 1 feature.
+/// let (x, y) = ([0.0, 1.0, 2.0], [0.0, 1.0, 0.5]);
+/// let mut fitted = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .fit(&x, 3, 1, &y)
 ///     .map_err(|(_, e)| e)?;
 /// let pred = fitted.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+///
+/// // The training data, `α`, and the policies carried from the trainer.
+/// assert_eq!((fitted.n(), fitted.d()), (3, 1));
+/// assert_eq!(fitted.x(), &x);
+/// assert_eq!(fitted.y(), &y);
+/// assert_eq!(fitted.alpha().len(), 3);
+/// assert_eq!(fitted.distance_cache_policy(), DistanceCachePolicy::Cached);
+/// assert_eq!(fitted.cholesky_buffer(), CholeskyBuffer::Retain);
+/// assert_eq!(fitted.math(), KernelExp::Accurate);
+/// assert_eq!(fitted.jitter_policy(), JitterPolicy::default());
+///
+/// // θ is the kernel's parameters, then the likelihood's log σn².
+/// let mut theta = vec![0.0; fitted.num_params()];
+/// fitted.get_params(&mut theta)?;
+/// assert_eq!(theta.len(), fitted.kernel().num_params() + 1);
+/// assert!((theta[1] - fitted.likelihood().log_noise_variance()).abs() < 1e-12);
+///
+/// // Latent variance (no σn²) for each kind of query.
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let xs = [0.25, 0.75];
+/// let pred = fitted.predict_with(&xs, 2, 1, latent)?;
+/// let mut out = Prediction::default();
+/// fitted.predict_with_into(&xs, 2, 1, latent, &mut out)?;
+/// assert_eq!(out, pred);
+/// let cov = fitted.predict_covariance_with(&xs, 2, 1, latent)?;
+/// assert_eq!(cov.covariance.len(), 4);
+/// let draws = fitted.sample_with(&xs, 2, 1, latent, 5, 42)?;
+/// assert_eq!(draws.len(), 10);
+/// let loo = fitted.loo_predict_with(latent)?;
+/// assert_eq!(loo.mean.len(), 3);
+///
+/// // Search θ again from its current value, then save `L` and `α` too.
+/// fitted.refit()?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-fitted-gpr-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save_with_factor(&dir)?;
+/// let _ = std::fs::remove_dir_all(&dir);
+///
+/// // Back to a trainer; factor at the fitted θ and rebuild `L` and `α` there.
+/// let mut fixed = fitted
+///     .into_trainer()
+///     .with_optimizer(Fixed)
+///     .factor(&x, 3, 1, &y)
+///     .map_err(|(_, e)| e)?;
+/// fixed.refit()?;
+/// assert_eq!(fixed.n(), 3);
 /// # Ok(())
 /// # }
 /// ```
@@ -456,17 +511,22 @@ where
     /// Sets kernel then likelihood `θ` and rebuilds `L` / `α`.
     ///
     /// `params` is kernel parameters followed by the likelihood parameter,
-    /// matching [`Self::get_params`]. Transforms and training `X` / `y` are
+    /// matching [`Self::get_params`]. Transforms and the training data are
     /// not changed. [`Self::kernel`] stays a shared reference; this is the
-    /// write path. After success, [`Gpr<Fixed>::factor`] on
-    /// [`Self::into_trainer`] with [`Self::x`] / [`Self::y`] rebuilds the
-    /// same factorization from the stored observations.
+    /// write path. For a [`KernelSpec`] model, `factor` of [`Gpr<Fixed>`]
+    /// on [`Self::into_trainer`] with [`Self::x`] / [`Self::y`] then
+    /// rebuilds the same factorization from the stored observations.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is
-    /// invalid, or [`GprError::CholeskyFailed`] if `A` cannot be factored.
+    /// length, [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidNoiseVariance`] if a kernel or likelihood `θ` is
+    /// not finite or its `exp` is not a positive finite value,
+    /// [`GprError::InvalidInterval`] if a value is outside the interval of
+    /// its parameter (see [`crate::BoundedParam`] and
+    /// [`GaussianLikelihood::bounds`]), or [`GprError::CholeskyFailed`] if
+    /// `A` cannot be factored. A custom kernel leaf returns its own error.
     /// Kernel and likelihood `θ` are committed together only after `A`
     /// factors. A rejected slice or a Cholesky failure leaves stored `θ`
     /// and `L` / `α` unchanged.
@@ -515,25 +575,27 @@ where
     /// parameter. One Cholesky produces `L` and `α`; `W = ααᵀ - A⁻¹` is
     /// formed from that factor. [`crate::CholeskyBuffer::Retain`] keeps `W` in a dedicated
     /// buffer. [`crate::CholeskyBuffer::Reuse`] writes `W` over `L` and this method
-    /// refactors afterwards so [`Self::predict`] still sees `L`. Kernel
-    /// `∂A/∂θ` goes through `exp_buf`. Product trees also use
-    /// `kernel_scratch`. The returned value is the same as
-    /// [`Self::neg_log_marginal_likelihood`] after a successful call.
+    /// refactors afterwards so [`Self::predict`] still sees `L`. Each
+    /// kernel `∂A/∂θ` is written into a buffer the model keeps. The
+    /// returned value is the same as [`Self::neg_log_marginal_likelihood`]
+    /// after a successful call.
     ///
-    /// Training `X` / `y` come from [`Gpr::fit`]. Transforms
-    /// are not re-fit.
+    /// The training data is the one stored by the fit. Transforms are not
+    /// re-fit.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if a slice length is wrong,
-    /// [`GprError::InvalidNoiseVariance`] if the likelihood `θ` is invalid,
+    /// the parameter errors of [`Self::set_params`]
+    /// ([`GprError::InvalidHyperparameter`],
+    /// [`GprError::InvalidNoiseVariance`], [`GprError::InvalidInterval`]) if
+    /// `params` is rejected,
     /// [`GprError::CholeskyFailed`] if `A` cannot be factored, or
-    /// [`GprError::UnsupportedKernelOperation`] if the compiled tree cannot
-    /// evaluate at this `θ`. Distance-mode and points-mode product trees are
-    /// supported. Kernel and likelihood `θ` are committed together only after
-    /// `A` factors. A rejected slice or a Cholesky failure leaves stored `θ`
-    /// unchanged.
-    /// Cholesky failure restores `L` and `α` at the previous `θ` so this
+    /// [`GprError::UnsupportedKernelOperation`] if the kernel cannot
+    /// evaluate its derivatives at this `θ`. Kernel and likelihood `θ` are
+    /// committed together only after `A` factors. A rejected slice or a
+    /// Cholesky failure leaves stored `θ` unchanged. A Cholesky failure
+    /// restores `L` and `α` at the previous `θ` so this
     /// value stays a usable [`FittedGpr`].
     ///
     /// # Examples
@@ -571,8 +633,14 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when a slice length is wrong, `params` is
-    /// rejected, or the Gram matrix does not factor.
+    /// Returns [`GprError::LengthMismatch`] if `params` is not
+    /// [`Self::num_params`] long or `out` is not its square, the parameter
+    /// errors of [`Self::set_params`] ([`GprError::InvalidHyperparameter`],
+    /// [`GprError::InvalidNoiseVariance`], [`GprError::InvalidInterval`]) if
+    /// `params` is rejected, [`GprError::CholeskyFailed`] if `A` cannot be
+    /// factored, or [`GprError::UnsupportedKernelOperation`] if the kernel
+    /// cannot evaluate its second derivatives at this `θ`. A custom kernel
+    /// leaf returns its own error.
     ///
     /// # Examples
     ///
@@ -773,8 +841,7 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     ///
     /// `xs` is column-major with `n_rows` query points and `n_cols` features.
     /// Allocates query buffers for this call. Reuse [`Self::predict_into`]
-    /// after a warmup call for a zero-allocation path. See [`Gpr`] for a
-    /// complete fit→predict example.
+    /// after a warmup call for a zero-allocation path.
     ///
     /// # Errors
     ///
@@ -782,6 +849,8 @@ impl<O, P: GpScalar> FittedGpr<O, P> {
     /// training features, [`GprError::EmptyInput`] if a dimension is zero, or
     /// [`GprError::LengthMismatch`] / [`GprError::NonFiniteInput`] for a
     /// badly packed or non-finite `xs`.
+    ///
+    /// See the example on [`FittedGpr`].
     pub fn predict(
         &self,
         xs: &[f64],
@@ -1014,7 +1083,7 @@ impl<O, P: GpScalar, K: PointKernel> FittedGpr<O, P, K> {
 
     /// Returns the original training features in column-major order.
     ///
-    /// Same packing as [`Gpr::fit`] / [`Gpr<Fixed>::factor`]: `n` points by
+    /// Same packing as the `x` passed to `fit` / `factor`: `n` points by
     /// `d` features. Values are on the scale passed to fit, before the input
     /// transform.
     ///
@@ -1027,7 +1096,23 @@ impl<O, P: GpScalar, K: PointKernel> FittedGpr<O, P, K> {
 impl<O, P: GpScalar, C: PointUse> FittedGpr<O, P, DistanceKernel<C>> {
     /// Returns a copy of the kernel whose hyperparameters this model owns.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{DistanceSlot, RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.from_slice(&[0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.to_kernel().num_params(), 1);
+    /// assert_eq!(fitted.slots(), [DistanceSlot::Scalar(image)]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> DistanceKernel<C> {
         <DistanceKernel<C> as ModelKernelParts>::from_spec(self.core.kernel.clone())
     }
@@ -1036,7 +1121,7 @@ impl<O, P: GpScalar, C: PointUse> FittedGpr<O, P, DistanceKernel<C>> {
     /// [`DistanceKernel::slots`]. A model loaded from disk has slots of its
     /// own; bind its supplies to these.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// See the example on [`Self::to_kernel`].
     pub fn slots(&self) -> Vec<DistanceSlot> {
         spec_slots(&self.core.kernel)
     }
@@ -1055,7 +1140,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr::fit`].
+    /// Same as `fit` of the [`Gpr`] of this kernel.
     ///
     /// See the example on [`FittedGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
@@ -1074,7 +1159,7 @@ impl<P: GpScalar, K: ModelKernel> FittedGpr<Fixed, P, K> {
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr<Fixed>::factor`].
+    /// Same as `factor` of the [`Gpr<Fixed>`] of this kernel.
     ///
     /// See the example on [`FittedGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {

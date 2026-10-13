@@ -18,27 +18,68 @@ use super::fitted::FittedSgpr;
 use super::{FixedInducing, FreeInducing, InducingLayout};
 use crate::kernel::NoSupply;
 
-/// Represents the trainer for collapsed variational SGPR at a caller-supplied inducing set `Z`.
+/// Represents the trainer for collapsed variational SGPR at an inducing set the caller chooses.
 ///
-/// The default [`FixedInducing`] searches kernel and likelihood `θ` only.
-/// [`Self::with_inducing`]`(`[`FreeInducing`]`)` searches `θ` and `Z`
-/// together. [`Sgpr<Fixed, I>::factor`] prepares the VFE system at the
-/// current `θ` with no search.
+/// The type parameters are the optimizer `O` (default [`Lbfgs`]; [`Fixed`]
+/// for [`Sgpr<Fixed, I>::factor`]), the inducing layout `I`, the precision
+/// `P` (default [`DoublePrecision`]), and the kernel `K` (default
+/// [`KernelSpec`]). The default [`FixedInducing`] searches kernel and
+/// likelihood `θ` only. [`Self::with_inducing`]`(`[`FreeInducing`]`)`
+/// searches `θ` and `Z` together. [`Sgpr<Fixed, I>::factor`] prepares the
+/// VFE system at the current `θ` with no search.
+///
+/// `K` selects how the inducing points are given. A [`KernelSpec`] model
+/// takes their coordinates `Z` (column-major, `m` points by `d` features)
+/// next to the training `X`. A [`crate::kernel::DistanceKernel`] model has
+/// no coordinates to place them at: its inducing points are training
+/// points, named by their indices, and the caller supplies per slot the
+/// `n × m` squared distances from the training points to them (`K_mm`
+/// reads the inducing points' rows of that block). A prediction then takes
+/// the `m × q` squared distances from the inducing points to the queries.
+/// Such a model keeps its inducing points fixed; [`FreeInducing`] needs
+/// coordinates to move.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Sgpr};
+/// use gprx::{
+///     Fixed, FixedInducing, FreeInducing, GaussianLikelihood, JitterPolicy, KernelExp, Lbfgs,
+///     Sgpr, SinglePrecision,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let fitted = Sgpr::new(kernel, likelihood)
-///     .fit(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
-///     .map_err(|(_, e)| e)?;
+/// let mut sgpr: Sgpr<Lbfgs, FixedInducing> =
+///     Sgpr::new(kernel, likelihood).with_math(KernelExp::FastApprox);
+/// assert_eq!(sgpr.math(), KernelExp::FastApprox);
+/// assert!(matches!(sgpr.jitter_policy(), JitterPolicy::Adaptive(_)));
+/// // θ is the kernel's log-lengthscale, then the likelihood's log σn²; `Z` is not in it.
+/// assert_eq!(sgpr.num_params(), sgpr.kernel().num_params() + 1);
+/// let mut theta = [0.0; 2];
+/// sgpr.get_params(&mut theta)?;
+/// theta[0] = 0.5_f64.ln();
+/// sgpr.set_params(&theta)?;
+/// assert!((sgpr.likelihood().log_noise_variance() - theta[1]).abs() < 1e-12);
+///
+/// // Column-major `X` (n = 4, d = 1) and the inducing coordinates `Z` (m = 2).
+/// let (x, y, z) = ([0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 0.5, 0.25], [0.5, 2.5]);
+/// let fitted = sgpr.clone().fit(&x, 4, 1, &y, &z, 2).map_err(|(_, e)| e)?;
 /// assert_eq!(fitted.n(), 4);
 /// assert_eq!(fitted.m(), 2);
+///
+/// // `Z` searched with θ: two more parameters.
+/// let free = sgpr.clone().with_inducing(FreeInducing).fit(&x, 4, 1, &y, &z, 2).map_err(|(_, e)| e)?;
+/// assert_eq!(free.num_params(), 4);
+///
+/// // `f32` storage, factored at the current θ.
+/// let single = sgpr
+///     .with_precision::<SinglePrecision>()
+///     .with_optimizer(Fixed)
+///     .factor(&x, 4, 1, &y, &z, 2)
+///     .map_err(|(_, e)| e)?;
+/// assert_eq!(single.predict(&[1.5], 1, 1)?.mean.len(), 1);
 /// # Ok(())
 /// # }
 /// ```
@@ -120,8 +161,8 @@ impl<O, I, P, K: ModelKernel> Sgpr<O, I, P, K> {
     ///
     /// Omitting it leaves [`KernelExp::Accurate`].
     ///
-    /// `fit` and predict use the same polynomial. Hyperparameter `exp(θ)` is
-    /// unchanged.
+    /// `fit`, `factor`, and predict use the same `exp`. Hyperparameter
+    /// `exp(θ)` is unchanged.
     ///
     /// See the example on [`Sgpr`].
     pub fn with_math(mut self, math: KernelExp) -> Self {
@@ -249,9 +290,14 @@ impl<O, I, P, K: ModelKernel> Sgpr<O, I, P, K> {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
-    /// is invalid. Kernel and likelihood `θ` are committed together only
-    /// after both writes succeed.
+    /// length, [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidNoiseVariance`] if a kernel or likelihood `θ` is
+    /// not finite or its `exp` is not a positive finite value, or
+    /// [`GprError::InvalidInterval`] if a value is outside the interval of
+    /// its parameter (see [`crate::BoundedParam`] and
+    /// [`GaussianLikelihood::bounds`]). A custom kernel leaf returns its own
+    /// error. Kernel and likelihood `θ` are committed together only after
+    /// both writes succeed.
     ///
     /// See the example on [`Sgpr`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -336,7 +382,19 @@ impl<O, I, P> Sgpr<O, I, P> {
 impl<O, I, P, C: crate::kernel::PointUse> Sgpr<O, I, P, crate::kernel::DistanceKernel<C>> {
     /// Returns a copy of the kernel whose hyperparameters this trainer owns.
     ///
-    /// See the example on [`crate::kernel::DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{GaussianLikelihood, Sgpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let sgpr = Sgpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?);
+    /// assert_eq!(sgpr.to_kernel().num_params(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> crate::kernel::DistanceKernel<C> {
         <crate::kernel::DistanceKernel<C> as ModelKernelParts>::from_spec(self.spec.kernel.clone())
     }
@@ -358,9 +416,10 @@ where
     /// Returns [`GprError::EmptyInput`] when `n`, `d`, or `m` is zero.
     /// Returns [`GprError::DimensionMismatch`] when `z` is packed with a
     /// different feature count than `x` (the same `n_cols` is required).
-    /// Length and finiteness errors match [`crate::Gpr::fit`].
-    /// [`GprError::CholeskyFailed`] when `K_mm` or the VFE `B` matrix cannot
-    /// be factored. [`GprError::OptimizationNotConverged`] when the solver
+    /// Returns [`GprError::LengthMismatch`] when `x`, `y`, or `z` has the
+    /// wrong length, and [`GprError::NonFiniteInput`] when a value is `NaN`
+    /// or `Inf`. [`GprError::CholeskyFailed`] when `K_mm` or the VFE `B`
+    /// matrix cannot be factored. [`GprError::OptimizationNotConverged`] when the solver
     /// stops without a finite best vector.
     ///
     /// # Examples
@@ -421,7 +480,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same input errors as [`Sgpr<O, FixedInducing>::fit`], plus
+    /// Same input errors as `fit` with [`FixedInducing`], plus
     /// [`GprError::CoordGradientUnsupported`] for Matérn with `ν = 1/2` or a
     /// `Custom` leaf that does not implement the squared-distance derivatives
     /// of [`KernelTerm`](crate::kernel::KernelTerm).
@@ -487,9 +546,10 @@ where
     /// Returns [`GprError::EmptyInput`] when `n`, `d`, or `m` is zero.
     /// Returns [`GprError::DimensionMismatch`] when `z` is packed with a
     /// different feature count than `x` (the same `n_cols` is required).
-    /// Length and finiteness errors match [`crate::Gpr<Fixed>::factor`].
-    /// [`GprError::CholeskyFailed`] when `K_mm` or the VFE `B` matrix cannot
-    /// be factored.
+    /// Returns [`GprError::LengthMismatch`] when `x`, `y`, or `z` has the
+    /// wrong length, and [`GprError::NonFiniteInput`] when a value is `NaN`
+    /// or `Inf`. [`GprError::CholeskyFailed`] when `K_mm` or the VFE `B`
+    /// matrix cannot be factored.
     ///
     /// # Examples
     ///

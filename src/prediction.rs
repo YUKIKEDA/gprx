@@ -359,11 +359,11 @@ macro_rules! distance_predict {
                 self.predict_with(sources, $($arg,)* $count, $($tail,)* PredictOptions::default())
             }
 
-            /// Writes [`Self::predict`] into `out`, reusing its capacity.
+            /// Writes `predict` of these sources into `out`, reusing its capacity.
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`]. On an error the contents of `out`
+            /// Same as `predict` of these sources. On an error the contents of `out`
             /// are unspecified: a value a table fails on can be found after
             /// part of the kernel block is written.
             ///
@@ -383,7 +383,7 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`].
+            /// Same as `predict` of these sources.
             ///
             $(#[$pdoc])*
             pub fn predict_with<'s>(
@@ -403,11 +403,11 @@ macro_rules! distance_predict {
                 )
             }
 
-            /// Writes [`Self::predict_with`] into `out`, reusing its capacity.
+            /// Writes `predict_with` of these sources into `out`, reusing its capacity.
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict_into`], `out` included.
+            /// Same as `predict_into` of these sources, `out` included.
             ///
             $(#[$pdoc])*
             pub fn predict_with_into<'s>(
@@ -439,7 +439,7 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict`], plus [`GprError::InvalidDistance`]
+            /// Same as `predict` of these sources, plus [`GprError::InvalidDistance`]
             /// if a query square's diagonal is not zero or it is not
             /// symmetric (see [`crate::kernel::DistanceSource::tidy`]).
             ///
@@ -466,7 +466,7 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict_covariance`].
+            /// Same as `predict_covariance` of these sources.
             ///
             $(#[$cdoc])*
             pub fn predict_covariance_with<'s>(
@@ -488,14 +488,14 @@ macro_rules! distance_predict {
                 )
             }
 
-            /// Draws posterior samples from [`Self::predict_covariance`].
+            /// Draws posterior samples from `predict_covariance` of these sources.
             ///
             /// `seed` starts gprx's seeded generator, as in the coordinate
             /// model's `sample`.
             ///
             /// # Errors
             ///
-            /// Same as [`Self::predict_covariance`], plus
+            /// Same as `predict_covariance` of these sources, plus
             /// [`GprError::CholeskyFailed`] if the posterior covariance does
             /// not factor.
             ///
@@ -527,7 +527,7 @@ macro_rules! distance_predict {
             ///
             /// # Errors
             ///
-            /// Same as [`Self::sample`].
+            /// Same as `sample` of these sources.
             ///
             $(#[$cdoc])*
             #[allow(clippy::too_many_arguments)]

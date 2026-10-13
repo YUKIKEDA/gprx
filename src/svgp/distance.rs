@@ -84,8 +84,9 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
     /// [`GprError::InvalidDistance`] for a value that is not
     /// finite or is negative, or for inducing rows that are not a square
     /// with a zero diagonal and equal mirror entries (see
-    /// [`crate::kernel::DistanceSource::tidy`]), and the errors of the
-    /// coordinate [`Svgp::factor`].
+    /// [`crate::kernel::DistanceSource::tidy`]), [`GprError::NonFiniteInput`]
+    /// if a target is `NaN` or `Inf`, or [`GprError::CholeskyFailed`] when
+    /// `K_mm` cannot be factored.
     ///
     /// # Examples
     ///
@@ -125,14 +126,14 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<DistanceOnly>> {
 
 impl<P: GpScalar> Svgp<Adam, P, DistanceKernel<DistanceOnly>> {
     /// Factors on the supplied distances, then runs mini-batch Adam from
-    /// the whitened prior. Same data contract as [`Svgp::factor`] of this
-    /// kernel; a mini-batch step reads the batch's rows of the stored
-    /// blocks.
+    /// the whitened prior. Same data contract as `factor` of this kernel; a
+    /// mini-batch step reads the batch's rows of the stored blocks.
     ///
     /// # Errors
     ///
-    /// Same as [`Svgp::factor`] of this kernel, plus the errors of the
-    /// coordinate [`Svgp::fit`].
+    /// Same as `factor` of this kernel, plus
+    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`]
+    /// when a trial `θ` or `L` is rejected.
     ///
     /// # Examples
     ///
@@ -176,7 +177,7 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<WithPoints>> {
     ///
     /// # Errors
     ///
-    /// Same as [`Svgp::factor`] of a [`DistanceKernel<DistanceOnly>`], plus
+    /// Same as `factor` of a [`DistanceKernel<DistanceOnly>`] model, plus
     /// [`GprError::EmptyInput`] if `x` is empty, [`GprError::LengthMismatch`]
     /// if `x` is not `n × n_cols` (`n_cols` zero included), [`GprError::NonFiniteInput`] for a
     /// coordinate that is not finite, and the error of the input transform.
@@ -221,12 +222,13 @@ impl<P: GpScalar> Svgp<Fixed, P, DistanceKernel<WithPoints>> {
 impl<P: GpScalar> Svgp<Adam, P, DistanceKernel<WithPoints>> {
     /// Factors on the supplied distances and the coordinates `x`, then runs
     /// mini-batch Adam from the whitened prior. Same data contract as
-    /// [`Svgp::factor`] of this kernel.
+    /// `factor` of this kernel.
     ///
     /// # Errors
     ///
-    /// Same as [`Svgp::factor`] of this kernel, plus the errors of the
-    /// coordinate [`Svgp::fit`].
+    /// Same as `factor` of this kernel, plus
+    /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`]
+    /// when a trial `θ` or `L` is rejected.
     ///
     /// # Examples
     ///
@@ -286,7 +288,25 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
 
     /// Returns a copy of the kernel whose hyperparameters this model owns.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{DistanceSlot, RbfKernel, ScalarDistance};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// // Three samples at 0, 1, 2; the inducing points are samples 0 and 2.
+    /// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+    /// let fitted = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 0.5], &[0, 2])
+    ///     .map_err(|(_, e)| e)?;
+    /// assert_eq!(fitted.to_kernel().num_params(), 1);
+    /// assert_eq!(fitted.slots(), [DistanceSlot::Scalar(image)]);
+    /// assert_eq!(fitted.inducing(), &[0, 2]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> DistanceKernel<C> {
         <DistanceKernel<C> as crate::kernel::ModelKernelParts>::from_spec(self.core.kernel.clone())
     }
@@ -294,7 +314,7 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
     /// Returns the slots of the kernel, in the order of
     /// [`DistanceKernel::slots`]; bind supplies to these.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// See the example on [`Self::to_kernel`].
     pub fn slots(&self) -> Vec<DistanceSlot> {
         crate::kernel::spec_slots(&self.core.kernel)
     }
@@ -303,7 +323,7 @@ impl<P: GpScalar, C: PointUse> FittedSvgp<P, DistanceKernel<C>> {
     /// order of the columns of the training blocks and the rows of a
     /// prediction's blocks.
     ///
-    /// See the example on [`Svgp::factor`] of a [`DistanceKernel<DistanceOnly>`].
+    /// See the example on [`Self::to_kernel`].
     pub fn inducing(&self) -> &[usize] {
         &self.core.supplied.supply.inducing
     }
@@ -413,7 +433,37 @@ distance_predict!(
         /// in `f64`, as it predicts); a fill writes scratch once.
     },
     predict_doc = {
-        /// See the example on [`Svgp::factor`] of a [`DistanceKernel<DistanceOnly>`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, PredictOptions, Prediction, Svgp};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+        /// let mut fitted = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 0.5], &[0, 2])
+        ///     .map_err(|(_, e)| e)?;
+        /// // Two queries at 0.5 and 1.5: inducing × query (2 × 2), then query × query.
+        /// let cross = [0.25, 2.25, 2.25, 0.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], 2, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, options)?;
+        /// let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, options, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -432,6 +482,8 @@ distance_predict!(
         /// let cross = [0.25, 2.25, 2.25, 0.25];
         /// let query = [0.0, 1.0, 1.0, 0.0];
         /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
         /// fitted.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
@@ -464,7 +516,35 @@ distance_predict!(
         /// in `f64`, as it predicts); a fill writes scratch once.
     },
     predict_doc = {
-        /// See the example on [`Svgp::factor`] of a [`DistanceKernel<WithPoints>`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, PredictOptions, Prediction, Svgp};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+        /// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+        /// let mut fitted = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .factor([image.borrow(&train)], 3, &[0.0, 0.5, 1.0], 1, &[0.0, 1.0, 0.5], &[0, 2])
+        ///     .map_err(|(_, e)| e)?;
+        /// let (cross, query, xs) = ([0.25, 2.25, 2.25, 0.25], [0.0, 1.0, 1.0, 0.0], [0.25, 0.75]);
+        /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -482,6 +562,8 @@ distance_predict!(
         ///     .map_err(|(_, e)| e)?;
         /// let (cross, query, xs) = ([0.25, 2.25, 2.25, 0.25], [0.0, 1.0, 1.0, 0.0], [0.25, 0.75]);
         /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
         /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;

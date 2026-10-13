@@ -42,7 +42,7 @@ mod distance;
 /// Represents the stable identity of one inducing point on [`OnlineSgpr`].
 ///
 /// [`crate::FittedSgpr::into_online`] assigns identifiers `0.. m-1` in buffer order. Later
-/// [`OnlineSgpr::insert_inducing`] values increase monotonically and are never reused after
+/// `insert_inducing` calls on [`OnlineSgpr`] return values that increase monotonically and are never reused after
 /// [`OnlineSgpr::delete_inducing`]. There is no public constructor.
 ///
 /// # Examples
@@ -95,12 +95,22 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 
 /// Represents the online collapsed variational SGPR after [`FittedSgpr::into_online`].
 ///
-/// [`Self::insert`] appends one training point and returns a [`PointId`].
+/// The type parameters are the optimizer `O` that [`Self::refit`] runs, the
+/// precision `P`, and the kernel `K`. A [`KernelSpec`] model inserts points
+/// and inducing points from coordinates; a
+/// [`crate::kernel::DistanceKernel`] model inserts them from supplied
+/// squared distances, and its inducing points are training points, named
+/// by their [`PointId`]s.
+///
+/// `insert` appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
 /// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
-/// [`Self::insert_inducing`] appends one inducing point and returns an
+/// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
-/// by that identifier. Those updates follow ADR 0005.
+/// by that identifier. Each inducing insert or delete assembles the VFE
+/// system again on the changed inducing set (`O(n·m²)`), so its cost does
+/// not depend on whether the factors could have been updated in place.
+/// Neither moves `X` or `θ`.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
 ///
@@ -108,7 +118,10 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+/// use gprx::{
+///     Fixed, GaussianLikelihood, JitterPolicy, KernelExp, PredictOptions, Prediction, Sgpr,
+///     VarianceKind,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Sgpr::new(
@@ -126,9 +139,45 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// )
 /// .map_err(|(_, e)| e)?;
 /// let mut online = fitted.into_online();
-/// online.insert(&[4.0], 0.1)?;
+/// let id = online.insert(&[4.0], 0.1)?;
 /// let pred = online.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+///
+/// // The training data, the identifiers, and the settings.
+/// assert_eq!((online.n(), online.m(), online.d()), (5, 2, 1));
+/// assert_eq!(online.x(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
+/// assert_eq!(online.y(), &[0.0, 1.0, 0.5, 0.25, 0.1]);
+/// assert_eq!(online.z(), &[0.5, 2.5]);
+/// assert_eq!(online.point_ids().last().copied(), Some(id));
+/// assert_eq!(online.inducing_ids().len(), 2);
+/// assert_eq!(online.math(), KernelExp::Accurate);
+/// assert!(matches!(online.jitter_policy(), JitterPolicy::Adaptive(_)));
+/// assert!(online.neg_log_marginal_likelihood()?.is_finite());
+///
+/// // θ: read, write, and differentiate at the current points.
+/// let mut theta = vec![0.0; online.num_params()];
+/// online.get_params(&mut theta)?;
+/// assert_eq!(theta.len(), online.kernel().num_params() + 1);
+/// assert!((theta[1] - online.likelihood().log_noise_variance()).abs() < 1e-12);
+/// theta[0] = 0.8_f64.ln();
+/// online.set_params(&theta)?;
+/// let mut grad = vec![0.0; theta.len()];
+/// assert!(online.value_and_gradient_into(&theta, &mut grad)?.is_finite());
+/// let mut hess = vec![0.0; theta.len() * theta.len()];
+/// online.hessian_into(&theta, &mut hess)?;
+///
+/// // Every query form, with the default or latent variance.
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let xs = [0.25, 0.75];
+/// let mut out = Prediction::default();
+/// online.predict_into(&xs, 2, 1, &mut out)?;
+/// assert_eq!(out, online.predict(&xs, 2, 1)?);
+/// online.predict_with_into(&xs, 2, 1, latent, &mut out)?;
+/// assert_eq!(out, online.predict_with(&xs, 2, 1, latent)?);
+/// assert_eq!(online.predict_covariance_with(&xs, 2, 1, latent)?.covariance.len(), 4);
+/// assert_eq!(online.sample(&xs, 2, 1, 3, 7)?.len(), 6);
+/// assert_eq!(online.sample_with(&xs, 2, 1, latent, 3, 7)?.len(), 6);
+/// assert_eq!(online.loo_predict_with(latent)?.mean.len(), 5);
 /// # Ok(())
 /// # }
 /// ```
@@ -561,7 +610,7 @@ where
     /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
     /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
     /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
-    /// inverse-transformed like [`Self::predict`].
+    /// inverse-transformed like those of `predict`.
     ///
     /// # Errors
     ///
@@ -869,9 +918,8 @@ where
 
     /// Removes the inducing point identified by `id` and packs every buffer.
     ///
-    /// Updates `K_mm` with a trailing cholupdate and rebuilds `A` / `B`
-    /// from the reduced inducing set. The last remaining inducing point
-    /// cannot be deleted.
+    /// Assembles the VFE system again on the reduced inducing set
+    /// (`O(n·m²)`). The last remaining inducing point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -1086,8 +1134,8 @@ where
     ///
     /// Default [`PredictOptions`] uses [`crate::VarianceKind::Observation`]:
     /// `σn²` is added on the diagonal in the transformed space. The diagonal
-    /// is exactly the variance of [`Self::predict`] for the same query. This
-    /// path allocates an `m × m` matrix; [`Self::predict`] stays diagonal.
+    /// is exactly the variance of `predict` for the same query. This
+    /// path allocates an `m × m` matrix; `predict` stays diagonal.
     ///
     /// # Errors
     ///
@@ -1161,7 +1209,7 @@ where
         )
     }
 
-    /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
+    /// Draws posterior samples at `xs` from `predict_covariance`.
     ///
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
@@ -1192,7 +1240,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Self::sample`].
+    /// Same as `sample` at `xs`.
     ///
     /// See the example on [`OnlineSgpr`].
     pub fn sample_with(
@@ -1210,7 +1258,7 @@ where
 
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
     ///
-    /// Same values as [`Self::predict`]. The buffers are kept on the model
+    /// Same values as `predict` at `xs`. The buffers are kept on the model
     /// and `out` keeps its capacity, so a call after one with the same
     /// shapes allocates nothing.
     ///
@@ -1231,8 +1279,8 @@ where
 
     /// Predicts at `xs` with an explicit variance kind into `out`.
     ///
-    /// Same values as [`Self::predict_with`], with the buffers of
-    /// [`Self::predict_into`].
+    /// Same values as `predict_with` at `xs`, with the buffers of
+    /// `predict_into`.
     ///
     /// # Errors
     ///
@@ -1410,14 +1458,14 @@ impl<O, P> OnlineSgpr<O, P>
 where
     P: crate::precision::GpScalar,
 {
-    /// Appends one inducing point at the current `θ` with a bordered VFE update.
+    /// Appends one inducing point at the current `θ` and assembles the VFE system again.
     ///
     /// `z_new` has length [`Self::d`], in the original coordinates of `X`;
     /// it goes through the input transform fitted at training. Training
     /// `X` / `y` are not moved.
     /// The returned [`InducingId`] is new and is never reused after a later
-    /// [`Self::delete_inducing`]. If the bordered Schur complement is
-    /// non-positive, the enlarged inducing set is assembled again.
+    /// [`Self::delete_inducing`]. The VFE system of the enlarged inducing
+    /// set is assembled again (`O(n·m²)`).
     ///
     /// # Errors
     ///
@@ -1426,8 +1474,8 @@ where
     /// [`GprError::EmptyInput`] if `d` is zero,
     /// [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left (only a
     /// loaded `next_inducing_id` near `u64::MAX` reaches this), or
-    /// [`GprError::CholeskyFailed`] if the full reassemble of the enlarged
-    /// inducing set fails.
+    /// [`GprError::CholeskyFailed`] if the enlarged inducing set does not
+    /// factor under [`Self::jitter_policy`].
     ///
     /// # Examples
     ///
@@ -1559,7 +1607,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Sgpr::fit`](crate::Sgpr::fit).
+    /// Same as `fit` of the [`Sgpr`](crate::Sgpr) of this kernel.
     ///
     /// # Examples
     ///

@@ -77,8 +77,10 @@ where
     /// [`GprError::InvalidDistance`] for a value that is not
     /// finite or is negative, or a training square whose diagonal is not
     /// zero or that is not symmetric (see
-    /// [`crate::kernel::DistanceSource::tidy`]), and the errors of the
-    /// coordinate [`Gpr::fit`].
+    /// [`crate::kernel::DistanceSource::tidy`]), [`GprError::NonFiniteInput`]
+    /// if a target is `NaN` or `Inf`, [`GprError::CholeskyFailed`] if `A`
+    /// cannot be factored, or [`GprError::OptimizationNotConverged`] if the
+    /// optimizer does not produce a best parameter vector.
     ///
     /// See the example on [`crate::kernel::ScalarDistance`].
     #[allow(clippy::result_large_err)] // failure returns the trainer so the caller can retry
@@ -94,11 +96,12 @@ where
 
 impl<P: GpScalar> Gpr<Fixed, P, DistanceKernel<DistanceOnly>> {
     /// Factors at the current `θ` without a search. Same data contract as
-    /// [`Gpr::fit`] of this kernel.
+    /// `fit` of this kernel.
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr::fit`] of this kernel.
+    /// Same as `fit` of this kernel, except
+    /// [`GprError::OptimizationNotConverged`] does not apply.
     ///
     /// # Examples
     ///
@@ -141,8 +144,11 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr::fit`] of a [`DistanceKernel<DistanceOnly>`], plus the
-    /// coordinate errors of the coordinate [`Gpr::fit`].
+    /// Same as `fit` of a [`DistanceKernel<DistanceOnly>`] model, plus
+    /// [`GprError::EmptyInput`] if `n_cols` is zero,
+    /// [`GprError::LengthMismatch`] if `x` is not `n × n_cols`,
+    /// [`GprError::NonFiniteInput`] for a coordinate that is not finite, and
+    /// the error of the input transform.
     ///
     /// # Examples
     ///
@@ -177,11 +183,12 @@ where
 
 impl<P: GpScalar> Gpr<Fixed, P, DistanceKernel<WithPoints>> {
     /// Factors at the current `θ` without a search. Same data contract as
-    /// [`Gpr::fit`] of this kernel.
+    /// `fit` of this kernel.
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr::fit`] of this kernel.
+    /// Same as `fit` of this kernel, except
+    /// [`GprError::OptimizationNotConverged`] does not apply.
     ///
     /// # Examples
     ///
@@ -329,7 +336,36 @@ distance_predict!(
         /// through a cast); a fill writes scratch once.
     },
     predict_doc = {
-        /// See the example on [`crate::kernel::ScalarDistance`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction, VarianceKind};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let mut fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// // Two queries: train × query, then query × query.
+        /// let cross = [0.25, 0.25, 0.25, 2.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+        /// let pred = fitted.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], 2, latent, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], 2, latent)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent)?;
+        /// let draws = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, latent, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -347,6 +383,8 @@ distance_predict!(
         /// let cross = [0.25, 0.25, 0.25, 2.25];
         /// let query = [0.0, 1.0, 1.0, 0.0];
         /// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+        /// let pred = fitted.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// fitted.predict_into([image.borrow(&cross)], 2, &mut out)?;
         /// fitted.predict_with_into([image.borrow(&cross)], 2, latent, &mut out)?;
@@ -379,7 +417,34 @@ distance_predict!(
         /// through a cast); a fill writes scratch once.
     },
     predict_doc = {
-        /// See the example on [`Gpr::fit`] of a [`DistanceKernel<WithPoints>`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+        /// let mut fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let (cross, query, xs) = ([0.25, 0.25, 0.25, 2.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
+        /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = fitted.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = fitted.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = fitted.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = fitted.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = fitted.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -396,6 +461,8 @@ distance_predict!(
         ///     .map_err(|(_, e)| e)?;
         /// let (cross, query, xs) = ([0.25, 0.25, 0.25, 2.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
         /// let options = PredictOptions::default();
+        /// let pred = fitted.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// fitted.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
         /// fitted.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
@@ -456,7 +523,24 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
 
     /// Returns a copy of the kernel whose hyperparameters this model owns.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{DistanceSlot, RbfKernel, ScalarDistance};
+    /// use gprx::{Fixed, GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let online = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+    ///     .with_optimizer(Fixed)
+    ///     .factor([image.from_slice(&[0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+    ///     .map_err(|(_, e)| e)?
+    ///     .into_online()?;
+    /// assert_eq!(online.to_kernel().num_params(), 1);
+    /// assert_eq!(online.slots(), [DistanceSlot::Scalar(image)]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> DistanceKernel<C> {
         <DistanceKernel<C> as crate::kernel::ModelKernelParts>::from_spec(self.core.kernel.clone())
     }
@@ -464,7 +548,7 @@ impl<O, P: GpScalar, C: PointUse> OnlineGpr<O, P, DistanceKernel<C>> {
     /// Returns the slots of the kernel, in the order of
     /// [`DistanceKernel::slots`]; bind supplies to these.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// See the example on [`Self::to_kernel`].
     pub fn slots(&self) -> Vec<DistanceSlot> {
         crate::kernel::spec_slots(&self.core.kernel)
     }
@@ -478,8 +562,9 @@ impl<O, P: GpScalar> OnlineGpr<O, P, DistanceKernel<DistanceOnly>> {
     /// points (in [`Self::point_ids`] order) to the new point; an ARD slot
     /// binds one such column per dimension. A table may be borrowed, owned,
     /// or filled. Every value is checked (finite, `≥ 0`) and the column is
-    /// kept: the store grows its capacity by doubling, so most inserts copy
-    /// only the column. `α` is not solved here; the first later read solves
+    /// kept. The kept squares hold room for more points (a scalar slot's
+    /// square grows by a quarter of its side when it fills, an ARD slot's
+    /// rows as a `Vec` grows), so most inserts copy only the column. `α` is not solved here; the first later read solves
     /// it. The returned [`PointId`] is never reused after a later
     /// [`Self::delete`].
     ///
@@ -665,7 +750,38 @@ distance_predict!(
         /// delete the first read solves `α`.
     },
     predict_doc = {
-        /// See the example on [`OnlineGpr::insert`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let fitted = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let mut online = fitted.into_online()?;
+        /// online.insert([image.from_vec(vec![4.0, 1.0])], 0.5)?;
+        /// // Two queries: train × query (3 × 2), then query × query.
+        /// let cross = [0.25, 0.25, 2.25, 0.25, 2.25, 0.25];
+        /// let query = [0.0, 1.0, 1.0, 0.0];
+        /// let options = PredictOptions::default();
+        /// let pred = online.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// online.predict_into([image.borrow(&cross)], 2, &mut out)?;
+        /// online.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
+        /// let _ = online.predict_with([image.borrow(&cross)], 2, options)?;
+        /// let cov = online.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], 2)?;
+        /// assert_eq!(cov.covariance.len(), 4);
+        /// let _ = online.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], 2, options)?;
+        /// let draws = online.sample([image.borrow(&cross)], [image.borrow(&query)], 2, 3, 7)?;
+        /// assert_eq!(draws.len(), 6);
+        /// let _ = online.sample_with([image.borrow(&cross)], [image.borrow(&query)], 2, options, 3, 7)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -685,6 +801,8 @@ distance_predict!(
         /// let cross = [0.25, 0.25, 2.25, 0.25, 2.25, 0.25];
         /// let query = [0.0, 1.0, 1.0, 0.0];
         /// let options = PredictOptions::default();
+        /// let pred = online.predict([image.borrow(&cross)], 2)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// online.predict_into([image.borrow(&cross)], 2, &mut out)?;
         /// online.predict_with_into([image.borrow(&cross)], 2, options, &mut out)?;
@@ -718,7 +836,36 @@ distance_predict!(
         /// delete the first read solves `α`.
     },
     predict_doc = {
-        /// See the example on [`OnlineGpr::insert`].
+        /// # Examples
+        ///
+        /// ```rust
+        /// use gprx::kernel::{KernelSpec, RbfKernel, ScalarDistance};
+        /// use gprx::{GaussianLikelihood, Gpr, PredictOptions, Prediction};
+        ///
+        /// # fn main() -> Result<(), gprx::GprError> {
+        /// let image = ScalarDistance::new();
+        /// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+        /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        ///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+        ///     .map_err(|(_, e)| e)?;
+        /// let mut online = fitted.into_online()?;
+        /// online.insert([image.from_vec(vec![4.0, 1.0])], &[2.0], 0.5)?;
+        /// let (cross, query, xs) = ([0.25, 0.25, 2.25, 0.25, 2.25, 0.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
+        /// let options = PredictOptions::default();
+        /// let pred = online.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
+        /// let mut out = Prediction::default();
+        /// online.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
+        /// online.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;
+        /// let _ = online.predict_with([image.borrow(&cross)], &xs, 2, 1, options)?;
+        /// let cov = online.predict_covariance([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1)?;
+        /// assert_eq!(cov.mean.len(), 2);
+        /// let _ = online.predict_covariance_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options)?;
+        /// let _ = online.sample([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, 2, 0)?;
+        /// let _ = online.sample_with([image.borrow(&cross)], [image.borrow(&query)], &xs, 2, 1, options, 2, 0)?;
+        /// # Ok(())
+        /// # }
+        /// ```
     },
     covariance_doc = {
         /// # Examples
@@ -737,6 +884,8 @@ distance_predict!(
         /// online.insert([image.from_vec(vec![4.0, 1.0])], &[2.0], 0.5)?;
         /// let (cross, query, xs) = ([0.25, 0.25, 2.25, 0.25, 2.25, 0.25], [0.0, 1.0, 1.0, 0.0], [0.5, 1.5]);
         /// let options = PredictOptions::default();
+        /// let pred = online.predict([image.borrow(&cross)], &xs, 2, 1)?;
+        /// assert_eq!(pred.mean.len(), 2);
         /// let mut out = Prediction::default();
         /// online.predict_into([image.borrow(&cross)], &xs, 2, 1, &mut out)?;
         /// online.predict_with_into([image.borrow(&cross)], &xs, 2, 1, options, &mut out)?;

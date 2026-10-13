@@ -15,28 +15,59 @@ use crate::precision::{DoublePrecision, GpScalar};
 use super::factor::{assemble_fitted, run_adam_fit};
 use super::fitted::FittedSvgp;
 
-/// Represents the trainer for stochastic variational GPR at a caller-supplied inducing set `Z`.
+/// Represents the trainer for stochastic variational GPR at an inducing set the caller chooses.
 ///
+/// The type parameters are the optimizer `O` (default [`Fixed`]; [`Adam`]
+/// for [`Svgp<Adam>::fit`]), the precision `P` (default
+/// [`DoublePrecision`]), and the kernel `K` (default [`KernelSpec`]).
 /// [`Svgp<Fixed>::factor`] prepares `K_mm` and a whitened prior `q(u)`
 /// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`.
 /// [`Svgp<Adam>::fit`] starts from that prior and runs mini-batch Adam.
 /// [`Self::with_optimizer`] switches the type parameter; there is no fit
 /// flag.
 ///
+/// `K` selects how the inducing points are given. A [`KernelSpec`] model
+/// takes their coordinates `Z` (column-major, `m` points by `d` features)
+/// next to the training `X`; `Z` is not a parameter. A
+/// [`crate::kernel::DistanceKernel`] model has no coordinates to place them
+/// at: its inducing points are training points, named by their indices,
+/// and the caller supplies per slot the `n × m` squared distances from the
+/// training points to them (`K_mm` reads the inducing points' rows of that
+/// block). A prediction then takes the `m × q` squared distances from the
+/// inducing points to the queries.
+///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{GaussianLikelihood, Svgp};
+/// use gprx::{GaussianLikelihood, JitterPolicy, KernelExp, SinglePrecision, Svgp};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let fitted = Svgp::new(kernel, likelihood)
-///     .factor(&[0.0, 1.0, 2.0, 3.0], 4, 1, &[0.0, 1.0, 0.5, 0.25], &[0.5, 2.5], 2)
-///     .map_err(|(_, e)| e)?;
+/// let mut svgp = Svgp::new(kernel, likelihood).with_math(KernelExp::FastApprox);
+/// assert_eq!(svgp.math(), KernelExp::FastApprox);
+/// assert!(matches!(svgp.jitter_policy(), JitterPolicy::Adaptive(_)));
+/// // θ is the kernel's log-lengthscale, then the likelihood's log σn²; `Z` and `q` are not in it.
+/// assert_eq!(svgp.num_params(), svgp.kernel().num_params() + 1);
+/// let mut theta = [0.0; 2];
+/// svgp.get_params(&mut theta)?;
+/// theta[0] = 0.5_f64.ln();
+/// svgp.set_params(&theta)?;
+/// assert!((svgp.likelihood().log_noise_variance() - theta[1]).abs() < 1e-12);
+///
+/// // Column-major `X` (n = 4, d = 1) and the inducing coordinates `Z` (m = 2).
+/// let (x, y, z) = ([0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 0.5, 0.25], [0.5, 2.5]);
+/// let fitted = svgp.clone().factor(&x, 4, 1, &y, &z, 2).map_err(|(_, e)| e)?;
 /// assert_eq!(fitted.n(), 4);
 /// assert_eq!(fitted.m(), 2);
+///
+/// // The same model with `f32` storage.
+/// let single = svgp
+///     .with_precision::<SinglePrecision>()
+///     .factor(&x, 4, 1, &y, &z, 2)
+///     .map_err(|(_, e)| e)?;
+/// assert_eq!(single.predict(&[1.5], 1, 1)?.mean.len(), 1);
 /// # Ok(())
 /// # }
 /// ```
@@ -117,7 +148,7 @@ impl<O, P, K: ModelKernel> Svgp<O, P, K> {
     ///
     /// Omitting it leaves [`KernelExp::Accurate`].
     ///
-    /// `factor`, `fit`, and predict use the same polynomial. Hyperparameter
+    /// `factor`, `fit`, and predict use the same `exp`. Hyperparameter
     /// `exp(θ)` is unchanged.
     ///
     /// See the example on [`Svgp`].
@@ -140,7 +171,7 @@ impl<O, P, K: ModelKernel> Svgp<O, P, K> {
     /// Exact system `K + σn² I` carries the observation noise, `K_mm`
     /// does not, so close inducing points leave it singular in floating
     /// point. The policy applies wherever `K_mm` is factored: fit, factor,
-    /// `set_params`, predict, and the online updates.
+    /// `set_params`, and predict.
     ///
     /// # Examples
     ///
@@ -178,8 +209,8 @@ impl<O, P, K: ModelKernel> Svgp<O, P, K> {
     /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `y`. Predictions are mapped back to the
-    /// original scale. The negative marginal likelihood and its gradient are
-    /// those of the transformed `y`. A single map or a
+    /// original scale. The negative ELBO and its gradient are those of the
+    /// transformed `y`. A single map or a
     /// [`crate::transform::TargetPipeline`].
     ///
     /// # Examples
@@ -244,9 +275,14 @@ impl<O, P, K: ModelKernel> Svgp<O, P, K> {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, or [`GprError::InvalidNoiseVariance`] if the likelihood `θ`
-    /// is invalid. Kernel and likelihood `θ` are committed together only
-    /// after both writes succeed.
+    /// length, [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidNoiseVariance`] if a kernel or likelihood `θ` is
+    /// not finite or its `exp` is not a positive finite value, or
+    /// [`GprError::InvalidInterval`] if a value is outside the interval of
+    /// its parameter (see [`crate::BoundedParam`] and
+    /// [`GaussianLikelihood::bounds`]). A custom kernel leaf returns its own
+    /// error. Kernel and likelihood `θ` are committed together only after
+    /// both writes succeed.
     ///
     /// See the example on [`Svgp`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -260,10 +296,9 @@ impl<O, P, K: PointKernel> Svgp<O, P, K> {
     /// Omitting it leaves identity.
     ///
     /// The map is fitted on training `X`. `X`, the inducing points `Z`, and
-    /// every later query or inserted point go through it, so `Z` is passed
-    /// in the same coordinates as `X`. [`crate::FreeInducing`] searches `Z`
-    /// in the transformed coordinates; the fitted model reports `Z` in the
-    /// original ones. A single map, a [`crate::transform::Pipeline`], or
+    /// every later query go through it, so `Z` is passed in the same
+    /// coordinates as `X`; the fitted model reports `Z` in the original
+    /// ones. A single map, a [`crate::transform::Pipeline`], or
     /// [`crate::transform::ColumnwiseInput`].
     ///
     /// # Examples
@@ -303,7 +338,19 @@ impl<O, P> Svgp<O, P> {
 impl<O, P, C: crate::kernel::PointUse> Svgp<O, P, crate::kernel::DistanceKernel<C>> {
     /// Returns a copy of the kernel whose hyperparameters this trainer owns.
     ///
-    /// See the example on [`crate::kernel::DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{GaussianLikelihood, Svgp};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let svgp = Svgp::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?);
+    /// assert_eq!(svgp.to_kernel().num_params(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> crate::kernel::DistanceKernel<C> {
         <crate::kernel::DistanceKernel<C> as ModelKernelParts>::from_spec(self.spec.kernel.clone())
     }
@@ -325,8 +372,10 @@ where
     /// Returns [`GprError::EmptyInput`] when `n`, `d`, or `m` is zero.
     /// Returns [`GprError::DimensionMismatch`] when `z` is packed with a
     /// different feature count than `x` (the same `n_cols` is required).
-    /// Length and finiteness errors match [`crate::Gpr::fit`].
-    /// [`GprError::CholeskyFailed`] when `K_mm` cannot be factored.
+    /// Returns [`GprError::LengthMismatch`] when `x`, `y`, or `z` has the
+    /// wrong length, and [`GprError::NonFiniteInput`] when a value is `NaN`
+    /// or `Inf`. [`GprError::CholeskyFailed`] when `K_mm` cannot be
+    /// factored.
     ///
     /// # Examples
     ///
@@ -383,7 +432,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same input errors as [`Svgp<Fixed>::factor`].
+    /// Same input errors as `factor` of [`Svgp<Fixed>`].
     /// [`GprError::CholeskyFailed`] when `K_mm` cannot be factored.
     /// [`GprError::InvalidHyperparameter`] / [`GprError::NonFiniteInput`]
     /// when a trial `θ` or `L` is rejected.
