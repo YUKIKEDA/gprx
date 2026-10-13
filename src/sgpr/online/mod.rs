@@ -42,7 +42,7 @@ mod distance;
 /// Represents the stable identity of one inducing point on [`OnlineSgpr`].
 ///
 /// [`crate::FittedSgpr::into_online`] assigns identifiers `0.. m-1` in buffer order. Later
-/// [`OnlineSgpr::insert_inducing`] values increase monotonically and are never reused after
+/// `insert_inducing` calls on [`OnlineSgpr`] return values that increase monotonically and are never reused after
 /// [`OnlineSgpr::delete_inducing`]. There is no public constructor.
 ///
 /// # Examples
@@ -102,10 +102,10 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// squared distances, and its inducing points are training points, named
 /// by their [`PointId`]s.
 ///
-/// [`Self::insert`] appends one training point and returns a [`PointId`].
+/// `insert` appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
 /// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
-/// [`Self::insert_inducing`] appends one inducing point and returns an
+/// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
 /// by that identifier. An inducing insert borders the factors of `K_mm`
 /// and `B` with one row (assembling the enlarged set again when the
@@ -611,7 +611,7 @@ where
     /// `x_i`. It is a rank-1 downdate of `B = σn² I + A Aᵀ` per point
     /// (Sherman–Morrison), `O(n m²)` in all. At `Z = X` it matches
     /// [`crate::FittedGpr::loo_predict`]. Mean and variance are
-    /// inverse-transformed like [`Self::predict`].
+    /// inverse-transformed like those of `predict`.
     ///
     /// # Errors
     ///
@@ -1136,8 +1136,8 @@ where
     ///
     /// Default [`PredictOptions`] uses [`crate::VarianceKind::Observation`]:
     /// `σn²` is added on the diagonal in the transformed space. The diagonal
-    /// is exactly the variance of [`Self::predict`] for the same query. This
-    /// path allocates an `m × m` matrix; [`Self::predict`] stays diagonal.
+    /// is exactly the variance of `predict` for the same query. This
+    /// path allocates an `m × m` matrix; `predict` stays diagonal.
     ///
     /// # Errors
     ///
@@ -1211,7 +1211,7 @@ where
         )
     }
 
-    /// Draws posterior samples at `xs` from [`Self::predict_covariance`].
+    /// Draws posterior samples at `xs` from `predict_covariance`.
     ///
     /// Each column of the returned column-major `m × n_draws` matrix is
     /// `μ + L z` with `z ∼ N(0, I)` and `L` the Cholesky factor of the
@@ -1242,7 +1242,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Self::sample`].
+    /// Same as `sample` at `xs`.
     ///
     /// See the example on [`OnlineSgpr`].
     pub fn sample_with(
@@ -1260,7 +1260,7 @@ where
 
     /// Predicts at `xs` with [`PredictOptions::default`] into `out`.
     ///
-    /// Same values as [`Self::predict`]. The buffers are kept on the model
+    /// Same values as `predict` at `xs`. The buffers are kept on the model
     /// and `out` keeps its capacity, so a call after one with the same
     /// shapes allocates nothing.
     ///
@@ -1281,8 +1281,8 @@ where
 
     /// Predicts at `xs` with an explicit variance kind into `out`.
     ///
-    /// Same values as [`Self::predict_with`], with the buffers of
-    /// [`Self::predict_into`].
+    /// Same values as `predict_with` at `xs`, with the buffers of
+    /// `predict_into`.
     ///
     /// # Errors
     ///

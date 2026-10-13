@@ -11,7 +11,7 @@ use crate::persist::persist_err;
 ///
 /// [`crate::FittedGpr::into_online`] and [`crate::FittedSgpr::into_online`]
 /// assign identifiers `0..n` in buffer order. Later inserts
-/// ([`crate::OnlineGpr::insert`], [`crate::OnlineSgpr::insert`]) return
+/// (`insert` on [`crate::OnlineGpr`] or [`crate::OnlineSgpr`]) return
 /// identifiers that increase monotonically and are never reused after a
 /// delete ([`crate::OnlineGpr::delete`], [`crate::OnlineSgpr::delete`]). An
 /// [`crate::OnlineSgpr`] on supplied distances also names its inducing

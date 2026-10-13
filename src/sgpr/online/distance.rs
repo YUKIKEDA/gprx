@@ -11,7 +11,7 @@ use super::*;
 impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKernel<C>> {
     /// Writes this model to `dir` as `config.json` and `model.safetensors`.
     ///
-    /// Stores what [`crate::FittedSgpr::save`] of a [`DistanceKernel`]
+    /// Stores what `save` of a [`crate::FittedSgpr`] on a [`DistanceKernel`]
     /// stores, with the point and inducing identifiers.
     /// [`crate::persist::LoadedDistanceSgpr::load`] loads it as an online
     /// model.
@@ -327,7 +327,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> DistanceQuery
 
 impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceOnly>> {
     /// Appends one training point at the current `θ` with the rank-1 VFE
-    /// update of [`OnlineSgpr::insert`], from its squared distances to the
+    /// update of the coordinate `insert`, from its squared distances to the
     /// inducing points.
     ///
     /// `sources` binds, per slot, the `m × 1` column from the `m` inducing
@@ -400,7 +400,7 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// each inducing point equals the one the training blocks hold for that
     /// pair (a [`DistanceSource::tidy`] source repairs both to their mean).
     /// The column is kept as a new column of the training blocks, and the
-    /// VFE system is assembled again, as [`OnlineSgpr::insert_inducing`]
+    /// VFE system is assembled again, as the coordinate `insert_inducing`
     /// does when its bordered update is not taken. The returned
     /// [`InducingId`] is never reused after a later
     /// [`Self::delete_inducing`].

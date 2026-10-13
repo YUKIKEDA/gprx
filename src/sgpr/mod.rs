@@ -1,11 +1,15 @@
 //! Collapsed variational SGPR (Titsias / VFE) with caller-supplied inducing points.
 
-mod distance;
 pub(crate) mod factor;
 mod fitted;
 mod model;
 mod objective;
 mod online;
+
+// Declared after the coordinate modules: rustdoc renders inherent impls in
+// declaration order, so an intra-doc link to a method name shared by the
+// coordinate and the supplied-distance impls lands on the coordinate one.
+mod distance;
 
 #[cfg(test)]
 mod tests;
