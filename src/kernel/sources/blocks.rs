@@ -888,9 +888,11 @@ pub(crate) fn new_inducing_column(
     let side = m + 1;
     let count = xz.block_at().count();
     let mut column = Vec::with_capacity(n * count);
-    let mut mirror = Vec::with_capacity(m * count);
-    let mut square = vec![0.0; side * side];
-    for at in xz.block_at() {
+    // One buffer: the square of the block at hand, then the rows of `xz`
+    // of every block, which it returns once the square is drained.
+    let mut work = vec![0.0; side * side + m * count];
+    let (square, mirror) = work.split_at_mut(side * side);
+    for (block, at) in xz.block_at().enumerate() {
         let start = column.len();
         column_into(cols, at, n, &mut column).map_err(|err| locate(at, err))?;
         let new = &mut column[start..];
@@ -905,8 +907,8 @@ pub(crate) fn new_inducing_column(
         // A violation is located in the caller's column: the row of an
         // inducing point, or of the point itself.
         let row_of = |i: usize| inducing.get(i).copied().unwrap_or(point);
-        match check_block(&square, side, side, BlockKind::Square, tidy(at)?) {
-            Ok(true) => repair_block(&mut square, side, side, BlockKind::Square),
+        match check_block(square, side, side, BlockKind::Square, tidy(at)?) {
+            Ok(true) => repair_block(square, side, side, BlockKind::Square),
             Ok(false) => {}
             Err(GprError::InvalidDistance {
                 slot,
@@ -930,9 +932,10 @@ pub(crate) fn new_inducing_column(
         }
         for b in 0..m {
             new[inducing[b]] = square[b + m * side];
-            mirror.push(square[m + b * side]);
+            mirror[block * m + b] = square[m + b * side];
         }
         new[point] = square[m + m * side];
     }
-    Ok((column, mirror))
+    work.drain(..side * side);
+    Ok((column, work))
 }

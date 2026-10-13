@@ -273,6 +273,8 @@ impl<'a, T: KernelScalar> QuerySources<'a, T> {
             let Self { raw, scratch, .. } = &mut this;
             let QueryScratch { written, cast, .. } = &mut **scratch;
             cast.clear();
+            // Every block in one reservation, not a growth per tile.
+            cast.reserve(raw.iter().map(|slot| slot.shape.blocks() * len).sum());
             for slot in raw.iter_mut() {
                 slot.cast_at = cast.len();
                 for k in 0..slot.shape.blocks() {
