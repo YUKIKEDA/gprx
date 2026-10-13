@@ -268,10 +268,12 @@ impl LoadedGpr {
     /// Reconstructs fitted transforms from the config and applies them to the
     /// stored original `X` / `y`. `factor_kind` is required: `llt` loads
     /// [`FittedGpr`], `ldlt` loads [`crate::OnlineGpr`] and requires
-    /// `point_ids` plus `next_point_id`. A file written with an `f64`
-    /// factor `L` (by `save_with_factor`) keeps `model.safetensors`
-    /// memory-mapped and reads `L` in place; an `f32` factor is copied out,
-    /// and a file without a factor is factored again at the saved `θ`. The
+    /// `point_ids` plus `next_point_id`. An `llt` file written with an
+    /// `f64` factor `L` (by [`FittedGpr::save_with_factor`]) keeps
+    /// `model.safetensors` memory-mapped and reads `L` in place. An `ldlt`
+    /// file copies its factor into the online model's own buffer, and an
+    /// `f32` factor is copied out. A file without a factor is factored again
+    /// at the saved `θ`. The
     /// buffer policy is [`crate::CholeskyBuffer::Retain`]. Unknown
     /// [`FORMAT_VERSION`] is rejected.
     ///

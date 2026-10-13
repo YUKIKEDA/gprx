@@ -151,10 +151,12 @@ pub trait UnfittedTransform: Send + Sync {
     /// # Errors
     ///
     /// The built-in maps return [`GprError::EmptyInput`] when `n_rows` or
-    /// `n_cols` is zero, [`GprError::LengthMismatch`] when `x` does not hold
-    /// `n_rows × n_cols` values, or [`GprError::NonFiniteInput`] when `x`
-    /// contains `NaN` or `Inf`. A caller-defined map returns the error of
-    /// its own checks.
+    /// `n_cols` is zero, [`GprError::SizeOverflow`] when `n_rows × n_cols`
+    /// overflows `usize`, [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`, or (for [`super::ColumnwiseInput`])
+    /// [`GprError::DimensionMismatch`] when its maps do not cover `n_cols`
+    /// features. A caller-defined map returns the error of its own checks.
     ///
     /// See the example on [`UnfittedTransform`].
     fn fit(
@@ -215,11 +217,11 @@ pub trait Transform: Send + Sync {
     /// # Errors
     ///
     /// The built-in fitted maps return [`GprError::DimensionMismatch`] when
-    /// `n_cols` differs from the fit, [`GprError::EmptyInput`] or
-    /// [`GprError::LengthMismatch`] when `x` is not a non-empty
-    /// `n_rows × n_cols` matrix, or [`GprError::NonFiniteInput`] when `x`
-    /// contains `NaN` or `Inf`. A caller-defined map returns the error of
-    /// its own checks.
+    /// `n_cols` differs from the fit, [`GprError::EmptyInput`],
+    /// [`GprError::SizeOverflow`], or [`GprError::LengthMismatch`] when `x`
+    /// is not a non-empty `n_rows × n_cols` matrix, or
+    /// [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`. A
+    /// caller-defined map returns the error of its own checks.
     ///
     /// See the example on [`UnfittedTransform`].
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
@@ -478,7 +480,7 @@ impl FittedStandardizeInput {
         &self.mean
     }
 
-    /// Returns per-column training scales (population standard deviations).
+    /// Returns per-column training scales (population standard deviations, or `1` for a constant column).
     ///
     /// See the example on [`StandardizeInput`].
     pub fn std(&self) -> &[f64] {
