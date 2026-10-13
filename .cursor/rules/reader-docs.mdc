@@ -31,6 +31,8 @@ The example uses `?`, not `unwrap`. It does not depend on a checkout of this rep
 
 The public contract is every item an external crate can name with default features. `internals` is outside it.
 
+An item here is a type, trait, function, constant, or type alias: what a `use` path names. Methods, trait methods, fields, and enum variants are covered by the rustdoc example of their type (`.cursor/rules/rust-docs.mdc`); the README names them in prose where a caller needs them.
+
 Document every item in that set in the Usage section of `README.md` and of `README.ja.md`. Give every item a usage example in both files. A usage example is a `rust` code block that constructs the item, calls it, matches it, or implements it. A sentence that only names the item is not an example. One block may cover several items when each of those items appears in the block. English and Japanese use the same blocks.
 
 When the families differ, say which type the method belongs to. When the item has a default that changes the result, include that default.
