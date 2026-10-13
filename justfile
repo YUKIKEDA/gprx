@@ -101,6 +101,7 @@ perf-real-full:
     just perf-real-data
     just perf-real-smoke --data
     just perf-real-check yacht
+    just perf-real-check yacht 0 sgpr
     just perf-real-check maunaloa
     just perf-real --datasets snelson,maunaloa --protocol matched --libs gprx,sklearn,gpytorch,gpy
     just perf-real --datasets yacht,energy --protocol matched --libs gprx,sklearn,gpytorch,gpy
