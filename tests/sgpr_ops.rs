@@ -5,8 +5,9 @@
 //! compares the same public numerics at the same `θ` and `X` after `m`
 //! changes (incremental, ADR 0005), for coordinate and supplied-distance
 //! models, and the reassembly an inducing change takes instead (an `f32`
-//! storage scalar, a jittered `K_mm`, a pivot below the threshold). This
-//! file uses only the public API.
+//! storage scalar, a jittered `K_mm`, a pivot below the threshold), and
+//! mixed sequences of inducing and `X` steps with duplicate and near
+//! duplicate inducing points. This file uses only the public API.
 
 use std::collections::HashSet;
 
@@ -1047,8 +1048,10 @@ fn delete_inducing_with_a_jittered_factor_matches_factor() {
 
 /// A near duplicate leaves `K_mm` with a pivot `ℓ² ≈ 1e-10` that the factor
 /// takes without jitter; an exact duplicate of another point then leaves
-/// `ℓ²` a rounding residue, which the relative pivot threshold sends to an
-/// assembly. Dividing by that residue was `0.56` off.
+/// `ℓ²` a rounding residue. Both pivots are below the relative threshold
+/// (the first in the factor the insert starts from, the second in the
+/// border), so the insert assembles the system again. Dividing by that
+/// residue was `0.56` off.
 #[test]
 fn insert_inducing_at_a_rounding_pivot_matches_factor() {
     let z = [0.5, 0.5 + 1e-5, 2.5];
@@ -1135,4 +1138,291 @@ fn distance_delete_inducing_at_first_middle_last_matches_factor() {
         let ctx = format!("index={index}");
         assert_distance_matches_factor(&online, &kernel, &image, &kept, &ctx);
     }
+}
+
+/// Steps of each mixed sequence.
+const MIXED_OPS: usize = 60;
+/// Seeds of the mixed sequences.
+const MIXED_SEEDS: std::ops::Range<u64> = 0..12;
+/// Training points and inducing points a mixed sequence starts from.
+const MIXED_N0: usize = 30;
+const MIXED_M0: usize = 4;
+/// Bounds the mixed sequences keep `n` and `m` within.
+const MIXED_N_RANGE: (usize, usize) = (20, 40);
+const MIXED_M_MAX: usize = 12;
+
+/// One step of a mixed sequence, named in a failure message.
+#[derive(Clone, Copy, Debug)]
+enum MixedOp {
+    /// Insert of a copy of the inducing point at this index.
+    InducingDuplicate(usize),
+    /// Insert of a point between `1e-5` and `1e-2` per coordinate from the
+    /// inducing point at this index.
+    InducingNear(usize),
+    InducingRandom,
+    InducingDelete(usize),
+    Insert,
+    Delete(usize),
+}
+
+/// A new inducing point of `op` next to the `m` inducing points `z`
+/// (column-major `m × d`).
+fn mixed_inducing(rng: &mut SmallRng, op: MixedOp, z: &[f64], m: usize, d: usize) -> Vec<f64> {
+    match op {
+        MixedOp::InducingDuplicate(i) => (0..d).map(|f| z[f * m + i]).collect(),
+        MixedOp::InducingNear(i) => (0..d)
+            .map(|f| {
+                let size = 10f64.powf(-5.0 + 3.0 * rng.random::<f64>());
+                let sign = if rng.random::<bool>() { 1.0 } else { -1.0 };
+                z[f * m + i] + sign * size
+            })
+            .collect(),
+        _ => (0..d).map(|_| sample_coord(rng)).collect(),
+    }
+}
+
+/// The step a mixed sequence takes at `n` training and `m` inducing points:
+/// an inducing insert (a duplicate, a near duplicate, or a random point), an
+/// inducing delete (first, middle, last, or random), or an `X` insert or
+/// delete.
+fn mixed_op(rng: &mut SmallRng, n: usize, m: usize) -> MixedOp {
+    loop {
+        match rng.random_range(0..4) {
+            0 if m < MIXED_M_MAX => {
+                let i = rng.random_range(0..m);
+                return match rng.random_range(0..3) {
+                    0 => MixedOp::InducingDuplicate(i),
+                    1 => MixedOp::InducingNear(i),
+                    _ => MixedOp::InducingRandom,
+                };
+            }
+            1 if m > 1 => {
+                let index = match rng.random_range(0..4) {
+                    0 => 0,
+                    1 => m / 2,
+                    2 => m - 1,
+                    _ => rng.random_range(0..m),
+                };
+                return MixedOp::InducingDelete(index);
+            }
+            2 if n < MIXED_N_RANGE.1 => return MixedOp::Insert,
+            3 if n > MIXED_N_RANGE.0 => return MixedOp::Delete(rng.random_range(0..n)),
+            _ => {}
+        }
+    }
+}
+
+/// The largest relative difference of the mean and the variance at `xs`
+/// and of the NLML between `online` and a factor of the same `X`, `y`, and
+/// `Z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+#[allow(clippy::too_many_arguments)]
+fn mixed_err_vs_factor(
+    online: &OnlineSgpr<Fixed>,
+    kernel: KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    xs: &[f64],
+    d: usize,
+) -> f64 {
+    let (n, m) = (y.len(), z.len() / d);
+    assert_eq!((online.n(), online.m()), (n, m));
+    assert_slice_close(online.x(), x, TOL);
+    assert_slice_close(online.z(), z, TOL);
+    let full = factor_oracle(kernel, likelihood, x, n, d, y, z, m);
+    let q = xs.len() / d;
+    let got = online.predict(xs, q, d).expect("online predict");
+    let want = full.predict(xs, q, d).expect("factor predict");
+    let nlml = common::rel_err(
+        online.neg_log_marginal_likelihood().expect("online nlml"),
+        full.neg_log_marginal_likelihood().expect("factor nlml"),
+    );
+    got.mean
+        .iter()
+        .zip(&want.mean)
+        .chain(got.variance.iter().zip(&want.variance))
+        .map(|(a, b)| common::rel_err(*a, *b))
+        .fold(nlml, f64::max)
+}
+
+/// The relative pivot threshold of an inducing update (`PIVOT_RTOL` in
+/// `src/sgpr/factor/updates.rs`): an inducing change from a factor of
+/// `K_mm` with a pivot `L_ii² ≤ τ (K_ii + j)` assembles the system again.
+const MIXED_PIVOT_RTOL: f64 = 1e-5;
+
+/// The smallest pivot `L_ii² / K_ii` of the LLT of `K_mm` of an RBF kernel
+/// of unit variance and the lengthscales `lengthscales` (one per feature)
+/// at the `m` inducing points `z` (column-major `m × d`); `0` for a pivot
+/// that is not positive.
+fn min_pivot_ratio(z: &[f64], m: usize, lengthscales: &[f64]) -> f64 {
+    let k = |i: usize, j: usize| {
+        let r2: f64 = lengthscales
+            .iter()
+            .enumerate()
+            .map(|(f, ell)| ((z[f * m + i] - z[f * m + j]) / ell).powi(2))
+            .sum();
+        (-0.5 * r2).exp()
+    };
+    let mut l = vec![0.0_f64; m * m];
+    let mut min_ratio = f64::INFINITY;
+    for j in 0..m {
+        let pivot = k(j, j) - (0..j).map(|p| l[j * m + p].powi(2)).sum::<f64>();
+        min_ratio = min_ratio.min(pivot.max(0.0) / k(j, j));
+        if pivot <= 0.0 {
+            return 0.0;
+        }
+        let ljj = pivot.sqrt();
+        l[j * m + j] = ljj;
+        for i in (j + 1)..m {
+            let dot: f64 = (0..j).map(|p| l[i * m + p] * l[j * m + p]).sum();
+            l[i * m + j] = (k(i, j) - dot) / ljj;
+        }
+    }
+    min_ratio
+}
+
+/// The largest difference from the factor over the steps of mixed
+/// sequences, each with the step it was found at.
+#[derive(Default)]
+struct MixedWorst {
+    /// Inducing steps, and `X` steps at an inducing set whose `K_mm` has
+    /// every pivot above [`MIXED_PIVOT_RTOL`].
+    checked: (f64, String),
+    /// `X` steps at an inducing set with a pivot of `K_mm` at or below
+    /// [`MIXED_PIVOT_RTOL`].
+    x_below_threshold: (f64, String),
+}
+
+impl MixedWorst {
+    fn max(self, other: Self) -> Self {
+        let pick = |a: (f64, String), b: (f64, String)| if b.0 > a.0 { b } else { a };
+        Self {
+            checked: pick(self.checked, other.checked),
+            x_below_threshold: pick(self.x_below_threshold, other.x_below_threshold),
+        }
+    }
+}
+
+/// Runs one mixed sequence of [`MIXED_OPS`] steps from `seed` with the RBF
+/// `kernel` of the lengthscales `lengthscales` (`d` features) and returns
+/// the largest difference from the factor after any step.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_mixed_sequence(kernel: &KernelSpec, lengthscales: &[f64], seed: u64) -> MixedWorst {
+    let d = lengthscales.len();
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut x: Vec<f64> = (0..MIXED_N0 * d).map(|_| sample_coord(&mut rng)).collect();
+    let mut y: Vec<f64> = (0..MIXED_N0).map(|_| sample_coord(&mut rng)).collect();
+    let mut z: Vec<f64> = (0..MIXED_M0 * d).map(|_| sample_coord(&mut rng)).collect();
+    let xs: Vec<f64> = (0..4 * d).map(|i| 0.3 + 0.9 * (i % 4) as f64).collect();
+    let fitted = factor_oracle(
+        kernel.clone(),
+        likelihood,
+        &x,
+        MIXED_N0,
+        d,
+        &y,
+        &z,
+        MIXED_M0,
+    );
+    let mut online = fitted.into_online();
+    let mut worst = MixedWorst::default();
+    for step in 0..MIXED_OPS {
+        let (n, m) = (online.n(), online.m());
+        let op = mixed_op(&mut rng, n, m);
+        match op {
+            MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom => {
+                let z_new = mixed_inducing(&mut rng, op, &z, m, d);
+                online.insert_inducing(&z_new).expect("insert inducing");
+                append_colmajor(&mut z, m, d, &z_new);
+            }
+            MixedOp::InducingDelete(index) => {
+                online
+                    .delete_inducing(online.inducing_ids()[index])
+                    .expect("delete inducing");
+                remove_colmajor(&mut z, m, d, index);
+            }
+            MixedOp::Insert => {
+                let x_new: Vec<f64> = (0..d).map(|_| sample_coord(&mut rng)).collect();
+                let y_new = sample_coord(&mut rng);
+                online.insert(&x_new, y_new).expect("insert");
+                append_colmajor(&mut x, n, d, &x_new);
+                y.push(y_new);
+            }
+            MixedOp::Delete(index) => {
+                online.delete(online.point_ids()[index]).expect("delete");
+                remove_colmajor(&mut x, n, d, index);
+                y.remove(index);
+            }
+        }
+        let err = mixed_err_vs_factor(&online, kernel.clone(), likelihood, &x, &y, &z, &xs, d);
+        let inducing_step = !matches!(op, MixedOp::Insert | MixedOp::Delete(_));
+        let pivot = min_pivot_ratio(&z, online.m(), lengthscales);
+        let slot = if inducing_step || pivot > MIXED_PIVOT_RTOL {
+            &mut worst.checked
+        } else {
+            assert!(err.is_finite(), "seed={seed} step={step} {op:?}: {err}");
+            &mut worst.x_below_threshold
+        };
+        if err > slot.0 {
+            *slot = (err, format!("seed={seed} step={step} m={m} {op:?}"));
+        }
+    }
+    worst
+}
+
+/// Runs [`run_mixed_sequence`] over [`MIXED_SEEDS`] and checks the steps
+/// [`MixedWorst::checked`] holds against [`INDUCING_TOL`].
+//
+// `X` steps at an inducing set with a pivot of `K_mm` at or below the
+// threshold are not compared at that tolerance. The factor takes any
+// positive pivot without jitter, down to the rounding residue an exact
+// duplicate leaves (`L_ii² ≈ 1e-22`), and then a row of its `A` is a
+// rounding residue divided by another: entries far above `1`, so `B`
+// carries `ε ‖A‖² / σ²` and the rank-1 update of `B` an `X` step makes
+// (ADR 0004, the same code as before the inducing update) and the product
+// the factor forms differ by that much. Measured over 40 seeds of both
+// kernels, those steps were up to `0.18` off at an exact duplicate and
+// `1.3e-9` at a near duplicate `3e-5` away; the step before this change
+// was the same (`2.9e-4` at RBF seed 5, step 8, on both). Every inducing
+// step is compared: from such a factor it assembles the system again, so
+// what an `X` step left behind does not reach a later inducing step.
+// Over the same 40 seeds the largest checked difference was `6e-12`.
+fn run_mixed_seeds(kernel: &KernelSpec, lengthscales: &[f64], label: &str) {
+    let worst = MIXED_SEEDS
+        .map(|seed| run_mixed_sequence(kernel, lengthscales, seed))
+        .fold(MixedWorst::default(), MixedWorst::max);
+    let (err, at) = worst.checked;
+    assert!(err <= INDUCING_TOL, "{label}: rel_err={err:e} at {at}");
+}
+
+/// Inducing inserts on, next to (`1e-5` to `1e-2` per coordinate), and
+/// away from the inducing points, and inducing deletes at the first, the
+/// middle, the last, and a random index, mixed with `X` inserts and
+/// deletes, on 1-D RBF data: each step matches a factor of the same `X`,
+/// `y`, and `Z`. Before an inducing change from a factor with a pivot
+/// below the threshold assembled the system again, a delete there was
+/// `0.20` off (seed 2, step 46).
+#[test]
+fn mixed_ops_rbf_with_near_duplicates_match_factor() {
+    run_mixed_seeds(
+        &KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        &[1.0],
+        "rbf",
+    );
+}
+
+/// [`mixed_ops_rbf_with_near_duplicates_match_factor`] on 2-D ARD RBF
+/// data. Before the same change a delete of the first inducing point was
+/// `0.28` off (seed 7, step 48).
+#[test]
+fn mixed_ops_rbf_ard_2d_with_near_duplicates_match_factor() {
+    let lengthscales = [1.0, 1.5];
+    run_mixed_seeds(
+        &KernelSpec::from(RbfArdKernel::new(&lengthscales).expect("ℓ")),
+        &lengthscales,
+        "ard",
+    );
 }

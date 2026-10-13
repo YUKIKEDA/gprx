@@ -216,6 +216,9 @@ const PIVOT_RTOL: f64 = 1e-5;
 /// of `A` becomes `l` first, and `B` follows by a rank-1 update and
 /// downdate.
 ///
+/// The caller takes this path only from a factor whose pivots hold
+/// ([`factor_pivots_hold`]); the bordered pivot is checked here.
+///
 /// # Errors
 ///
 /// Returns [`GprError::CholeskyFailed`] when the bordered pivot of
@@ -307,11 +310,37 @@ fn pivot_holds<T: KernelScalar>(pivot: T, diag: T) -> bool {
     pivot.is_finite() && pivot > PIVOT_RTOL * diag
 }
 
+/// Whether every pivot of `l`, the lower factor of `K_mm + j I`, holds
+/// the threshold an inserted pivot is held to: `L_ii² > τ (K_ii + j)`
+/// with `τ =` [`PIVOT_RTOL`], where `K_ii + j = Σ_k L_ik²` is the squared
+/// norm of row `i` (`O(m²)`).
+///
+/// [`inducing_append`] and [`inducing_delete`] start from `l`, so a pivot
+/// below the threshold anywhere in it (one an assembly took: the factor
+/// accepts any positive pivot, down to the rounding residue of an exact
+/// duplicate) puts its relative rounding error into every row the update
+/// computes after it, as the inserted pivot would. The caller assembles
+/// the changed inducing set again instead, as the factor does. In exact
+/// arithmetic an append leaves the pivots of `l` as they are and a delete
+/// only raises those after the row it drops, so a factor whose pivots hold
+/// keeps them through updates; only an assembly brings in a smaller one.
+pub(crate) fn factor_pivots_hold<T: KernelScalar>(l: MatRef<'_, T>) -> bool {
+    (0..l.nrows()).all(|i| {
+        let mut row2 = lit::<T>(0.0);
+        for k in 0..=i {
+            row2 += l[(i, k)] * l[(i, k)];
+        }
+        pivot_holds(l[(i, i)] * l[(i, i)], row2)
+    })
+}
+
 /// Drops inducing row `idx` by a trailing cholupdate of `L_mm` (ADR 0005).
 ///
 /// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`
 /// (`O(n·m²)`, no kernel evaluation). `B` is formed again from the new
 /// `A`. `k_diag_sum` and the offset `j` of `K_mm + j I` are unchanged.
+/// The caller takes this path only from a factor whose pivots hold
+/// ([`factor_pivots_hold`]): the remaining pivots then hold as well.
 ///
 /// # Errors
 ///

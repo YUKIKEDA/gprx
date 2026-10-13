@@ -473,8 +473,9 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// `A` is replaced first (a rank-1 update and downdate of `B`). The VFE
     /// system is assembled again instead under the conditions on
     /// [`OnlineSgpr`] (an `f32` storage scalar, a jitter offset `j > 0` of
-    /// the factor of `K_mm`, or a bordered pivot at most `1e-5` times its
-    /// diagonal). The returned
+    /// the factor of `K_mm` or a pivot of it at most `1e-5` times its
+    /// diagonal, or a bordered pivot at most `1e-5` times its diagonal).
+    /// The returned
     /// [`InducingId`] is never reused after a later
     /// [`Self::delete_inducing`].
     ///

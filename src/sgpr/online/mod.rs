@@ -31,10 +31,10 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 use super::FixedInducing;
 use super::factor::{
     InducingBorder, VfeState, VfeSystem, a_times_y, append_point, assemble_vfe,
-    assemble_vfe_with_f64_w, coordinate_border, inducing_append, inducing_delete, kernel_column,
-    kernel_diag_at, point_at, predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights,
-    push_column, remove_column_in_place, remove_point, solve_lmm, vfe_loo,
-    vfe_neg_log_marginal_likelihood,
+    assemble_vfe_with_f64_w, coordinate_border, factor_pivots_hold, inducing_append,
+    inducing_delete, kernel_column, kernel_diag_at, point_at, predict_vfe_covariance,
+    predict_vfe_into, publish_sgpr_weights, push_column, remove_column_in_place, remove_point,
+    solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -136,6 +136,13 @@ pub(super) enum InducingChange<T> {
 /// - the factor of `K_mm` took a jitter offset `j > 0` under
 ///   [`Self::jitter_policy`]: the assembly chooses `j` again for the new
 ///   inducing set;
+/// - a pivot of the factor the change starts from is at most `1e-5` times
+///   its diagonal (`L_ii² ≤ 1e-5 (K_ii + j)` in `K_mm + j I = L Lᵀ`): an
+///   assembly takes any positive pivot without jitter, down to the
+///   rounding residue an exact duplicate leaves, and an update would carry
+///   the rounding of that pivot into every row it computes, so every
+///   inducing change assembles again until one leaves a factor whose
+///   pivots hold (the delete of the duplicate, say);
 /// - a bordered pivot of an insert, of `K_mm + j I` or of `B`, is at most
 ///   `1e-5` times the diagonal it is cancelled from, such as a new
 ///   inducing point on or next to one the model holds;
@@ -909,8 +916,16 @@ where
     /// factor of `K_mm` took an offset `j > 0` either: the factor of the
     /// changed inducing set chooses its own `j` (zero when the near
     /// duplicate that needed it is gone), and only an assembly finds it.
+    /// Not when a pivot of that factor is at or below the relative
+    /// threshold of an inserted pivot ([`factor_pivots_hold`]), such as the
+    /// rounding residue an assembly with `j = 0` takes for an exact
+    /// duplicate: an update from that factor carries its rounding error
+    /// into every row it computes, while the factor of the changed set,
+    /// which an assembly reproduces, has its own.
     fn updates_inducing_in_place(&self) -> bool {
-        !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 && self.state.k_mm_jitter <= 0.0
+        !<P::Storage as ScalarOps>::ROUNDS_FROM_F64
+            && self.state.k_mm_jitter <= 0.0
+            && factor_pivots_hold(self.state.k_mm_l.as_ref())
     }
 
     /// Commits one change of the inducing set: `change` gives it from the
@@ -1019,8 +1034,10 @@ where
     /// the new factor; `B` is formed and factored again from that `A`
     /// (`O(n·m²)`, no kernel evaluation). The VFE system of the reduced
     /// inducing set is assembled again instead for an `f32` storage scalar,
-    /// when the factor of `K_mm` took a jitter offset `j > 0`, or when that
-    /// `B` does not factor (the conditions on [`OnlineSgpr`]). The last
+    /// when the factor of `K_mm` took a jitter offset `j > 0`, when a pivot
+    /// of that factor is at most `1e-5` times its diagonal (an exact or
+    /// near duplicate among the inducing points, say), or when that `B`
+    /// does not factor (the conditions on [`OnlineSgpr`]). The last
     /// remaining inducing point cannot be deleted.
     ///
     /// # Errors
@@ -1575,9 +1592,11 @@ where
     /// solved again (`O(n·m)` plus `O(m²)`). The VFE system of the enlarged
     /// inducing set is assembled again instead (`O(n·m²)`) for an `f32`
     /// storage scalar, when the factor of `K_mm` took a jitter offset
-    /// `j > 0`, or when `ℓ²` or the pivot of `B` is at most `1e-5` times
-    /// the diagonal it is cancelled from (`z_new` on or next to an inducing
-    /// point, say): the conditions on [`OnlineSgpr`].
+    /// `j > 0` or has a pivot at most `1e-5` times its diagonal (an exact
+    /// or near duplicate among the inducing points), or when `ℓ²` or the
+    /// pivot of `B` is at most `1e-5` times the diagonal it is cancelled
+    /// from (`z_new` on or next to an inducing point, say): the conditions
+    /// on [`OnlineSgpr`].
     ///
     /// # Errors
     ///
@@ -1758,6 +1777,9 @@ where
         self.with_snapshot(FittedSgpr::optimize_hyperparameters)
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 /// A point an insert appends: its coordinates and target through the
 /// fitted transforms (`x`, `y`) and as the caller gave them.
