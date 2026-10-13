@@ -33,7 +33,7 @@ All of the following are true for the merge commit above. A failure in the reade
 
 `homepage` is the GitHub repository. `documentation` is `https://docs.rs/gprx`. `[package.metadata.docs.rs]` builds default features, not `bench-internals` or `insert-stages`.
 
-`CHANGELOG.md` (English, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) starts at 0.2.0. The change that publishes a version adds its section: what breaks the previous version, each with how to move, then what is added and changed. Its Verification records `cargo semver-checks` against the previous version, the previous version's tests, examples, benches, and README built and run on that change, and a directory the previous version saved loaded with the same predictions.
+`CHANGELOG.md` (English, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) starts at 0.2.0. The change that publishes a version adds its section: what breaks the previous version, each with how to move, then what is added and changed. The section heading carries the publish date, as Keep a Changelog does (`## [0.2.0] - YYYY-MM-DD`): the last change merged before the tag writes the day `cargo publish` is planned for. If the publish moves to another day, the next change corrects the date. Its Verification records `cargo semver-checks` against the previous version, the previous version's tests, examples, benches, and README built and run on that change, and a directory the previous version saved loaded with the same predictions.
 
 ## MSRV
 
