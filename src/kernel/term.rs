@@ -184,10 +184,6 @@ use super::Triangle;
 ///             reason: format!("unit kernel has no parameter pair ({i}, {j})"),
 ///         })
 ///     }
-///
-///     fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-///         Box::new(self.clone())
-///     }
 /// }
 ///
 /// # fn main() -> Result<(), GprError> {
@@ -196,9 +192,6 @@ use super::Triangle;
 /// let boxed = KernelSpec::Custom(CustomKernel::new(UnitKernel));
 /// assert_eq!(boxed, KernelSpec::custom(UnitKernel));
 /// assert!(matches!(boxed.compile(), CompiledKernel::Custom(_)));
-/// // A leaf held as a trait object clones through `clone_box`.
-/// let erased: Box<dyn KernelTerm<f64>> = Box::new(UnitKernel);
-/// assert_eq!(erased.clone_box().num_params(), 0);
 /// let spec = KernelSpec::custom(UnitKernel) + KernelSpec::from(RbfKernel::new(1.0)?);
 /// let _fitted = Gpr::new(spec, GaussianLikelihood::new(0.1)?)
 ///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
@@ -440,10 +433,6 @@ use super::Triangle;
 ///             let (k, r) = self.k_and_r(s);
 ///             k * c * (T::from_f64(1.0) - r * T::from_f64(0.5))
 ///         })
-///     }
-///
-///     fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-///         Box::new(self.clone())
 ///     }
 ///
 ///     fn persist_id(&self) -> &'static str {
@@ -714,15 +703,6 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
     ) -> Result<(), GprError> {
         Err(GprError::CoordGradientUnsupported)
     }
-
-    /// Clones this leaf into a new box.
-    ///
-    /// It serves a caller that holds the leaf as a `Box<dyn KernelTerm<T>>`.
-    /// gprx itself clones a [`CustomKernel`] through the leaf's own `Clone`,
-    /// so a tree never calls this method.
-    ///
-    /// See the example on [`KernelTerm`].
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
 
     /// Returns the stable registry key for persist.
     ///
@@ -1150,10 +1130,6 @@ mod tests {
                 reason: format!("unit kernel has no parameter pair ({i}, {j})"),
             })
         }
-
-        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-            Box::new(self.clone())
-        }
     }
 
     #[test]
@@ -1269,10 +1245,6 @@ mod tests {
             _uplo: Triangle,
         ) -> Result<(), crate::GprError> {
             Ok(())
-        }
-
-        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-            Box::new(self.clone())
         }
     }
 

@@ -273,10 +273,6 @@ impl<T: KernelScalar> KernelTerm<T> for ExpQuad {
         }
         Ok(())
     }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
-    }
 }
 
 /// Forwards every operation to the generic built-in leaf.
@@ -356,10 +352,6 @@ impl<T: KernelScalar> KernelTerm<T> for Delegating {
         uplo: Triangle,
     ) -> Result<(), GprError> {
         self.0.hess(sq_dist(x).as_ref(), d2_k, i, j, uplo)
-    }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
     }
 }
 

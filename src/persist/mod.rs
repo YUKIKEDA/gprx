@@ -1116,10 +1116,6 @@ mod tests {
             })
         }
 
-        fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-            Box::new(self.clone())
-        }
-
         fn persist_id(&self) -> &'static str {
             "test.persist_unit"
         }

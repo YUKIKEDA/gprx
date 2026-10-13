@@ -157,9 +157,6 @@ pub type FittedTargetRestore =
 ///         fill(d2_k, uplo, self.log_c.exp());
 ///         Ok(())
 ///     }
-///     fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-///         Box::new(self.clone())
-///     }
 ///     // What a save writes for this leaf, and what the restore reads back.
 ///     fn persist_id(&self) -> &'static str {
 ///         "example.bias"

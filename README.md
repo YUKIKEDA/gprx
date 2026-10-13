@@ -355,7 +355,7 @@ Isotropic leaves read `lengthscale` and `log_lengthscale`. Matérn also reads `n
 
 A leaf and a `CompiledKernel` evaluate on `faer` matrices (`MatRef` / `MatMut`; add `faer = "0.24"` to call them) with `apply`, `apply_cross`, `grad`, and `hess`. Every leaf but `LinearKernel` reads squared distances there and writes its diagonal with `fill_diag`; `LinearKernel` reads coordinates in those four methods, and its diagonal is `fill_diag_points`. `ConstantKernel` and `WhiteKernel` also have `apply_points`, `apply_cross_points`, `grad_points`, and `hess_points`, and `RbfKernel`, `RbfArdKernel`, the isotropic `MaternKernel`, and `WhiteKernel` have `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. A leaf evaluates `exp` with `Accurate`. `CompiledKernel::apply::<M>` and its other evaluating methods (not `fill_diag` / `fill_diag_points`) take the `KernelMath` type `M`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial), plus a scratch matrix of the output's shape. `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
 
-`KernelTerm<T>` is the trait for a leaf of your own that reads squared distances: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save it (they return a `serde_json::Value`, so add `serde_json = "1"`). Implement it once for every `T: KernelScalar`: a model needs it at `f64` and `f32`, `Clone`, `Debug`, `Send`, `Sync`, and `'static`. `CustomKernel::new(term)` boxes it, and `KernelSpec::from(custom)` or `KernelSpec::custom(term)` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`. The save-and-load example below implements one.
+`KernelTerm<T>` is the trait for a leaf of your own that reads squared distances: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save it (they return a `serde_json::Value`, so add `serde_json = "1"`). Implement it once for every `T: KernelScalar`: a model needs it at `f64` and `f32`, `Clone`, `Debug`, `Send`, `Sync`, and `'static`. `CustomKernel::new(term)` boxes it, and `KernelSpec::from(custom)` or `KernelSpec::custom(term)` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`. The save-and-load example below implements one.
 
 ```rust
 use gprx::kernel::{
@@ -1200,10 +1200,6 @@ impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
 
     fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
         Err(no_param(i))
-    }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
     }
 
     fn persist_id(&self) -> &'static str {

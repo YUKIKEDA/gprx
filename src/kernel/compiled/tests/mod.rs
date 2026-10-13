@@ -189,10 +189,6 @@ impl<T: KernelScalar> KernelTerm<T> for RbfAsTerm {
                 * (T::from_f64(1.0) - T::from_f64(0.5) * s))
         })
     }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
-    }
 }
 
 /// [`RbfAsTerm`] without the rectangular and coordinate derivatives (the trait
@@ -268,10 +264,6 @@ impl<T: KernelScalar> KernelTerm<T> for NoCrossDerivatives {
         uplo: Triangle,
     ) -> Result<(), crate::GprError> {
         KernelTerm::<T>::hess_points(&self.0, x, d2_k, i, j, uplo)
-    }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
     }
 }
 

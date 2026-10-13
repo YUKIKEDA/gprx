@@ -371,7 +371,7 @@ ARD の `lengthscale(dim)` は、1 つの `ℓ_d` を返す。`log_lengthscales`
 
 書く要素は `Triangle` で選ぶ。`Triangle::Lower` はコレスキーで、ほかに `Upper` と `Full` がある。カーネルの葉は `exp` を `Accurate` で計算する。`CompiledKernel::apply::<M>` と、評価するその他のメソッド（`fill_diag` / `fill_diag_points` を除く）は、`KernelMath` の型 `M` と、出力と同じ形の作業用の行列を取る。`Accurate` は libm / SIMD の `exp`。`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は、`f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` は、この選択を使わない。
 
-`KernelTerm<T>` は、二乗距離を読む自作のカーネルの葉のトレイト。実装するのは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`、`clone_box`。疎なモデルには、さらに `grad_cross` と `hess_cross` が要る。自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` も要る。保存するなら `persist_id` と `persist_state` も実装する（`serde_json::Value` を返すので、`serde_json = "1"` を足す）。実装は、すべての `T: KernelScalar` について一度だけ書く。モデルには、その葉が `f64` と `f32` で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` であることが必要である。`CustomKernel::new(term)` が `Box` に入れ、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` が木に入れる。疎なモデルが要る微分の無いカーネルの葉は `CoordGradientUnsupported`。下の保存と読み込みの例で 1 つ実装している。
+`KernelTerm<T>` は、二乗距離を読む自作のカーネルの葉のトレイト。実装するのは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`。疎なモデルには、さらに `grad_cross` と `hess_cross` が要る。自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` も要る。保存するなら `persist_id` と `persist_state` も実装する（`serde_json::Value` を返すので、`serde_json = "1"` を足す）。実装は、すべての `T: KernelScalar` について一度だけ書く。モデルには、その葉が `f64` と `f32` で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` であることが必要である。`CustomKernel::new(term)` が `Box` に入れ、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` が木に入れる。疎なモデルが要る微分の無いカーネルの葉は `CoordGradientUnsupported`。下の保存と読み込みの例で 1 つ実装している。
 
 ```rust
 use gprx::kernel::{
@@ -1216,10 +1216,6 @@ impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
 
     fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
         Err(no_param(i))
-    }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
     }
 
     fn persist_id(&self) -> &'static str {

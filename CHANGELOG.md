@@ -66,6 +66,12 @@ crate can name); `gprx::internals` is outside that contract.
   # }
   ```
 
+- **`KernelTerm::clone_box` is gone.** gprx clones a custom leaf through
+  its `Clone` (which `CustomKernel::new` and `KernelSpec::custom` already
+  require), so the method was never called. Delete `clone_box` from your
+  `impl KernelTerm<T>`; nothing replaces it. The `clone_box` of the
+  transform traits stays.
+
 ### Added
 
 - **Supplied squared distances.** A model can take the training and query

@@ -148,9 +148,6 @@ fn agree(name: &str, spec: &KernelSpec, x: &Mat<f64>, on_dist: bool) {
 struct ScaleLeaf(f64);
 
 impl<T: KernelScalar> KernelTerm<T> for ScaleLeaf {
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
-    }
     fn num_params(&self) -> usize {
         1
     }
