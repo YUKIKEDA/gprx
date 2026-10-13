@@ -20,7 +20,9 @@ pub use online::{InducingId, OnlineSgpr};
 
 /// Keeps inducing coordinates fixed during [`Sgpr::fit`].
 ///
-/// `Z` is an argument of `fit` / `factor` and is not a parameter.
+/// The default inducing layout of [`Sgpr`], and the only one of a model on
+/// supplied distances. `Z` is an argument of `fit` / `factor` and is not a
+/// parameter.
 ///
 /// See the example on [`Sgpr`].
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,7 +41,12 @@ pub struct FreeInducing;
 /// its parameters. [`FreeInducing`] moves coordinates, so it is a layout of
 /// coordinate trees ([`NoSupply`]) only: a model of supplied distances has
 /// no `Z` to move.
+///
+/// Not reachable from outside the crate: it bounds the `I` parameter of
+/// [`Sgpr`], whose values are [`FixedInducing`] and [`FreeInducing`].
 pub trait InducingLayout<U: Supply>: Clone {
+    /// The number of parameters `Z` adds for `m` inducing points in `d`
+    /// features: `m × d` when `Z` is searched, `0` otherwise.
     fn z_params(m: usize, d: usize) -> usize;
 
     /// The coordinate tree whose derivatives the free `Z` reads, or `None`

@@ -30,9 +30,13 @@ use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp
 /// [`KernelExp::Accurate`]). [`Gpr::with_prefer_memory`] /
 /// [`Gpr::with_prefer_speed`] set the memory / speed pole at once. The type
 /// parameters are the optimizer `O` (default [`Lbfgs`]; [`Fixed`] for
-/// [`Gpr<Fixed>::factor`]) and the precision `P` (default
-/// [`DoublePrecision`]). [`Clone`] copies kernel, likelihood, transforms,
-/// optimizer, and policies.
+/// [`Gpr<Fixed>::factor`]), the precision `P` (default
+/// [`DoublePrecision`]), and the kernel `K` (default [`KernelSpec`]). `K`
+/// selects the training data: a [`KernelSpec`] reads column-major
+/// coordinates `X`, and a [`DistanceKernel`] reads squared distances the
+/// caller supplies (plus `X` for the coordinate leaves of a
+/// [`DistanceKernel<WithPoints>`](crate::kernel::WithPoints)). [`Clone`]
+/// copies kernel, likelihood, transforms, optimizer, and policies.
 ///
 /// Isotropic distance fills and lower-triangle kernel writes use the process-wide thread
 /// pool. There is no parallel on/off flag. Thread count is the process-wide pool
@@ -43,17 +47,41 @@ use crate::policy::{CholeskyBuffer, DistanceCachePolicy, JitterPolicy, KernelExp
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Gpr, GaussianLikelihood};
+/// use gprx::transform::{StandardizeInput, StandardizeTarget};
+/// use gprx::{
+///     CholeskyBuffer, DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp,
+///     SinglePrecision,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
 /// let likelihood = GaussianLikelihood::new(0.1)?;
-/// let gpr = Gpr::new(kernel, likelihood);
-/// // Column-major `X` with n = 2 points and d = 1 feature.
-/// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// let gpr = Gpr::new(kernel, likelihood)
+///     .with_input_transform(StandardizeInput::new())
+///     .with_target_transform(StandardizeTarget::new());
+/// // The policies a new trainer starts with.
+/// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
+/// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Retain);
+/// assert_eq!(gpr.math(), KernelExp::Accurate);
+/// assert_eq!(gpr.jitter_policy(), JitterPolicy::default());
+/// // θ is the kernel's log-lengthscale, then the likelihood's log σn².
+/// assert_eq!(gpr.kernel().num_params(), 1);
+/// assert_eq!(gpr.num_params(), 2);
+/// let mut theta = [0.0; 2];
+/// gpr.get_params(&mut theta)?;
+/// assert!((theta[1] - gpr.likelihood().log_noise_variance()).abs() < 1e-12);
+/// // Column-major `X` with n = 3 points and d = 1 feature.
+/// let (x, y) = ([0.0, 1.0, 2.0], [0.0, 1.0, 0.5]);
+/// let fitted = gpr.fit(&x, 3, 1, &y).map_err(|(_, e)| e)?;
 /// let pred = fitted.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
 /// let _nlml = fitted.neg_log_marginal_likelihood()?;
+/// // The same model with `f32` storage.
+/// let single = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .with_precision::<SinglePrecision>()
+///     .fit(&x, 3, 1, &y)
+///     .map_err(|(_, e)| e)?;
+/// assert_eq!(single.predict(&[0.5], 1, 1)?.mean.len(), 1);
 /// # Ok(())
 /// # }
 /// ```
@@ -262,9 +290,10 @@ impl<O, P, K: ModelKernel> Gpr<O, P, K> {
     /// [`CholeskyBuffer::Retain`]; otherwise it rebuilds the whole kernel.
     ///
     /// [`Fixed`] is not an [`Optimizer`]; use [`Gpr<Fixed>::factor`] after this switch.
-    /// built-in solvers are [`crate::Lbfgs`], [`crate::NelderMead`], and
-    /// [`crate::TrustRegion`]. A user type that implements [`Optimizer`] uses this same method;
-    /// there is no second solver slot.
+    /// The built-in solvers are [`crate::Lbfgs`], [`crate::NelderMead`],
+    /// [`crate::TrustRegion`], and [`crate::FastSimulatedAnnealing`]. A user
+    /// type that implements [`Optimizer`] uses this same method; there is no
+    /// second solver slot.
     ///
     /// # Examples
     ///
@@ -438,7 +467,19 @@ impl<O, P> Gpr<O, P> {
 impl<O, P, C: PointUse> Gpr<O, P, DistanceKernel<C>> {
     /// Returns a copy of the kernel whose hyperparameters this trainer owns.
     ///
-    /// See the example on [`DistanceKernel`].
+    /// # Examples
+    ///
+    /// ```rust
+    /// use gprx::kernel::{RbfKernel, ScalarDistance};
+    /// use gprx::{GaussianLikelihood, Gpr};
+    ///
+    /// # fn main() -> Result<(), gprx::GprError> {
+    /// let image = ScalarDistance::new();
+    /// let gpr = Gpr::new(image.kernel(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?);
+    /// assert_eq!(gpr.to_kernel().num_params(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn to_kernel(&self) -> DistanceKernel<C> {
         <DistanceKernel<C> as ModelKernelParts>::from_spec(self.kernel.clone())
     }
@@ -501,12 +542,16 @@ where
 impl<P: GpScalar> Gpr<Fixed, P> {
     /// Factors at the current kernel and likelihood `θ` without a search.
     ///
-    /// Same data contract as [`Gpr::fit`]. There are no optimizer knobs.
+    /// Same data contract as `fit`: `x` is column-major with `n_rows`
+    /// points and `n_cols` features, and `y` has `n_rows` targets. There are
+    /// no optimizer knobs.
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr::fit`], except [`GprError::OptimizationNotConverged`]
-    /// does not apply.
+    /// Returns [`GprError::EmptyInput`] if `n_rows` or `n_cols` is zero,
+    /// [`GprError::LengthMismatch`] if `x` or `y` has the wrong length,
+    /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`, or
+    /// [`GprError::CholeskyFailed`] if `A` cannot be factored.
     ///
     /// # Examples
     ///

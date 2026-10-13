@@ -95,12 +95,23 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 
 /// Represents the online collapsed variational SGPR after [`FittedSgpr::into_online`].
 ///
+/// The type parameters are the optimizer `O` that [`Self::refit`] runs, the
+/// precision `P`, and the kernel `K`. A [`KernelSpec`] model inserts points
+/// and inducing points from coordinates; a
+/// [`crate::kernel::DistanceKernel`] model inserts them from supplied
+/// squared distances, and its inducing points are training points, named
+/// by their [`PointId`]s.
+///
 /// [`Self::insert`] appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
 /// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
 /// [`Self::insert_inducing`] appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
-/// by that identifier. Those updates follow ADR 0005.
+/// by that identifier. An inducing insert borders the factors of `K_mm`
+/// and `B` with one row (assembling the enlarged set again when the
+/// bordered pivot is not positive); an inducing delete removes the row
+/// from the factor of `K_mm` with a trailing update and rebuilds `A` and
+/// `B`. Neither moves `X` or `θ`.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
 ///
@@ -108,7 +119,10 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+/// use gprx::{
+///     Fixed, GaussianLikelihood, JitterPolicy, KernelExp, PredictOptions, Prediction, Sgpr,
+///     VarianceKind,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Sgpr::new(
@@ -126,9 +140,45 @@ pub(crate) type InducingRegistry = IdRegistry<InducingId>;
 /// )
 /// .map_err(|(_, e)| e)?;
 /// let mut online = fitted.into_online();
-/// online.insert(&[4.0], 0.1)?;
+/// let id = online.insert(&[4.0], 0.1)?;
 /// let pred = online.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+///
+/// // The training data, the identifiers, and the settings.
+/// assert_eq!((online.n(), online.m(), online.d()), (5, 2, 1));
+/// assert_eq!(online.x(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
+/// assert_eq!(online.y(), &[0.0, 1.0, 0.5, 0.25, 0.1]);
+/// assert_eq!(online.z(), &[0.5, 2.5]);
+/// assert_eq!(online.point_ids().last().copied(), Some(id));
+/// assert_eq!(online.inducing_ids().len(), 2);
+/// assert_eq!(online.math(), KernelExp::Accurate);
+/// assert!(matches!(online.jitter_policy(), JitterPolicy::Adaptive(_)));
+/// assert!(online.neg_log_marginal_likelihood()?.is_finite());
+///
+/// // θ: read, write, and differentiate at the current points.
+/// let mut theta = vec![0.0; online.num_params()];
+/// online.get_params(&mut theta)?;
+/// assert_eq!(theta.len(), online.kernel().num_params() + 1);
+/// assert!((theta[1] - online.likelihood().log_noise_variance()).abs() < 1e-12);
+/// theta[0] = 0.8_f64.ln();
+/// online.set_params(&theta)?;
+/// let mut grad = vec![0.0; theta.len()];
+/// assert!(online.value_and_gradient_into(&theta, &mut grad)?.is_finite());
+/// let mut hess = vec![0.0; theta.len() * theta.len()];
+/// online.hessian_into(&theta, &mut hess)?;
+///
+/// // Every query form, with the default or latent variance.
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let xs = [0.25, 0.75];
+/// let mut out = Prediction::default();
+/// online.predict_into(&xs, 2, 1, &mut out)?;
+/// assert_eq!(out, online.predict(&xs, 2, 1)?);
+/// online.predict_with_into(&xs, 2, 1, latent, &mut out)?;
+/// assert_eq!(out, online.predict_with(&xs, 2, 1, latent)?);
+/// assert_eq!(online.predict_covariance_with(&xs, 2, 1, latent)?.covariance.len(), 4);
+/// assert_eq!(online.sample(&xs, 2, 1, 3, 7)?.len(), 6);
+/// assert_eq!(online.sample_with(&xs, 2, 1, latent, 3, 7)?.len(), 6);
+/// assert_eq!(online.loo_predict_with(latent)?.mean.len(), 5);
 /// # Ok(())
 /// # }
 /// ```
@@ -1559,7 +1609,7 @@ where
     ///
     /// # Errors
     ///
-    /// Same as [`Sgpr::fit`](crate::Sgpr::fit).
+    /// Same as `fit` of the [`Sgpr`](crate::Sgpr) of this kernel.
     ///
     /// # Examples
     ///

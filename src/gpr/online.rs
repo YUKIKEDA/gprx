@@ -73,6 +73,12 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 
 /// Stores an online Exact GPR after [`FittedGpr::into_online`]: LDLT factor, tail insert, and delete.
 ///
+/// The type parameters are those of the [`FittedGpr`] it came from: the
+/// optimizer `O` that [`Self::refit`] runs, the precision `P`, and the
+/// kernel `K`, which selects whether a point is inserted from coordinates
+/// ([`KernelSpec`]) or from its supplied squared distances
+/// ([`crate::kernel::DistanceKernel`]).
+///
 /// [`Self::insert`] appends one training point with a bordered LDLT update
 /// and returns a [`PointId`]. [`Self::delete`] removes one point by that
 /// identifier. Predictive mean and variance use the stored LDLT
@@ -87,7 +93,10 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 ///
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
-/// use gprx::{Fixed, GaussianLikelihood, Gpr};
+/// use gprx::{
+///     CholeskyBuffer, DistanceCachePolicy, Fixed, GaussianLikelihood, Gpr, JitterPolicy,
+///     KernelExp, Lbfgs, PredictOptions, Prediction, VarianceKind,
+/// };
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Gpr::new(
@@ -98,9 +107,62 @@ pub fn take_insert_stages() -> (f64, f64, f64) {
 /// .factor(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
 /// .map_err(|(_, e)| e)?;
 /// let mut online = fitted.into_online()?;
-/// online.insert(&[1.5], 0.5)?;
+/// let id = online.insert(&[1.5], 0.5)?;
 /// let pred = online.predict(&[0.5], 1, 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+///
+/// // The training data, its identifiers, `α`, and the policies.
+/// assert_eq!((online.n(), online.d()), (3, 1));
+/// assert_eq!(online.x(), &[0.0, 1.0, 1.5]);
+/// assert_eq!(online.y(), &[0.0, 1.0, 0.5]);
+/// assert_eq!(online.point_ids().last().copied(), Some(id));
+/// assert_eq!(online.alpha()?.len(), 3);
+/// assert_eq!(online.distance_cache_policy(), DistanceCachePolicy::Cached);
+/// assert_eq!(online.cholesky_buffer(), CholeskyBuffer::Retain);
+/// assert_eq!(online.math(), KernelExp::Accurate);
+/// assert_eq!(online.jitter_policy(), JitterPolicy::default());
+/// assert!(online.neg_log_marginal_likelihood()?.is_finite());
+///
+/// // θ: read, write, and differentiate at the current points.
+/// let mut theta = vec![0.0; online.num_params()];
+/// online.get_params(&mut theta)?;
+/// assert_eq!(theta.len(), online.kernel().num_params() + 1);
+/// assert!((theta[1] - online.likelihood().log_noise_variance()).abs() < 1e-12);
+/// theta[0] = 0.8_f64.ln();
+/// online.set_params(&theta)?;
+/// let mut grad = vec![0.0; theta.len()];
+/// assert!(online.value_and_gradient_into(&theta, &mut grad)?.is_finite());
+/// let mut hess = vec![0.0; theta.len() * theta.len()];
+/// online.hessian_into(&theta, &mut hess)?;
+///
+/// // Every query form, with the default or latent variance.
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let xs = [0.25, 0.75];
+/// let mut out = Prediction::default();
+/// online.predict_into(&xs, 2, 1, &mut out)?;
+/// assert_eq!(out, online.predict(&xs, 2, 1)?);
+/// online.predict_with_into(&xs, 2, 1, latent, &mut out)?;
+/// assert_eq!(out, online.predict_with(&xs, 2, 1, latent)?);
+/// assert_eq!(online.predict_covariance(&xs, 2, 1)?.covariance.len(), 4);
+/// assert_eq!(online.predict_covariance_with(&xs, 2, 1, latent)?.covariance.len(), 4);
+/// assert_eq!(online.sample(&xs, 2, 1, 3, 7)?.len(), 6);
+/// assert_eq!(online.sample_with(&xs, 2, 1, latent, 3, 7)?.len(), 6);
+/// assert_eq!(online.loo_predict()?.mean.len(), 3);
+/// assert_eq!(online.loo_predict_with(latent)?.mean.len(), 3);
+///
+/// // Save with and without the factor.
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-online-gpr-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// online.save(&dir)?;
+/// online.save_with_factor(&dir)?;
+/// let _ = std::fs::remove_dir_all(&dir);
+///
+/// // Rebuild the factor at the current θ, then search θ again.
+/// online.refit()?;
+/// let mut online = online.with_optimizer(Lbfgs::new());
+/// online.refit()?;
+/// let trainer = online.into_trainer();
+/// assert_eq!(trainer.num_params(), 2);
 /// # Ok(())
 /// # }
 /// ```
@@ -452,9 +514,9 @@ where
 
     /// Removes the training point identified by `id` and packs every buffer.
     ///
-    /// Updates the stored LDLT with
-    /// `ldlt::update::delete_rows_and_cols_clobber`. Workspace capacity is
-    /// unchanged. `α` is not solved here. The first later read solves it.
+    /// Removes the point's row and column from the stored LDLT factor in
+    /// place, without factoring the remaining points again. Workspace
+    /// capacity is unchanged. `α` is not solved here. The first later read solves it.
     /// The last remaining point cannot be deleted.
     ///
     /// # Errors
@@ -1053,7 +1115,7 @@ impl<P: GpScalar, K: ModelKernel> OnlineGpr<Fixed, P, K> {
     ///
     /// # Errors
     ///
-    /// Same as [`Gpr<Fixed>::factor`].
+    /// Same as `factor` of the [`Gpr<Fixed>`] of this kernel.
     ///
     /// See the example on [`OnlineGpr`].
     pub fn refit(&mut self) -> Result<(), GprError> {
