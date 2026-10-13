@@ -5,11 +5,12 @@ use crate::param::{BoundedParam, Interval};
 
 /// Represents the Gaussian likelihood with observation noise variance `σn²`.
 ///
-/// The optimizer parameter is `θ = log(σn²)`, so every finite `θ` maps to a
-/// positive variance. `σn²` must also stay strictly inside its [`Interval`]
-/// ([`Interval::DEFAULT_POSITIVE`], `(1e-5, 1e5)`, unless
-/// [`Self::with_bounds`] sets another). Differentiating the kernel matrix with respect to that parameter gives
-/// `∂K/∂θ = σn² I`, not `2 σn I`.
+/// The optimizer parameter is `θ = log(σn²)`, which keeps `σn²` positive;
+/// a `θ` whose `exp` overflows to infinity or underflows to zero is
+/// [`GprError::InvalidNoiseVariance`]. `σn²` must also stay strictly inside
+/// its [`Interval`] ([`Interval::DEFAULT_POSITIVE`], `(1e-5, 1e5)`, unless
+/// [`Self::with_bounds`] sets another). Differentiating the kernel matrix
+/// with respect to that parameter gives `∂K/∂θ = σn² I`, not `2 σn I`.
 ///
 /// Observation noise lives here. Do not also add a large white kernel term;
 /// that double-counts noise. Cholesky jitter ([`crate::JitterPolicy`]) is a

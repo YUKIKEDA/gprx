@@ -33,12 +33,12 @@ pub enum VarianceKind {
 
 /// Represents the options of a prediction.
 ///
-/// Every model family takes it in its `*_with` methods
-/// ([`crate::FittedGpr::predict_with`], `predict_with_into`,
-/// `predict_covariance_with`, and `sample_with`, and the same names on
-/// [`crate::FittedSgpr`], [`crate::FittedSvgp`], the online models, and the
-/// loaded models). The methods without `_with` use
-/// [`PredictOptions::default`].
+/// [`crate::FittedGpr`], [`crate::OnlineGpr`], [`crate::FittedSgpr`],
+/// [`crate::OnlineSgpr`], and [`crate::FittedSvgp`] take it in
+/// `predict_with`, `predict_with_into`, `predict_covariance_with`, and
+/// `sample_with`. The loaded models ([`crate::persist::LoadedGpr`] and the
+/// other `Loaded*` types) take it in `predict_with` only. The methods
+/// without `_with` use [`PredictOptions::default`].
 ///
 /// # Examples
 ///

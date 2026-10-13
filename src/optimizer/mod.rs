@@ -113,13 +113,15 @@ pub trait Optimizer<P: ?Sized> {
     /// [`GprError::LengthMismatch`] when `init` is not
     /// [`crate::Objective::num_params`] long (and [`FastSimulatedAnnealing`]
     /// when there are no parameters), the objective's own error when
-    /// [`crate::Objective::fill_intervals`] fails or the objective cannot be
-    /// evaluated at any point the first run tries,
+    /// [`crate::Objective::fill_intervals`] fails, when the objective fails
+    /// at the initial point, or when the best point a run ends on is one
+    /// where it failed (a run treats a failed point as a barrier and goes on;
+    /// [`FastSimulatedAnnealing`] skips proposals whose factorization fails),
     /// [`GprError::InvalidConfig`] when the solver rejects its settings or
     /// (for [`FastSimulatedAnnealing`]) the first value is not finite, and
-    /// [`GprError::OptimizationNotConverged`] when no run reached a finite
-    /// value. A failed extra start (`with_restarts`) is dropped, not
-    /// returned.
+    /// [`GprError::OptimizationNotConverged`] in the cases that variant
+    /// lists. A run from an extra start (`with_restarts`) that fails is
+    /// dropped, not returned.
     ///
     /// See the example on [`Optimizer`].
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError>;
@@ -140,9 +142,10 @@ pub trait Optimizer<P: ?Sized> {
 /// It is not an [`Optimizer`]. A trainer whose optimizer slot is `Fixed`
 /// factors instead of fitting: [`crate::Gpr<Fixed>::factor`],
 /// [`crate::Sgpr<Fixed>::factor`], and [`crate::Svgp<Fixed>::factor`]
-/// (`Fixed` is the default slot of [`crate::Svgp`]). A fitted or online
-/// model with this slot refactors at its current `θ` on `refit`
-/// ([`crate::FittedGpr::refit`]), and a loaded model carries it.
+/// (`Fixed` is the default slot of [`crate::Svgp`]). On the exact models,
+/// [`crate::FittedGpr`] and [`crate::OnlineGpr`] with this slot refactor at
+/// their current `θ` on `refit`; the sparse models have no `refit` for
+/// `Fixed`. A loaded model carries this slot.
 ///
 /// See the example on [`crate::Gpr::factor`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

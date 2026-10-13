@@ -24,11 +24,12 @@
 //! `n_jobs` setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process starts, or call
 //! `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first
 //! [`Gpr::fit`] / [`FittedGpr::predict`]. One worker (`RAYON_NUM_THREADS=1`) is
-//! sequential. The global pool can be initialized only once. The training Cholesky factor
-//! and the `n`-column solve that forms the gradient matrix `ααᵀ − A⁻¹` during a fit cap the
-//! linear-algebra backend at `min(pool, n / 64)` workers. Triangular solves for `m` query
-//! points in predict / covariance also cap at `n · m / 16384` and `m / 12`, so a
-//! 1024 × 100 solve does not start 16 workers. Kernel fills still use the full pool.
+//! sequential. The global pool can be initialized only once. A factor or solve of `n` rows
+//! and `k` columns (the training Cholesky factor and the `n`-column solve that forms the
+//! gradient matrix `ααᵀ − A⁻¹` have `k = n`; a predict or covariance solve has one column per
+//! query point) runs the linear-algebra backend on `min(pool, n / 64, n · k / 16384, k / 12)`
+//! workers, at least one, so a 1024 × 100 solve does not start 16 workers. Kernel fills
+//! still use the full pool.
 //!
 //! # Examples
 //!

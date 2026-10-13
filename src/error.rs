@@ -365,10 +365,13 @@ pub enum GprError {
     CoordGradientUnsupported,
     /// Reports that the hyperparameter search found no usable point.
     ///
-    /// No run reached a finite objective value, or an optimizer returned a
-    /// result of the wrong length or with a non-finite value. A built-in
-    /// optimizer that stops at its iteration cap returns its best point
-    /// instead of this error.
+    /// The solver of the first run stopped with an error of its own (not a
+    /// [`GprError`] of the objective), the best point of a run is one where
+    /// the value, gradient, or Hessian was not finite, no run reached a
+    /// finite objective value,
+    /// or an optimizer returned a result of the wrong length or with a
+    /// non-finite value. A built-in optimizer that stops at its iteration cap
+    /// returns its best point instead of this error.
     #[error("optimizer did not converge after {iterations} iterations")]
     OptimizationNotConverged {
         /// Holds the number of optimizer iterations performed.

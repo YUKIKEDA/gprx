@@ -73,8 +73,10 @@ pub enum CholeskyBuffer {
     Reuse,
 }
 
-/// Records which kernel `exp` a model evaluates with ([`crate::Gpr`], [`crate::Sgpr`], and [`crate::Svgp`] take it through `with_math`).
+/// Records which kernel `exp` a model evaluates with.
 ///
+/// [`crate::Gpr`], [`crate::Sgpr`], and [`crate::Svgp`] take it through
+/// `with_math`.
 /// [`Self::Accurate`] (the default) is language `exp` and SIMD `exp` ([`crate::Accurate`]).
 /// [`Self::FastApprox`] is the polynomial ([`crate::FastApprox`]); fit and predict use the
 /// same one. Hyperparameter `exp(θ)` is unchanged.
