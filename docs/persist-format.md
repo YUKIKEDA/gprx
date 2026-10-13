@@ -235,7 +235,7 @@ No Gram matrix, no `W`, no distance cache, no `A = L⁻¹ K_mn`, no VFE system. 
 | Call | `has_factor` | Tensors | On load |
 | --- | --- | --- | --- |
 | `save` (Exact) | `false` | `x`, `y` | Builds the Gram matrix at the stored `θ`, factors it (retrying by the stored `jitter` policy), and solves for `α`. Costs `O(n³)` |
-| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor is memory-mapped (a later gprx save into the same directory renames a new file over it and leaves the mapped file alone; another program must not rewrite the file in place while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor is copied out |
+| `save_with_factor` (Exact) | `true` | `x`, `y`, `l`, `alpha` | Skips the factorization. An `F64` factor of an `llt` file is memory-mapped (a later gprx save into the same directory renames a new file over it and leaves the mapped file alone; another program must not rewrite the file in place while the model lives; the tensor bytes must be 8-byte aligned or load fails with `PersistFailed`). An `F32` factor, and the factor of an `ldlt` file (copied into the online model's own buffer), are copied out |
 | `save` (`sgpr`, `online_sgpr`, `svgp`) | not written | as §6.2 | Applies the stored fitted maps to `x`; factors `K_mm` at the stored `θ` and `z_train`; rebuilds the VFE system (`sgpr`), or checks `q` and rebuilds `A` and `k_diag` (`svgp`) |
 
 For `ldlt` and `online_sgpr`, the saved ids are restored, so the next `insert` returns the id it would have returned before `save`.

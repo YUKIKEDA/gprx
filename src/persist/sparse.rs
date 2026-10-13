@@ -406,7 +406,7 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
     Ok((q_mean, q_l))
 }
 
-/// Represents the prediction-only sparse GPR loaded from a persist directory written by [`FittedSgpr::save`] or [`OnlineSgpr::save`].
+/// Represents the prediction-only sparse GPR loaded from a persist directory written by the `save` of a coordinate [`FittedSgpr`] or [`OnlineSgpr`].
 ///
 /// One variant per precision and model, as [`super::LoadedGpr`]. The kernel,
 /// likelihood, kernel `exp`, `K_mm` jitter policy, and transforms are read
@@ -421,7 +421,22 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 /// use gprx::persist::{LoadedSgpr, PersistRegistry};
-/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+/// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedSgpr) -> &'static str {
+///     match model {
+///         LoadedSgpr::Double(_) => "f64",
+///         LoadedSgpr::Single(_) => "f32",
+///         LoadedSgpr::Mixed(_) => "mixed",
+///         LoadedSgpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedSgpr::OnlineDouble(_) => "online f64",
+///         LoadedSgpr::OnlineSingle(_) => "online f32",
+///         LoadedSgpr::OnlineMixed(_) => "online mixed",
+///         LoadedSgpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Sgpr::new(
@@ -435,8 +450,16 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedSgpr::load(&dir, &PersistRegistry::new())?;
-/// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// // Three training points, two inducing points, one feature.
+/// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
 /// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
+/// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// assert_eq!(
+///     loaded.predict_with(&[0.5], 1, 1, latent)?,
+///     fitted.predict_with(&[0.5], 1, 1, latent)?,
+/// );
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -445,20 +468,36 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 #[non_exhaustive]
 pub enum LoadedSgpr {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Double(FittedSgpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Single(FittedSgpr<Fixed, FixedInducing, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Mixed(FittedSgpr<Fixed, FixedInducing, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     Reevaluate(FittedSgpr<Fixed, FixedInducing, crate::MixedPrecision<crate::ReevaluateKernel>>),
     /// Marks a [`crate::DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineDouble(OnlineSgpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineSingle(OnlineSgpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineMixed(OnlineSgpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedSgpr`].
     OnlineReevaluate(OnlineSgpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
@@ -492,7 +531,7 @@ pub(super) fn load_sgpr_as<P: GpScalar, K: ModelKernel, L>(
 }
 
 impl LoadedSgpr {
-    /// Reads `dir/config.json` and `dir/model.safetensors` written by [`FittedSgpr::save`] (a [`FittedSgpr`] variant) or [`OnlineSgpr::save`] (an [`OnlineSgpr`] variant with the saved identifiers).
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the `save` of a coordinate [`FittedSgpr`] (loads a [`FittedSgpr`] variant) or [`OnlineSgpr`] (loads an [`OnlineSgpr`] variant with the saved identifiers).
     ///
     /// # Errors
     ///
@@ -501,7 +540,8 @@ impl LoadedSgpr {
     /// directory holds another model, or its JSON, tensors, or registry
     /// lookup is invalid, and [`GprError::NonFiniteInput`] when the saved
     /// maps send the training data past `f64`. Factorization errors use the
-    /// same variants as [`crate::Sgpr<Fixed>::factor`].
+    /// same variants as the `factor` of a coordinate [`crate::Sgpr`] with
+    /// [`Fixed`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -512,28 +552,28 @@ impl LoadedSgpr {
         })
     }
 
-    /// Holds the number of training points.
+    /// Returns the number of training points.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn n(&self) -> usize {
         self.view().core().n
     }
 
-    /// Holds the number of inducing points.
+    /// Returns the number of inducing points.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn m(&self) -> usize {
         self.view().core().m
     }
 
-    /// Holds the number of input features.
+    /// Returns the number of input features.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn d(&self) -> usize {
         self.view().core().d
     }
 
-    /// Returns the `true` for an [`OnlineSgpr`] variant.
+    /// Returns `true` for an [`OnlineSgpr`] variant.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn is_online(&self) -> bool {
@@ -550,7 +590,7 @@ impl LoadedSgpr {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSgpr::predict`].
+    /// Same as the `predict` of a coordinate [`FittedSgpr`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn predict(
@@ -562,11 +602,11 @@ impl LoadedSgpr {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Returns the [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSgpr::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`FittedSgpr`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn predict_with(
@@ -594,7 +634,7 @@ impl LoadedSgpr {
     }
 }
 
-/// Represents the prediction-only SVGP loaded from a persist directory written by [`FittedSvgp::save`].
+/// Represents the prediction-only SVGP loaded from a persist directory written by the `save` of a coordinate [`FittedSvgp`].
 ///
 /// One variant per precision, as [`super::LoadedGpr`]. `K_mm` and `A` are
 /// factored again at the saved `θ` and `Z`, with the saved `q(u)`.
@@ -604,7 +644,18 @@ impl LoadedSgpr {
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 /// use gprx::persist::{LoadedSvgp, PersistRegistry};
-/// use gprx::{GaussianLikelihood, Svgp};
+/// use gprx::{GaussianLikelihood, PredictOptions, Svgp, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedSvgp) -> &'static str {
+///     match model {
+///         LoadedSvgp::Double(_) => "f64",
+///         LoadedSvgp::Single(_) => "f32",
+///         LoadedSvgp::Mixed(_) => "mixed",
+///         LoadedSvgp::Reevaluate(_) => "mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Svgp::new(
@@ -617,7 +668,15 @@ impl LoadedSgpr {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedSvgp::load(&dir, &PersistRegistry::new())?;
+/// // Three training points, two inducing points, one feature.
+/// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
+/// assert_eq!(describe(&loaded), "f64");
 /// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// assert_eq!(
+///     loaded.predict_with(&[0.5], 1, 1, latent)?,
+///     fitted.predict_with(&[0.5], 1, 1, latent)?,
+/// );
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -626,12 +685,20 @@ impl LoadedSgpr {
 #[non_exhaustive]
 pub enum LoadedSvgp {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Double(FittedSvgp),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Single(FittedSvgp<crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Mixed(FittedSvgp<crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedSvgp`].
     Reevaluate(FittedSvgp<crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
@@ -649,7 +716,7 @@ pub(super) fn load_svgp_as<P: GpScalar, K: ModelKernel, L>(
 }
 
 impl LoadedSvgp {
-    /// Reads `dir/config.json` and `dir/model.safetensors` written by [`FittedSvgp::save`].
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the `save` of a coordinate [`FittedSvgp`].
     ///
     /// # Errors
     ///
@@ -666,21 +733,21 @@ impl LoadedSvgp {
         })
     }
 
-    /// Holds the number of training points.
+    /// Returns the number of training points.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn n(&self) -> usize {
         self.view().core().n
     }
 
-    /// Holds the number of inducing points.
+    /// Returns the number of inducing points.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn m(&self) -> usize {
         self.view().core().m
     }
 
-    /// Holds the number of input features.
+    /// Returns the number of input features.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn d(&self) -> usize {
@@ -691,7 +758,7 @@ impl LoadedSvgp {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSvgp::predict`].
+    /// Same as the `predict` of a coordinate [`FittedSvgp`].
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn predict(
@@ -703,11 +770,11 @@ impl LoadedSvgp {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Returns the [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSvgp::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`FittedSvgp`].
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn predict_with(

@@ -7,16 +7,156 @@ use crate::error::GprError;
 
 /// Represents the unfitted input map.
 ///
-/// [`Self::fit`] consumes it and returns a [`Transform`].
+/// [`Self::fit`] consumes it and returns a [`Transform`]. The built-in maps
+/// are [`IdentityInput`], [`StandardizeInput`], [`MinMaxInput`],
+/// [`super::Pipeline`], and [`super::ColumnwiseInput`]. Implement this
+/// trait and [`Transform`] for a map of your own, and pass it to
+/// [`crate::Gpr::with_input_transform`]. A model with a caller-defined map
+/// saves only when both traits implement `persist_id` and
+/// `persist_state`, and loads only with a [`crate::PersistRegistry`] that
+/// holds a restore for each `persist_id`.
 ///
-/// See the example on [`StandardizeInput`].
+/// # Examples
+///
+/// A map that centers each feature on its training mean, used on a model
+/// that is then saved and loaded:
+///
+/// ```rust
+/// use std::any::Any;
+/// use std::sync::Arc;
+///
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::persist::{FittedInputRestore, LoadedGpr, PersistRegistry, UnfittedInputRestore};
+/// use gprx::transform::{Transform, UnfittedTransform};
+/// use gprx::{GaussianLikelihood, Gpr, GprError, PersistErrorKind};
+///
+/// /// Unfitted: no state.
+/// #[derive(Clone, Debug)]
+/// struct Center;
+///
+/// /// Fitted: the training mean of each feature.
+/// #[derive(Clone, Debug)]
+/// struct FittedCenter {
+///     mean: Vec<f64>,
+/// }
+///
+/// /// Checks that `x` is a non-empty, finite `n_rows × n_cols` matrix.
+/// fn check(x: &[f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+///     if n_rows == 0 || n_cols == 0 {
+///         return Err(GprError::EmptyInput);
+///     }
+///     if x.len() != n_rows * n_cols {
+///         return Err(GprError::LengthMismatch { reason: format!("expected {} values", n_rows * n_cols) });
+///     }
+///     if x.iter().any(|v| !v.is_finite()) {
+///         return Err(GprError::NonFiniteInput);
+///     }
+///     Ok(())
+/// }
+///
+/// impl UnfittedTransform for Center {
+///     fn fit(self: Box<Self>, x: &[f64], n_rows: usize, n_cols: usize) -> Result<Box<dyn Transform>, GprError> {
+///         check(x, n_rows, n_cols)?;
+///         // Column `j` of a column-major `x` is `x[j * n_rows..(j + 1) * n_rows]`.
+///         let mean = x.chunks(n_rows).map(|col| col.iter().sum::<f64>() / n_rows as f64).collect();
+///         Ok(Box::new(FittedCenter { mean }))
+///     }
+///     fn clone_box(&self) -> Box<dyn UnfittedTransform> {
+///         Box::new(self.clone())
+///     }
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+///     fn persist_id(&self) -> Option<&'static str> {
+///         Some("example.center")
+///     }
+///     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+///         Ok(serde_json::Value::Null)
+///     }
+/// }
+///
+/// impl FittedCenter {
+///     /// Adds `sign × mean` to each column of `x`.
+///     fn shift(&self, x: &mut [f64], n_rows: usize, n_cols: usize, sign: f64) -> Result<(), GprError> {
+///         if n_cols != self.mean.len() {
+///             return Err(GprError::DimensionMismatch { x_dim: n_cols, expected_dim: self.mean.len() });
+///         }
+///         check(x, n_rows, n_cols)?;
+///         for (col, mean) in x.chunks_mut(n_rows).zip(&self.mean) {
+///             col.iter_mut().for_each(|v| *v += sign * mean);
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// impl Transform for FittedCenter {
+///     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+///         self.shift(x, n_rows, n_cols, -1.0)
+///     }
+///     fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError> {
+///         self.shift(x, n_rows, n_cols, 1.0)
+///     }
+///     fn clone_box(&self) -> Box<dyn Transform> {
+///         Box::new(self.clone())
+///     }
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+///     fn persist_id(&self) -> Option<&'static str> {
+///         Some("example.center")
+///     }
+///     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+///         Ok(serde_json::json!({ "mean": self.mean }))
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
+/// // The map on its own: fit, apply, and undo.
+/// let close = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12);
+/// let fitted_map = Box::new(Center).fit(&[1.0, 3.0], 2, 1)?;
+/// let mut x = [1.0, 3.0];
+/// fitted_map.apply(&mut x, 2, 1)?;
+/// assert!(close(&x, &[-1.0, 1.0]));
+/// fitted_map.inverse_apply(&mut x, 2, 1)?;
+/// assert!(close(&x, &[1.0, 3.0]));
+///
+/// // The map on a model, saved and loaded.
+/// let fitted = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .with_input_transform(Center)
+///     .fit(&[10.0, 11.0, 12.0], 3, 1, &[0.0, 1.0, 0.5])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-input-map-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let unfitted: UnfittedInputRestore = Arc::new(|_| Ok(Box::new(Center)));
+/// let fitted_restore: FittedInputRestore = Arc::new(|state| {
+///     let mean = serde_json::from_value(state["mean"].clone()).map_err(|err| GprError::PersistFailed {
+///         kind: PersistErrorKind::Config,
+///         reason: err.to_string(),
+///     })?;
+///     Ok(Box::new(FittedCenter { mean }))
+/// });
+/// let mut registry = PersistRegistry::new();
+/// registry.register_unfitted_input("example.center", move |state| unfitted(state))?;
+/// registry.register_fitted_input("example.center", move |state| fitted_restore(state))?;
+/// let loaded = LoadedGpr::load(&dir, &registry)?;
+/// assert_eq!(loaded.predict(&[10.5], 1, 1)?, fitted.predict(&[10.5], 1, 1)?);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
 pub trait UnfittedTransform: Send + Sync {
     /// Estimates transform parameters from training features.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
-    /// a non-finite value.
+    /// The built-in maps return [`GprError::EmptyInput`] when `n_rows` or
+    /// `n_cols` is zero, [`GprError::SizeOverflow`] when `n_rows × n_cols`
+    /// overflows `usize`, [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`, or (for [`super::ColumnwiseInput`])
+    /// [`GprError::DimensionMismatch`] when its maps do not cover `n_cols`
+    /// features. A caller-defined map returns the error of its own checks.
     ///
     /// See the example on [`UnfittedTransform`].
     fn fit(
@@ -70,16 +210,20 @@ pub trait UnfittedTransform: Send + Sync {
 ///
 /// `x` is column-major: column `j` occupies `x[j * n_rows.. (j + 1) * n_rows]`.
 ///
-/// See the example on [`StandardizeInput`].
+/// See the example on [`UnfittedTransform`], which implements both traits.
 pub trait Transform: Send + Sync {
     /// Applies the fitted map to a feature matrix in place.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::DimensionMismatch`] when `n_cols` differs from the
-    /// fit, or [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`.
+    /// The built-in fitted maps return [`GprError::DimensionMismatch`] when
+    /// `n_cols` differs from the fit, [`GprError::EmptyInput`],
+    /// [`GprError::SizeOverflow`], or [`GprError::LengthMismatch`] when `x`
+    /// is not a non-empty `n_rows × n_cols` matrix, or
+    /// [`GprError::NonFiniteInput`] when `x` contains `NaN` or `Inf`. A
+    /// caller-defined map returns the error of its own checks.
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
     /// Maps transformed features back to the original coordinates in place, so that `inverse_apply` after [`Self::apply`] returns the input up to rounding.
@@ -91,26 +235,26 @@ pub trait Transform: Send + Sync {
     ///
     /// Same as [`Self::apply`].
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn inverse_apply(&self, x: &mut [f64], n_rows: usize, n_cols: usize) -> Result<(), GprError>;
 
     /// Clones this map into a new box.
     ///
     /// Used by [`crate::FittedGpr`] clone.
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn clone_box(&self) -> Box<dyn Transform>;
 
     /// Returns the downcast handle used when encoding a built-in map for persist.
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn as_any(&self) -> &dyn Any;
 
     /// Returns the registry key for a caller-defined map.
     ///
     /// Built-ins return [`None`].
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
@@ -121,7 +265,7 @@ pub trait Transform: Send + Sync {
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
     ///
-    /// See the example on [`Transform`].
+    /// See the example on [`UnfittedTransform`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -161,8 +305,11 @@ impl IdentityInput {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
-    /// a non-finite value.
+    /// Returns [`GprError::EmptyInput`] when `n_rows` or `n_cols` is zero,
+    /// [`GprError::SizeOverflow`] when `n_rows × n_cols` overflows `usize`,
+    /// [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, or [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`.
     ///
     /// See the example on [`IdentityInput`].
     pub fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<Self, GprError> {
@@ -241,10 +388,14 @@ impl Transform for IdentityInput {
 /// use gprx::transform::{StandardizeInput, Transform};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Two rows, two features: column 0 is [0, 2], column 1 is [10, 30].
+/// let close = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12);
 /// let t = StandardizeInput::new().fit(&[0.0, 2.0, 10.0, 30.0], 2, 2)?;
+/// assert!(close(t.mean(), &[1.0, 20.0]));
+/// assert!(close(t.std(), &[1.0, 10.0]));
 /// let mut x = [0.0, 2.0, 10.0, 30.0];
 /// t.apply(&mut x, 2, 2)?;
-/// # let _ = x;
+/// assert!(close(&x, &[-1.0, 1.0, -1.0, 1.0]));
 /// # Ok(())
 /// # }
 /// ```
@@ -265,8 +416,11 @@ impl StandardizeInput {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
-    /// a non-finite value.
+    /// Returns [`GprError::EmptyInput`] when `n_rows` or `n_cols` is zero,
+    /// [`GprError::SizeOverflow`] when `n_rows × n_cols` overflows `usize`,
+    /// [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, or [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`.
     ///
     /// See the example on [`StandardizeInput`].
     pub fn fit(
@@ -321,14 +475,14 @@ pub struct FittedStandardizeInput {
 impl FittedStandardizeInput {
     /// Returns per-column training means.
     ///
-    /// See the example on [`FittedStandardizeInput`].
+    /// See the example on [`StandardizeInput`].
     pub fn mean(&self) -> &[f64] {
         &self.mean
     }
 
-    /// Returns per-column training scales.
+    /// Returns per-column training scales (population standard deviations, or `1` for a constant column).
     ///
-    /// See the example on [`FittedStandardizeInput`].
+    /// See the example on [`StandardizeInput`].
     pub fn std(&self) -> &[f64] {
         &self.std
     }
@@ -396,10 +550,21 @@ impl Transform for FittedStandardizeInput {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let t = MinMaxInput::new().fit(&[0.0, 2.0, 4.0], 3, 1)?;
+/// assert_eq!((t.min(), t.max()), (&[0.0][..], &[4.0][..]));
 /// let mut x = [0.0, 2.0, 4.0];
 /// t.apply(&mut x, 3, 1)?;
 /// assert!((x[0] - 0.0).abs() < 1e-12);
 /// assert!((x[2] - 1.0).abs() < 1e-12);
+///
+/// // Another output interval.
+/// let spec = MinMaxInput::with_feature_range(-1.0, 1.0)?;
+/// assert_eq!(spec.feature_range(), (-1.0, 1.0));
+/// let t = spec.fit(&[0.0, 2.0, 4.0], 3, 1)?;
+/// assert_eq!(t.feature_range(), (-1.0, 1.0));
+/// let mut x = [0.0, 2.0, 4.0];
+/// t.apply(&mut x, 3, 1)?;
+/// assert!((x[0] + 1.0).abs() < 1e-12);
+/// assert!(MinMaxInput::with_feature_range(1.0, 1.0).is_err());
 /// # Ok(())
 /// # }
 /// ```
@@ -447,8 +612,11 @@ impl MinMaxInput {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `x` is empty, packed incorrectly, or contains
-    /// a non-finite value.
+    /// Returns [`GprError::EmptyInput`] when `n_rows` or `n_cols` is zero,
+    /// [`GprError::SizeOverflow`] when `n_rows × n_cols` overflows `usize`,
+    /// [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, or [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`.
     ///
     /// See the example on [`MinMaxInput`].
     pub fn fit(
@@ -528,21 +696,21 @@ pub struct FittedMinMaxInput {
 impl FittedMinMaxInput {
     /// Returns the output interval `[lo, hi]`.
     ///
-    /// See the example on [`FittedMinMaxInput`].
+    /// See the example on [`MinMaxInput`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
 
     /// Returns per-column training minima.
     ///
-    /// See the example on [`FittedMinMaxInput`].
+    /// See the example on [`MinMaxInput`].
     pub fn min(&self) -> &[f64] {
         &self.data_min
     }
 
     /// Returns per-column training maxima.
     ///
-    /// See the example on [`FittedMinMaxInput`].
+    /// See the example on [`MinMaxInput`].
     pub fn max(&self) -> &[f64] {
         &self.data_max
     }

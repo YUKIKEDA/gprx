@@ -34,7 +34,7 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// [`crate::kernel::ArdDistance`] from before the save names none of them.
 /// Take the slots from [`Self::slots`] (in the order of
 /// [`DistanceKernel::slots`] of the saved kernel) and bind each query's
-/// sources to them. [`Self::predict`], [`Self::predict_with`], [`Self::n`],
+/// sources to them. `predict`, `predict_with` (of either marker), [`Self::n`],
 /// [`Self::is_online`], [`Self::slots`], and [`Self::to_kernel`] work on
 /// any variant; match a variant for the typed model.
 ///
@@ -43,7 +43,22 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// ```rust
 /// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
 /// use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
-/// use gprx::{GaussianLikelihood, Gpr};
+/// use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceGpr<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceGpr::Double(_) => "f64",
+///         LoadedDistanceGpr::Single(_) => "f32",
+///         LoadedDistanceGpr::Mixed(_) => "mixed",
+///         LoadedDistanceGpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedDistanceGpr::OnlineDouble(_) => "online f64",
+///         LoadedDistanceGpr::OnlineSingle(_) => "online f32",
+///         LoadedDistanceGpr::OnlineMixed(_) => "online mixed",
+///         LoadedDistanceGpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
@@ -55,14 +70,55 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedDistanceGpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!(loaded.n(), 3);
+/// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
 /// // The loaded kernel has slots of its own: bind the query to them.
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
 /// };
+/// assert_eq!(loaded.to_kernel().slots(), loaded.slots());
 /// let cross = [0.25, 0.25, 2.25];
 /// let got = loaded.predict([slot.borrow(&cross)], 1)?;
 /// let want = fitted.predict([image.borrow(&cross)], 1)?;
 /// assert_eq!(got.mean, want.mean);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let got = loaded.predict_with([slot.borrow(&cross)], 1, latent)?;
+/// assert_eq!(got, fitted.predict_with([image.borrow(&cross)], 1, latent)?);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A kernel that also reads coordinates ([`WithPoints`]) loads as
+/// `LoadedDistanceGpr<WithPoints>`, whose predict takes the query
+/// coordinates too:
+///
+/// ```rust
+/// use gprx::kernel::{DistanceSlot, KernelSpec, RbfKernel, ScalarDistance, WithPoints};
+/// use gprx::persist::{LoadedDistanceGpr, PersistRegistry};
+/// use gprx::{GaussianLikelihood, Gpr, PredictOptions};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let image = ScalarDistance::new();
+/// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(0.5)?);
+/// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+///     .fit([image.from_vec(vec![0.0, 1.0, 1.0, 0.0])], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-distance-xs-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let loaded = LoadedDistanceGpr::<WithPoints>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!((loaded.n(), loaded.d()), (2, 1));
+/// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+///     panic!("one scalar slot");
+/// };
+/// // Two queries at 0.5 and 1.5: train × query squared distances, then coordinates.
+/// let (cross, xs) = ([0.25, 0.25, 0.25, 2.25], [0.5, 1.5]);
+/// let got = loaded.predict([slot.borrow(&cross)], &xs, 2, 1)?;
+/// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], &xs, 2, 1)?.mean);
+/// let options = PredictOptions::default();
+/// assert_eq!(loaded.predict_with([slot.borrow(&cross)], &xs, 2, 1, options)?, got);
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -71,20 +127,36 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 #[non_exhaustive]
 pub enum LoadedDistanceGpr<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Double(FittedGpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Single(FittedGpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Mixed(FittedGpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     Reevaluate(FittedGpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
     /// Marks a [`DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineDouble(OnlineGpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineSingle(OnlineGpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineMixed(OnlineGpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedDistanceGpr`].
     OnlineReevaluate(OnlineGpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 
@@ -198,7 +270,7 @@ impl LoadedDistanceGpr<DistanceOnly> {
         self.predict_with(sources, q, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -243,7 +315,7 @@ impl LoadedDistanceGpr<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -263,8 +335,8 @@ impl LoadedDistanceGpr<WithPoints> {
 }
 
 /// Represents the prediction-only SGPR of a [`DistanceKernel`] loaded from
-/// a persist directory written by [`crate::FittedSgpr::save`] or
-/// [`crate::OnlineSgpr::save`].
+/// a persist directory written by `save` on a [`crate::FittedSgpr`] or
+/// [`crate::OnlineSgpr`] of that kernel.
 ///
 /// One variant per precision and model, as [`super::LoadedSgpr`]. The
 /// training blocks are bound to new slots, as [`LoadedDistanceGpr`] binds
@@ -278,7 +350,22 @@ impl LoadedDistanceGpr<WithPoints> {
 /// ```rust
 /// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
 /// use gprx::persist::{LoadedDistanceSgpr, PersistRegistry};
-/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+/// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceSgpr<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceSgpr::Double(_) => "f64",
+///         LoadedDistanceSgpr::Single(_) => "f32",
+///         LoadedDistanceSgpr::Mixed(_) => "mixed",
+///         LoadedDistanceSgpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedDistanceSgpr::OnlineDouble(_) => "online f64",
+///         LoadedDistanceSgpr::OnlineSingle(_) => "online f32",
+///         LoadedDistanceSgpr::OnlineMixed(_) => "online mixed",
+///         LoadedDistanceSgpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
@@ -292,23 +379,67 @@ impl LoadedDistanceGpr<WithPoints> {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!((loaded.n(), loaded.m()), (3, 2));
+/// assert!(!loaded.is_online());
 /// assert_eq!(loaded.inducing(), Some(&[0, 2][..]));
 /// assert!(loaded.inducing_points().is_none());
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
 /// };
+/// assert_eq!(loaded.to_kernel().slots(), loaded.slots());
 /// // One query at 1.5: its squared distances to the two inducing points.
 /// let cross = [2.25, 0.25];
 /// let got = loaded.predict([slot.borrow(&cross)], 1)?;
 /// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let got = loaded.predict_with([slot.borrow(&cross)], 1, latent)?;
+/// assert_eq!(got, fitted.predict_with([image.borrow(&cross)], 1, latent)?);
 /// // An online model names its inducing points by `PointId`.
 /// let online = fitted.into_online();
 /// let ids = online.point_ids().to_vec();
 /// online.save(&dir)?;
 /// let loaded = LoadedDistanceSgpr::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert!(loaded.is_online());
+/// assert_eq!(describe(&loaded), "online f64");
 /// assert_eq!(loaded.inducing(), None);
 /// let points: Option<Vec<_>> = loaded.inducing_points().map(Iterator::collect);
 /// assert_eq!(points, Some(vec![ids[0], ids[2]]));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A kernel that also reads coordinates ([`WithPoints`]) loads as
+/// `LoadedDistanceSgpr<WithPoints>`, whose predict takes the query
+/// coordinates too:
+///
+/// ```rust
+/// use gprx::kernel::{DistanceSlot, KernelSpec, RbfKernel, ScalarDistance, WithPoints};
+/// use gprx::persist::{LoadedDistanceSgpr, PersistRegistry};
+/// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let image = ScalarDistance::new();
+/// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+/// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+/// let fitted = Sgpr::new(kernel, GaussianLikelihood::new(0.1)?)
+///     .with_optimizer(Fixed)
+///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 2.0], 1, &[0.0, 1.0, 0.5], &[0, 2])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-dsgpr-xs-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let loaded = LoadedDistanceSgpr::<WithPoints>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!(loaded.d(), 1);
+/// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+///     panic!("one scalar slot");
+/// };
+/// // One query at 1.5: inducing × query squared distances, then its coordinate.
+/// let (cross, xs) = ([2.25, 0.25], [1.5]);
+/// let got = loaded.predict([slot.borrow(&cross)], &xs, 1, 1)?;
+/// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], &xs, 1, 1)?.mean);
+/// let options = PredictOptions::default();
+/// assert_eq!(loaded.predict_with([slot.borrow(&cross)], &xs, 1, 1, options)?, got);
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -317,22 +448,38 @@ impl LoadedDistanceGpr<WithPoints> {
 #[non_exhaustive]
 pub enum LoadedDistanceSgpr<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Double(FittedSgpr<Fixed, FixedInducing, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Single(FittedSgpr<Fixed, FixedInducing, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Mixed(FittedSgpr<Fixed, FixedInducing, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     Reevaluate(
         FittedSgpr<Fixed, FixedInducing, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>,
     ),
     /// Marks a [`DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineDouble(OnlineSgpr<Fixed, DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineSingle(OnlineSgpr<Fixed, SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineMixed(OnlineSgpr<Fixed, MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedDistanceSgpr`].
     OnlineReevaluate(OnlineSgpr<Fixed, MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 
@@ -483,7 +630,7 @@ impl LoadedDistanceSgpr<DistanceOnly> {
         self.predict_with(sources, q, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -528,7 +675,7 @@ impl LoadedDistanceSgpr<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -548,7 +695,8 @@ impl LoadedDistanceSgpr<WithPoints> {
 }
 
 /// Represents the prediction-only SVGP of a [`DistanceKernel`] loaded from
-/// a persist directory written by [`crate::FittedSvgp::save`].
+/// a persist directory written by `save` on a [`crate::FittedSvgp`] of that
+/// kernel.
 ///
 /// One variant per precision, as [`super::LoadedSvgp`]. The training blocks
 /// are bound to new slots ([`Self::slots`]); `K_mm` is factored again at
@@ -561,7 +709,18 @@ impl LoadedDistanceSgpr<WithPoints> {
 /// ```rust
 /// use gprx::kernel::{DistanceOnly, DistanceSlot, RbfKernel, ScalarDistance};
 /// use gprx::persist::{LoadedDistanceSvgp, PersistRegistry};
-/// use gprx::{GaussianLikelihood, Svgp};
+/// use gprx::{GaussianLikelihood, PredictOptions, Svgp, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedDistanceSvgp<DistanceOnly>) -> &'static str {
+///     match model {
+///         LoadedDistanceSvgp::Double(_) => "f64",
+///         LoadedDistanceSvgp::Single(_) => "f32",
+///         LoadedDistanceSvgp::Mixed(_) => "mixed",
+///         LoadedDistanceSvgp::Reevaluate(_) => "mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
@@ -573,12 +732,55 @@ impl LoadedDistanceSgpr<WithPoints> {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedDistanceSvgp::<DistanceOnly>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!((loaded.n(), loaded.m()), (3, 2));
+/// assert_eq!(loaded.inducing(), &[0, 2]);
+/// assert_eq!(describe(&loaded), "f64");
 /// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
 ///     panic!("one scalar slot");
 /// };
+/// assert_eq!(loaded.to_kernel().slots(), loaded.slots());
+/// // One query at 1.5: its squared distances to the two inducing points.
 /// let cross = [2.25, 0.25];
 /// let got = loaded.predict([slot.borrow(&cross)], 1)?;
 /// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], 1)?.mean);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let got = loaded.predict_with([slot.borrow(&cross)], 1, latent)?;
+/// assert_eq!(got, fitted.predict_with([image.borrow(&cross)], 1, latent)?);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A kernel that also reads coordinates ([`WithPoints`]) loads as
+/// `LoadedDistanceSvgp<WithPoints>`, whose predict takes the query
+/// coordinates too:
+///
+/// ```rust
+/// use gprx::kernel::{DistanceSlot, KernelSpec, RbfKernel, ScalarDistance, WithPoints};
+/// use gprx::persist::{LoadedDistanceSvgp, PersistRegistry};
+/// use gprx::{GaussianLikelihood, PredictOptions, Svgp};
+///
+/// # fn main() -> Result<(), gprx::GprError> {
+/// let image = ScalarDistance::new();
+/// let kernel = image.kernel(RbfKernel::new(1.0)?) * KernelSpec::from(RbfKernel::new(2.0)?);
+/// let train = [0.0, 1.0, 4.0, 4.0, 1.0, 0.0];
+/// let fitted = Svgp::new(kernel, GaussianLikelihood::new(0.1)?)
+///     .factor([image.borrow(&train)], 3, &[0.0, 1.0, 2.0], 1, &[0.0, 1.0, 0.5], &[0, 2])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-dsvgp-xs-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let loaded = LoadedDistanceSvgp::<WithPoints>::load(&dir, &PersistRegistry::new())?;
+/// assert_eq!(loaded.d(), 1);
+/// let [DistanceSlot::Scalar(slot)] = loaded.slots()[..] else {
+///     panic!("one scalar slot");
+/// };
+/// // One query at 1.5: inducing × query squared distances, then its coordinate.
+/// let (cross, xs) = ([2.25, 0.25], [1.5]);
+/// let got = loaded.predict([slot.borrow(&cross)], &xs, 1, 1)?;
+/// assert_eq!(got.mean, fitted.predict([image.borrow(&cross)], &xs, 1, 1)?.mean);
+/// let options = PredictOptions::default();
+/// assert_eq!(loaded.predict_with([slot.borrow(&cross)], &xs, 1, 1, options)?, got);
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -587,12 +789,20 @@ impl LoadedDistanceSgpr<WithPoints> {
 #[non_exhaustive]
 pub enum LoadedDistanceSvgp<C: PointUse = DistanceOnly> {
     /// Marks a [`DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Double(FittedSvgp<DoublePrecision, DistanceKernel<C>>),
     /// Marks a [`SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Single(FittedSvgp<SinglePrecision, DistanceKernel<C>>),
     /// Marks a promoted-storage [`MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Mixed(FittedSvgp<MixedPrecision, DistanceKernel<C>>),
     /// Marks a [`MixedPrecision`]`<`[`ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedDistanceSvgp`].
     Reevaluate(FittedSvgp<MixedPrecision<ReevaluateKernel>, DistanceKernel<C>>),
 }
 
@@ -682,7 +892,7 @@ impl LoadedDistanceSvgp<DistanceOnly> {
         self.predict_with(sources, q, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -708,8 +918,9 @@ impl LoadedDistanceSvgp<WithPoints> {
     }
 
     /// Returns the predictive mean and observation variance at the `q`
-    /// queries `xs` (column-major `q × n_cols`); `sources` as
-    /// [`LoadedDistanceSgpr::predict`] takes them.
+    /// queries `xs` (column-major `q × n_cols`); `sources` as the `predict`
+    /// of a `LoadedDistanceSgpr<WithPoints>` ([`LoadedDistanceSgpr`]) takes
+    /// them.
     ///
     /// # Errors
     ///
@@ -726,7 +937,7 @@ impl LoadedDistanceSvgp<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///

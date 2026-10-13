@@ -243,7 +243,7 @@ Gram 行列、`W`、距離キャッシュ、`A = L⁻¹ K_mn`、VFE の系は保
 | 呼び出し | `has_factor` | テンソル | 読み込み |
 | --- | --- | --- | --- |
 | `save`（Exact） | `false` | `x`、`y` | 保存した `θ` で Gram 行列を作り、分解し（保存した `jitter` の方針で再試行する）、`α` を解く。`O(n³)` |
-| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`F64` の因子はメモリマップする（要件は下記）。`F32` の因子はコピーして取り出す |
+| `save_with_factor`（Exact） | `true` | `x`、`y`、`l`、`alpha` | 分解を省く。`llt` のファイルの `F64` の因子はメモリマップする（要件は下記）。`F32` の因子と、`ldlt` のファイルの因子（online モデルのバッファにコピーする）は、コピーして取り出す |
 | `save`（`sgpr`、`online_sgpr`、`svgp`） | 書かない | 6.2 節 | 保存した学習後の変換を `x` にかけ、保存した `θ` と `z_train` で `K_mm` を分解し、VFE の系を組み直す（`sgpr`）。または `q` を検査して `A` と `k_diag` を組み直す（`svgp`） |
 
 `save_with_factor` で `F64` の因子をメモリマップする要件:

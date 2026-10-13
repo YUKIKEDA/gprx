@@ -1,4 +1,15 @@
-//! Saves and loads a fitted GPR directory (`config.json` + `model.safetensors`).
+//! Saves and loads fitted models as a directory of `config.json` and
+//! `model.safetensors`.
+//!
+//! The `save` of a fitted Exact GPR, SGPR, or SVGP (and of the online
+//! Exact GPR and SGPR) writes the directory. [`LoadedGpr`], [`LoadedSgpr`],
+//! and [`LoadedSvgp`] read a coordinate model back;
+//! [`LoadedDistanceGpr`], [`LoadedDistanceSgpr`], and
+//! [`LoadedDistanceSvgp`] read a model of a
+//! [`DistanceKernel`](crate::kernel::DistanceKernel). Built-in kernels and
+//! transforms need no setup; a custom kernel leaf or a caller-defined
+//! transform is rebuilt by a restore function registered in a
+//! [`PersistRegistry`].
 
 /// Runs `$call` in the arm of the precision `$kind`, with `$fitted` (and
 /// `$online`) the variants of `$loaded` of that precision. Each arm names
@@ -94,11 +105,53 @@ pub use registry::{
 };
 
 /// Names the `config.json` `format_version` written and read by this crate.
+///
+/// A load rejects any other version with
+/// [`GprError::UnsupportedPersistVersion`].
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::persist::FORMAT_VERSION;
+/// use gprx::{GaussianLikelihood, Gpr};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let fitted = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-version-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let config: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
+/// assert_eq!(config["format_version"], u64::from(FORMAT_VERSION));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Names the prefix reserved for built-in persist tags.
 ///
-/// Caller `persist_id`s must not use it.
+/// Caller `persist_id`s must not use it: [`PersistRegistry`] refuses to
+/// register one, and a save refuses to write one.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::persist::{PersistRegistry, RESERVED_PREFIX};
+/// use gprx::transform::{StandardizeInput, UnfittedTransform};
+/// use gprx::{GprError, PersistErrorKind};
+///
+/// let mut registry = PersistRegistry::new();
+/// let reserved = registry.register_unfitted_input(format!("{RESERVED_PREFIX}mine"), |_| {
+///     Ok(Box::new(StandardizeInput::new()) as Box<dyn UnfittedTransform>)
+/// });
+/// assert!(matches!(
+///     reserved,
+///     Err(GprError::PersistFailed { kind: PersistErrorKind::InvalidPersistId, .. })
+/// ));
+/// ```
 pub const RESERVED_PREFIX: &str = "gprx.";
 
 pub(crate) const CONFIG_FILE: &str = "config.json";
@@ -122,7 +175,22 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 /// use gprx::persist::{LoadedGpr, PersistRegistry};
-/// use gprx::{GaussianLikelihood, Gpr};
+/// use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
+///
+/// /// Names the precision (and factor kind) a load picked.
+/// fn describe(model: &LoadedGpr) -> &'static str {
+///     match model {
+///         LoadedGpr::Double(_) => "f64",
+///         LoadedGpr::Single(_) => "f32",
+///         LoadedGpr::Mixed(_) => "mixed",
+///         LoadedGpr::Reevaluate(_) => "mixed, reevaluated",
+///         LoadedGpr::OnlineDouble(_) => "online f64",
+///         LoadedGpr::OnlineSingle(_) => "online f32",
+///         LoadedGpr::OnlineMixed(_) => "online mixed",
+///         LoadedGpr::OnlineReevaluate(_) => "online mixed, reevaluated",
+///         _ => "a variant added later",
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Gpr::new(
@@ -138,9 +206,17 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedGpr::load(&dir, &PersistRegistry::new())?;
-/// let pred = loaded.predict(&[0.5], 1, 1)?;
-/// assert_eq!(pred.mean.len(), 1);
+/// // Two training points of one feature, factored with `llt`.
+/// assert_eq!((loaded.n(), loaded.d()), (2, 1));
 /// assert!(!loaded.is_online());
+/// assert_eq!(describe(&loaded), "f64");
+/// // Observation variance by default; latent variance with options.
+/// let pred = loaded.predict(&[0.5], 1, 1)?;
+/// assert_eq!(pred, fitted.predict(&[0.5], 1, 1)?);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// let pred_latent = loaded.predict_with(&[0.5], 1, 1, latent)?;
+/// assert!(pred_latent.variance[0] < pred.variance[0]);
+/// // Match a variant for the typed model.
 /// let LoadedGpr::Double(model) = loaded else {
 ///     panic!("default save is a double-precision llt model");
 /// };
@@ -153,20 +229,36 @@ pub(crate) const TENSOR_FILE: &str = "model.safetensors";
 #[non_exhaustive]
 pub enum LoadedGpr {
     /// Marks a [`crate::DoublePrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Double(FittedGpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Single(FittedGpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Mixed(FittedGpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` model.
+    ///
+    /// See the example on [`LoadedGpr`].
     Reevaluate(FittedGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
     /// Marks a [`crate::DoublePrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineDouble(OnlineGpr<Fixed>),
     /// Marks a [`crate::SinglePrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineSingle(OnlineGpr<Fixed, crate::SinglePrecision>),
     /// Marks a promoted-storage [`crate::MixedPrecision`] online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineMixed(OnlineGpr<Fixed, crate::MixedPrecision>),
     /// Marks a [`crate::MixedPrecision`]`<`[`crate::ReevaluateKernel`]`>` online model.
+    ///
+    /// See the example on [`LoadedGpr`].
     OnlineReevaluate(OnlineGpr<Fixed, crate::MixedPrecision<crate::ReevaluateKernel>>),
 }
 
@@ -176,9 +268,14 @@ impl LoadedGpr {
     /// Reconstructs fitted transforms from the config and applies them to the
     /// stored original `X` / `y`. `factor_kind` is required: `llt` loads
     /// [`FittedGpr`], `ldlt` loads [`crate::OnlineGpr`] and requires
-    /// `point_ids` plus `next_point_id`. When a factor is present, the
-    /// safetensors file stays memory-mapped. The buffer policy is
-    /// [`crate::CholeskyBuffer::Retain`]. Unknown [`FORMAT_VERSION`] is rejected.
+    /// `point_ids` plus `next_point_id`. An `llt` file written with an
+    /// `f64` factor `L` (by [`FittedGpr::save_with_factor`]) keeps
+    /// `model.safetensors` memory-mapped and reads `L` in place. An `ldlt`
+    /// file copies its factor into the online model's own buffer, and an
+    /// `f32` factor is copied out. A file without a factor is factored again
+    /// at the saved `θ`. The
+    /// buffer policy is [`crate::CholeskyBuffer::Retain`]. Unknown
+    /// [`FORMAT_VERSION`] is rejected.
     ///
     /// # Errors
     ///
@@ -187,42 +284,43 @@ impl LoadedGpr {
     /// directory, JSON, tensors, or registry lookup is invalid, and
     /// [`GprError::NonFiniteInput`] when the saved maps send the training
     /// data past `f64`. Factorization errors from a file written without `L`
-    /// use the same variants as [`crate::Gpr<Fixed>::factor`].
+    /// use the same variants as the `factor` of a coordinate [`crate::Gpr`]
+    /// with [`Fixed`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
         load_dir(dir.as_ref(), registry)
     }
 
-    /// Holds the number of training points.
+    /// Returns the number of training points.
     ///
     /// See the example on [`LoadedGpr`].
     pub fn n(&self) -> usize {
         self.view().n()
     }
 
-    /// Holds the number of input features.
+    /// Returns the number of input features.
     ///
     /// See the example on [`LoadedGpr`].
     pub fn d(&self) -> usize {
         self.view().d()
     }
 
-    /// Returns the `true` for an [`OnlineGpr`] (`ldlt`), `false` for a [`FittedGpr`] (`llt`).
+    /// Returns `true` for an [`OnlineGpr`] (`ldlt`), `false` for a [`FittedGpr`] (`llt`).
     ///
     /// See the example on [`LoadedGpr`].
     pub fn is_online(&self) -> bool {
         self.view().is_online()
     }
 
-    /// Returns the predictive mean and variance at `xs` (latent variance), in `f64` whatever the stored precision.
+    /// Returns the predictive mean and observation variance at `xs`, in `f64` whatever the stored precision.
     ///
-    /// Same as the variant's `predict`. [`crate::SinglePrecision`] results are
+    /// Same as the variant's `predict`, with [`PredictOptions::default`]. [`crate::SinglePrecision`] results are
     /// widened from `f32`, which does not change their values.
     ///
     /// # Errors
     ///
-    /// Same as [`crate::FittedGpr::predict`].
+    /// Same as the `predict` of a coordinate [`crate::FittedGpr`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn predict(
@@ -234,11 +332,11 @@ impl LoadedGpr {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Returns the [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
-    /// Same as [`crate::FittedGpr::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`crate::FittedGpr`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn predict_with(
