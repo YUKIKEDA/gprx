@@ -71,13 +71,24 @@ pub struct OptResult {
 /// struct Polish;
 ///
 /// impl<P: Differentiable> Optimizer<P> for Polish {
+///     // Neither stage reports changed coordinates, so the fit rebuilds the
+///     // whole kernel at each step (the default, written out here).
+///     const USES_CHANGE_INDICES: bool = false;
+///
 ///     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError> {
 ///         let mut intervals = vec![Interval::DEFAULT_POSITIVE; objective.num_params()];
 ///         objective.fill_intervals(&mut intervals)?;
 ///         let coarse = NelderMead::new()
 ///             .with_max_iterations(20)
 ///             .minimize(objective, init)?;
-///         Lbfgs::new().minimize(objective, &coarse.params)
+///         let fine = Lbfgs::new().minimize(objective, &coarse.params)?;
+///         // Keep the better point; count the iterations of both stages.
+///         let best = if fine.value <= coarse.value { fine.params } else { coarse.params };
+///         Ok(OptResult {
+///             params: best,
+///             value: fine.value.min(coarse.value),
+///             iterations: coarse.iterations + fine.iterations,
+///         })
 ///     }
 /// }
 ///
@@ -98,23 +109,40 @@ pub trait Optimizer<P: ?Sized> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `init` is the wrong length, the objective
-    /// fails, or the solver stops without a best parameter vector.
+    /// An implementation chooses its errors. The built-in optimizers return
+    /// [`GprError::LengthMismatch`] when `init` is not
+    /// [`crate::Objective::num_params`] long (and [`FastSimulatedAnnealing`]
+    /// when there are no parameters), the objective's own error when
+    /// [`crate::Objective::fill_intervals`] fails or the objective cannot be
+    /// evaluated at any point the first run tries,
+    /// [`GprError::InvalidConfig`] when the solver rejects its settings or
+    /// (for [`FastSimulatedAnnealing`]) the first value is not finite, and
+    /// [`GprError::OptimizationNotConverged`] when no run reached a finite
+    /// value. A failed extra start (`with_restarts`) is dropped, not
+    /// returned.
     ///
     /// See the example on [`Optimizer`].
     fn minimize(&self, objective: &mut P, init: &[f64]) -> Result<OptResult, GprError>;
 
-    /// Records whether this optimizer reports changed coordinates through [`crate::Objective::value_at_changes`].
+    /// Declares whether this optimizer reports changed coordinates through [`crate::Objective::value_at_changes`].
     ///
     /// When `true` and the trainer keeps a dedicated gradient buffer
     /// ([`crate::CholeskyBuffer::Retain`]), a fit rebuilds only the kernel
-    /// leaves a step touches. The default is `false`.
+    /// leaves a step touches. The default is `false`;
+    /// [`FastSimulatedAnnealing`] sets it.
+    ///
+    /// See the example on [`Optimizer`].
     const USES_CHANGE_INDICES: bool = false;
 }
 
-/// Represents the fixed hyperparameters.
+/// Represents no hyperparameter search: the model keeps the `θ` it was built with.
 ///
-/// [`crate::Gpr<Fixed>::factor`] only; not an [`Optimizer`].
+/// It is not an [`Optimizer`]. A trainer whose optimizer slot is `Fixed`
+/// factors instead of fitting: [`crate::Gpr<Fixed>::factor`],
+/// [`crate::Sgpr<Fixed>::factor`], and [`crate::Svgp<Fixed>::factor`]
+/// (`Fixed` is the default slot of [`crate::Svgp`]). A fitted or online
+/// model with this slot refactors at its current `θ` on `refit`
+/// ([`crate::FittedGpr::refit`]), and a loaded model carries it.
 ///
 /// See the example on [`crate::Gpr::factor`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

@@ -14,11 +14,22 @@ use crate::likelihood::GaussianLikelihood;
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{Interval, IntervalError};
+/// use gprx::{BoundedParam, Interval, IntervalError};
 ///
 /// # fn main() -> Result<(), IntervalError> {
 /// let interval = Interval::new(0.0, 1.0)?;
 /// assert!(interval.lo() < interval.hi());
+///
+/// // `lo >= hi` is refused.
+/// assert_eq!(
+///     Interval::new(1.0, 0.0),
+///     Err(IntervalError::InvalidBounds { lo: 1.0, hi: 0.0 })
+/// );
+/// // An endpoint is outside the open interval.
+/// assert_eq!(
+///     BoundedParam::new(1.0, interval),
+///     Err(IntervalError::OutOfRange { value: 1.0, lo: 0.0, hi: 1.0 })
+/// );
 /// # Ok(())
 /// # }
 /// ```
@@ -58,6 +69,12 @@ pub enum IntervalError {
 /// # fn main() -> Result<(), gprx::IntervalError> {
 /// let interval = Interval::new(1e-5, 1e5)?;
 /// assert!(interval.lo() < interval.hi());
+/// assert_eq!(interval, Interval::DEFAULT_POSITIVE);
+///
+/// // Both endpoints are excluded.
+/// assert!(interval.contains(1.0));
+/// assert!(!interval.contains(interval.lo()));
+/// assert!(!interval.contains(f64::NAN));
 /// # Ok(())
 /// # }
 /// ```
@@ -69,6 +86,8 @@ pub struct Interval {
 
 impl Interval {
     /// Names the default open interval `(1e-5, 1e5)` for positive kernel and likelihood parameters (`ℓ`, `σn²`, constant `c`, …).
+    ///
+    /// See the example on [`Interval`].
     pub const DEFAULT_POSITIVE: Self = Self { lo: 1e-5, hi: 1e5 };
 
     /// Builds a finite open interval.
@@ -113,19 +132,33 @@ impl Interval {
     }
 }
 
-/// User-unit parameter that cannot sit on or outside its [`Interval`].
+/// Represents a user-unit parameter that cannot sit on or outside its [`Interval`].
 ///
 /// Leaves and [`crate::GaussianLikelihood`] store this instead of a bare `f64`
-/// plus a separate bounds field. [`Self::new`] is the only constructor.
+/// plus a separate bounds field. [`Self::new`] and [`Self::default_positive`]
+/// build one, and [`Self::with_value`] / [`Self::with_interval`] rebuild it;
+/// each checks that the value is strictly inside the interval.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{BoundedParam, Interval};
+/// use gprx::{BoundedParam, Interval, IntervalError};
 ///
-/// # fn main() -> Result<(), gprx::IntervalError> {
+/// # fn main() -> Result<(), IntervalError> {
 /// let param = BoundedParam::new(1.0, Interval::DEFAULT_POSITIVE)?;
 /// assert!((param.value() - 1.0).abs() < 1e-15);
+/// assert_eq!(param, BoundedParam::default_positive(1.0)?);
+/// assert_eq!(param.interval(), Interval::DEFAULT_POSITIVE);
+/// // The optimizer sees `log(value)`.
+/// assert!(param.ln().abs() < 1e-15);
+///
+/// // Rebuilding checks the value against the interval again.
+/// let moved = param.with_value(2.0)?;
+/// assert!((moved.value() - 2.0).abs() < 1e-15);
+/// let narrow = moved.with_interval(Interval::new(1.0, 3.0)?)?;
+/// assert_eq!(narrow.interval().hi(), 3.0);
+/// assert!(narrow.with_value(4.0).is_err());
+/// assert!(BoundedParam::default_positive(1e6).is_err());
 /// # Ok(())
 /// # }
 /// ```

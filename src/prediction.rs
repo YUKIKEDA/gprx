@@ -18,6 +18,8 @@ use crate::policy::JitterPolicy;
 ///
 /// assert_eq!(VarianceKind::default(), VarianceKind::Observation);
 /// ```
+///
+/// The example on [`PredictOptions`] predicts with [`VarianceKind::Latent`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VarianceKind {
     /// Marks a variance of the latent function `f*`, without observation noise.
@@ -29,17 +31,41 @@ pub enum VarianceKind {
     Observation,
 }
 
-/// Represents the options for [`crate::FittedGpr::predict`], [`crate::FittedGpr::predict_covariance`], and [`crate::FittedGpr::sample`].
+/// Represents the options of a prediction.
+///
+/// Every model family takes it in its `*_with` methods
+/// ([`crate::FittedGpr::predict_with`], `predict_with_into`,
+/// `predict_covariance_with`, and `sample_with`, and the same names on
+/// [`crate::FittedSgpr`], [`crate::FittedSvgp`], the online models, and the
+/// loaded models). The methods without `_with` use
+/// [`PredictOptions::default`].
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{PredictOptions, VarianceKind};
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
 ///
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let opts = PredictOptions {
 ///     variance_kind: VarianceKind::Latent,
 /// };
 /// assert_eq!(opts.variance_kind, VarianceKind::Latent);
+/// assert_eq!(PredictOptions::default().variance_kind, VarianceKind::Observation);
+///
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// .map_err(|(_, e)| e)?;
+/// let latent = fitted.predict_with(&[0.5], 1, 1, opts)?;
+/// let observed = fitted.predict(&[0.5], 1, 1)?;
+/// // Observation variance adds `σn²` to the latent variance.
+/// let noise = fitted.likelihood().noise_variance();
+/// assert!((observed.variance[0] - latent.variance[0] - noise).abs() < 1e-9);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PredictOptions {
@@ -59,6 +85,11 @@ impl Default for PredictOptions {
 
 /// Represents the predictive mean and (diagonal) variance at the query points.
 ///
+/// `T` is the predict scalar of the model's precision
+/// ([`crate::PrecisionPolicy::Refine`]): `f64` for [`crate::DoublePrecision`]
+/// (the default) and [`crate::MixedPrecision`], `f32` for
+/// [`crate::SinglePrecision`].
+///
 /// [`FittedGpr::predict_into`](crate::FittedGpr::predict_into) reuses `mean` / `variance` capacity when the
 /// query length matches a previous call. Query–query covariance is
 /// [`PredictiveCovariance`], not a field here.
@@ -66,14 +97,34 @@ impl Default for PredictOptions {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{Prediction, VarianceKind};
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, Prediction, SinglePrecision, VarianceKind};
 ///
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let pred = Prediction {
 ///     mean: vec![0.0],
 ///     variance: vec![1.0],
 ///     variance_kind: VarianceKind::Observation,
 /// };
 /// assert_eq!(pred.mean.len(), pred.variance.len());
+///
+/// // An `f32` model predicts `Prediction<f32>`.
+/// let mut fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_precision::<SinglePrecision>()
+/// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// .map_err(|(_, e)| e)?;
+/// let single: Prediction<f32> = fitted.predict(&[0.25, 0.75], 2, 1)?;
+/// assert_eq!(single.variance_kind, VarianceKind::Observation);
+///
+/// // `predict_into` writes into a `Prediction` the caller keeps.
+/// let mut out = Prediction::default();
+/// fitted.predict_into(&[0.25, 0.75], 2, 1, &mut out)?;
+/// assert_eq!(out, single);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prediction<T = f64> {
@@ -87,7 +138,10 @@ pub struct Prediction<T = f64> {
 
 /// Represents the predictive mean and query–query covariance at the query points.
 ///
-/// [`crate::FittedGpr::predict_covariance`] returns this type. `covariance` is
+/// [`crate::FittedGpr::predict_covariance`] and the `predict_covariance`
+/// methods of the other models return this type. `T` is the predict scalar,
+/// as on [`Prediction`]: `f32` for a [`crate::SinglePrecision`] model, `f64`
+/// otherwise. `covariance` is
 /// packed column-major as an `m × m` matrix: index `col * m + row`. The
 /// diagonal matches [`Prediction::variance`] for the same query and
 /// [`PredictOptions`]. Observation covariance adds `σn²` on the diagonal in
@@ -107,6 +161,10 @@ pub struct Prediction<T = f64> {
 /// let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
 /// assert_eq!(cov.covariance.len(), cov.mean.len() * cov.mean.len());
+/// assert_eq!(cov.variance_kind, gprx::VarianceKind::Observation);
+/// // The diagonal is the variance `predict` reports.
+/// let pred = fitted.predict(&[0.25, 0.75], 2, 1)?;
+/// assert!((cov.covariance[3] - pred.variance[1]).abs() < 1e-9);
 /// # Ok(())
 /// # }
 /// ```

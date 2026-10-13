@@ -22,7 +22,9 @@ use crate::error::GprError;
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?).with_prefer_memory();
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?);
+/// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
+/// let gpr = gpr.with_prefer_memory();
 /// assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Uncached);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
@@ -54,7 +56,9 @@ pub enum DistanceCachePolicy {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
-/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?).with_prefer_memory();
+/// let gpr = Gpr::new(kernel, GaussianLikelihood::new(0.1)?);
+/// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Retain);
+/// let gpr = gpr.with_prefer_memory();
 /// assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Reuse);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 /// # Ok(())
@@ -69,7 +73,7 @@ pub enum CholeskyBuffer {
     Reuse,
 }
 
-/// Records which kernel `exp` [`crate::Gpr`] evaluates with.
+/// Records which kernel `exp` a model evaluates with ([`crate::Gpr`], [`crate::Sgpr`], and [`crate::Svgp`] take it through `with_math`).
 ///
 /// [`Self::Accurate`] (the default) is language `exp` and SIMD `exp` ([`crate::Accurate`]).
 /// [`Self::FastApprox`] is the polynomial ([`crate::FastApprox`]); fit and predict use the
@@ -78,9 +82,20 @@ pub enum CholeskyBuffer {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::KernelExp;
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, KernelExp};
 ///
+/// # fn main() -> Result<(), gprx::GprError> {
 /// assert_eq!(KernelExp::default(), KernelExp::Accurate);
+/// let gpr = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .with_math(KernelExp::FastApprox);
+/// assert_eq!(gpr.math(), KernelExp::FastApprox);
+/// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -88,7 +103,7 @@ pub enum KernelExp {
     /// Uses the exact language `exp` and SIMD `exp`.
     #[default]
     Accurate,
-    /// Marks a degree-7 polynomial `exp`.
+    /// Uses the degree-7 polynomial `exp`.
     FastApprox,
 }
 
@@ -143,19 +158,43 @@ pub(crate) use with_kernel_exp;
 /// )
 /// .with_jitter_policy(JitterPolicy::adaptive(1e-10, 10.0, 5, 1e-3)?);
 /// let _fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+///
+/// // The default is one attempt with no jitter.
+/// assert_eq!(JitterPolicy::default(), JitterPolicy::fixed(0.0)?);
+///
+/// // Read the settings back by matching the variants.
+/// let fixed = JitterPolicy::fixed(1e-6)?;
+/// assert!(matches!(fixed, JitterPolicy::Fixed(_)));
+/// if let JitterPolicy::Fixed(fixed) = fixed {
+///     assert_eq!(fixed.jitter(), 1e-6);
+/// }
+/// if let JitterPolicy::Adaptive(adaptive) = JitterPolicy::adaptive(1e-10, 10.0, 5, 1e-3)? {
+///     assert_eq!(adaptive.initial(), 1e-10);
+///     assert_eq!(adaptive.multiplier(), 10.0);
+///     assert_eq!(adaptive.max_retries(), 5);
+///     assert_eq!(adaptive.max_jitter(), 1e-3);
+/// }
+///
+/// // A negative jitter is refused.
+/// assert!(matches!(
+///     JitterPolicy::fixed(-1.0),
+///     Err(gprx::GprError::InvalidConfig { .. })
+/// ));
 /// # Ok(())
 /// # }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum JitterPolicy {
-    /// Retry the failed factor with this non-negative `j` on the diagonal.
+    /// Retries the failed factor once with this non-negative `j` on the diagonal.
     Fixed(FixedJitter),
-    /// Retry with a growing `j` after the unregularized factor fails.
+    /// Retries with a growing `j` after the unregularized factor fails.
     Adaptive(AdaptiveJitter),
 }
 
 /// Represents the non-negative diagonal offset for [`JitterPolicy::Fixed`].
+///
+/// Built by [`JitterPolicy::fixed`].
 ///
 /// See the example on [`JitterPolicy`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,6 +203,8 @@ pub struct FixedJitter {
 }
 
 /// Represents the growing diagonal offsets for [`JitterPolicy::Adaptive`].
+///
+/// Built by [`JitterPolicy::adaptive`].
 ///
 /// See the example on [`JitterPolicy`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -292,7 +333,7 @@ impl JitterPolicy {
 impl FixedJitter {
     /// Returns the retry offset `j`.
     ///
-    /// See the example on [`FixedJitter`].
+    /// See the example on [`JitterPolicy`].
     pub fn jitter(&self) -> f64 {
         self.jitter
     }
@@ -301,28 +342,28 @@ impl FixedJitter {
 impl AdaptiveJitter {
     /// Returns the first retry offset.
     ///
-    /// See the example on [`AdaptiveJitter`].
+    /// See the example on [`JitterPolicy`].
     pub fn initial(&self) -> f64 {
         self.initial
     }
 
     /// Returns the factor applied after each failed retry.
     ///
-    /// See the example on [`AdaptiveJitter`].
+    /// See the example on [`JitterPolicy`].
     pub fn multiplier(&self) -> f64 {
         self.multiplier
     }
 
     /// Returns the maximum number of jittered attempts.
     ///
-    /// See the example on [`AdaptiveJitter`].
+    /// See the example on [`JitterPolicy`].
     pub fn max_retries(&self) -> usize {
         self.max_retries
     }
 
     /// Returns the largest retry offset that may be tried.
     ///
-    /// See the example on [`AdaptiveJitter`].
+    /// See the example on [`JitterPolicy`].
     pub fn max_jitter(&self) -> f64 {
         self.max_jitter
     }
