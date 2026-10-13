@@ -1,0 +1,124 @@
+name: Release
+
+# Run by hand from the Actions tab on `main`, with the version to publish.
+# It checks the commit, dates the changelog section on a release commit,
+# tags it, publishes it to crates.io (Trusted Publishing), creates the
+# GitHub Release, and opens a pull request that brings the dated changelog
+# back to `main`. `.cursor/rules/publish.mdc` says what must be true first.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (the Cargo.toml version, without v)"
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Run this workflow on main, not ${GITHUB_REF}." >&2
+          exit 1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: .github/scripts/release-check.sh "$VERSION"
+      - run: cargo publish --dry-run
+
+  test:
+    name: test (${{ matrix.toolchain }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        toolchain: ["1.88", stable]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # `tests/alloc.rs` is `test = false`, so `--all-targets` skips it.
+      - run: cargo clippy --test alloc -- -D warnings
+      - run: cargo test
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  alloc:
+    name: alloc (release)
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release --test alloc
+
+  publish:
+    name: publish
+    needs: [test, alloc]
+    runs-on: ubuntu-latest
+    # The environment that crates.io Trusted Publishing is registered with.
+    environment: release
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Date the changelog and tag the release commit
+        run: |
+          today="$(date -u +%F)"
+          sed -i "s/^## \[${VERSION//./\\.}\]\$/## [${VERSION}] - ${today}/" CHANGELOG.md
+          grep -qxF "## [${VERSION}] - ${today}" CHANGELOG.md
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "release/v${VERSION}"
+          git commit -am "chore(release): ${VERSION}"
+          git tag -a "v${VERSION}" -m "gprx ${VERSION}"
+      - run: cargo publish --dry-run
+      # Push the tag before the publish: a tag can be deleted, a crates.io
+      # version cannot.
+      - run: git push origin "release/v${VERSION}" "v${VERSION}"
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: GitHub Release and the pull request back to main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          .github/scripts/release-notes.sh "$VERSION" > notes.md
+          gh release create "v${VERSION}" --verify-tag --title "gprx ${VERSION}" --notes-file notes.md
+          gh pr create --base main --head "release/v${VERSION}" \
+            --title "chore(release): date ${VERSION} in the changelog" \
+            --body "The release workflow published ${VERSION} from this commit (tag v${VERSION}). Merging it brings the dated CHANGELOG heading back to main."

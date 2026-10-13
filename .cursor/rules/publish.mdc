@@ -5,35 +5,37 @@ alwaysApply: true
 
 # Publish
 
-Ready means a human runs `cargo publish` and no other step is left. Agents do not run that command. Agents may run `cargo publish --dry-run`.
+Ready means a human runs the `Release` workflow (`.github/workflows/release.yml`) and no other step is left. Agents do not run that workflow or `cargo publish`. Agents may run `cargo publish --dry-run`.
 
 `just lint` and `just test` run on every change, publish or not. On the commit that will be published, record them locally. Cloud CI is not the completion condition while runners are limited.
 
 ## Order
 
-One pull request says release preparation is complete: what is done, and what is not. A human merges it. That merge on `main` is the commit that will be published.
+One pull request says release preparation is complete: what is done, and what is not. A human merges it. The publish review (below) then runs on that `main` commit.
 
-Do not create the version tag or the GitHub Release before that merge.
+A human runs the `Release` workflow from the Actions tab on `main`, with the version. It runs on the `main` commit of that moment and stops at the first failure:
 
-After the merge, run the checks below on that commit. Running them on an earlier commit, including one with the same tree, is not this check.
+1. `verify`: `.github/scripts/release-check.sh` (the `Cargo.toml` version is the input, `CHANGELOG.md` has one undated `## [{version}]`, there is no tag `v{version}`, `cargo package --list` matches the whitelist below), then `cargo publish --dry-run`.
+2. `test` on 1.88 and stable (the steps of `just lint`, `cargo test`, `cargo doc --no-deps` with warnings denied) and `alloc` (`cargo test --release --test alloc`).
+3. `publish`: dates the changelog heading with the day it runs on a release commit (branch `release/v{version}`, child of that `main` commit), creates the annotated tag `v{version}` on it and pushes both, runs `cargo publish` through crates.io Trusted Publishing, creates the GitHub Release on the tag with the changelog section as its notes, and opens a pull request that brings the dated heading to `main`. A human merges that pull request.
 
-When those checks have succeeded on that commit, create the annotated tag `v{version}` on it, then the GitHub Release on that tag. The human then runs `cargo publish`. Do not create the tag or the Release before the checks. Agents do not run `cargo publish` without `--dry-run`.
+Do not create the tag or the Release by hand. If `cargo publish` fails after the tag is pushed, delete the tag and the release branch, fix the cause, and run the workflow again.
 
-## Before `cargo publish`
+## Before the `Release` workflow
 
-All of the following are true for the merge commit above. A failure in the reader check blocks `cargo package` and `cargo publish --dry-run`.
+All of the following are true for the `main` commit it will run on. A failure in the reader check blocks the workflow.
 
 - `Cargo.toml` `version` is the version to publish. `publish = false` is absent.
 - The publish-review skill has been run. No failure remains against `.cursor/rules/reader-docs.mdc` and `.cursor/rules/rust-docs.mdc`.
 - `cargo doc --no-deps` reports no broken links.
 - `cargo package` builds the package. `cargo package --list` matches the whitelist below.
-- `just lint` and `just test` succeeded on that commit.
-- `cargo login` already succeeds.
-- `cargo publish --dry-run` exits 0 on a clean tree of that commit.
+- `just lint` and `just test` succeeded on that commit (the workflow runs them again).
+- crates.io has this repository's `release.yml`, environment `release`, as a Trusted Publisher of `gprx`.
+- `cargo publish --dry-run` exits 0 on a clean tree of that commit (the workflow runs it again).
 
 `homepage` is the GitHub repository. `documentation` is `https://docs.rs/gprx`. `[package.metadata.docs.rs]` builds default features, not `bench-internals` or `insert-stages`.
 
-`CHANGELOG.md` (English, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) starts at 0.2.0. The change that publishes a version adds its section: what breaks the previous version, each with how to move, then what is added and changed. The section heading carries the publish date, as Keep a Changelog does (`## [0.2.0] - YYYY-MM-DD`): the last change merged before the tag writes the day `cargo publish` is planned for. If the publish moves to another day, the next change corrects the date. Its Verification records `cargo semver-checks` against the previous version, the previous version's tests, examples, benches, and README built and run on that change, and a directory the previous version saved loaded with the same predictions.
+`CHANGELOG.md` (English, [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) starts at 0.2.0. The change that publishes a version adds its section: what breaks the previous version, each with how to move, then what is added and changed. On `main` the section heading is undated (`## [0.2.0]`). The `Release` workflow writes the day it publishes, as Keep a Changelog does (`## [0.2.0] - YYYY-MM-DD`), on the release commit; its pull request brings that heading to `main`. Its Verification records `cargo semver-checks` against the previous version, the previous version's tests, examples, benches, and README built and run on that change, and a directory the previous version saved loaded with the same predictions.
 
 ## MSRV
 
