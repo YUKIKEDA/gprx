@@ -180,6 +180,26 @@ where
     Ok(InducingBorder { k_z, k_self, k_x })
 }
 
+/// Smallest bordered pivot, relative to the diagonal it is cancelled from,
+/// that [`inducing_append`] takes: `ℓ² > τ (k(z_new, z_new) + j)` for
+/// `K_mm + j I` and `β² > τ (σ² + ‖a_new‖²)` for `B`. A smaller pivot
+/// returns [`GprError::CholeskyFailed`], and the caller assembles the
+/// system again as the factor would.
+//
+// `ℓ² = (k(z_new, z_new) + j) − ‖l‖²` cancels two values of size up to
+// `k(z_new, z_new) + j`, so it carries an absolute rounding error of about
+// `ε (k(z_new, z_new) + j)` (`ε = 2.2e-16`), plus the error of `l` itself;
+// `β²` cancels `‖b‖²` from `σ² + ‖a_new‖²` the same way. At a pivot of
+// `τ` times the diagonal that is a relative error of `ε / τ` in `ℓ²` and
+// half of it in `ℓ`, which divides the whole new row of `A`. `τ = 1e-5`
+// keeps that at `2.2e-11` (`1.1e-11` in `ℓ`), an order below the `1e-10`
+// the inducing sequences compare the update with the factor at, with room
+// for the `O(m)` growth of the error of `‖l‖²`. A pivot that small is an
+// inducing point within about `0.003` lengthscales of the inducing set
+// (`ℓ² ≈ r² / ℓ_k²` for a stationary kernel), where the factor itself is
+// that ill-conditioned; assembling again there costs one `O(n·m²)` factor.
+const PIVOT_RTOL: f64 = 1e-5;
+
 /// Appends one inducing point at the end of `state` from its kernel values
 /// `border` (ADR 0005): a bordered LLT of `K_mm + j I`, with the offset
 /// `j` the factor of `K_mm` already took, and of `B`.
@@ -199,8 +219,9 @@ where
 /// # Errors
 ///
 /// Returns [`GprError::CholeskyFailed`] when the bordered pivot of
-/// `K_mm + j I` or of `B` is not positive, or the downdate of `B` for
-/// `replace` fails. `state` is then partly written: callers pass a copy.
+/// `K_mm + j I` or of `B` is at most [`PIVOT_RTOL`] times the diagonal it
+/// is cancelled from (or not finite), or the downdate of `B` for `replace`
+/// fails. `state` is then partly written: callers pass a copy.
 pub(crate) fn inducing_append<T: KernelScalar>(
     state: &mut VfeState<T>,
     border: InducingBorder<T>,
@@ -220,11 +241,12 @@ pub(crate) fn inducing_append<T: KernelScalar>(
         stage: CholeskyStage::OnlineInsert,
     };
     solve_lmm(state.k_mm_l.as_ref(), l.as_mut());
-    let mut ell2 = k_self + lit::<T>(state.k_mm_jitter);
+    let k_diag = k_self + lit::<T>(state.k_mm_jitter);
+    let mut ell2 = k_diag;
     for i in 0..m {
         ell2 -= l[(i, 0)] * l[(i, 0)];
     }
-    if ell2.to_f64() <= 0.0 || !ell2.to_f64().is_finite() {
+    if !pivot_holds(ell2, k_diag) {
         return Err(failed(state.k_mm_jitter));
     }
     let l_col: Vec<T> = (0..m).map(|i| l[(i, 0)]).collect();
@@ -258,12 +280,13 @@ pub(crate) fn inducing_append<T: KernelScalar>(
         b_border[(i, 0)] = v[i];
     }
     solve_lmm(state.b_l.as_ref(), b_border.as_mut());
-    let mut beta2 = lit::<T>(noise) + a_new_norm2;
+    let b_diag = lit::<T>(noise) + a_new_norm2;
+    let mut beta2 = b_diag;
     for i in 0..m {
         let bi = b_border[(i, 0)];
         beta2 -= bi * bi;
     }
-    if beta2.to_f64() <= 0.0 || !beta2.to_f64().is_finite() {
+    if !pivot_holds(beta2, b_diag) {
         return Err(failed(0.0));
     }
     let b_col: Vec<T> = (0..m).map(|i| b_border[(i, 0)]).collect();
@@ -275,6 +298,13 @@ pub(crate) fn inducing_append<T: KernelScalar>(
     let y_s = T::storage_rows(y, &mut y_cast);
     state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y_s);
     Ok(())
+}
+
+/// Whether the bordered pivot `pivot`, cancelled from `diag`, is finite and
+/// above [`PIVOT_RTOL`] times `diag`.
+fn pivot_holds<T: KernelScalar>(pivot: T, diag: T) -> bool {
+    let (pivot, diag) = (pivot.to_f64(), diag.to_f64());
+    pivot.is_finite() && pivot > PIVOT_RTOL * diag
 }
 
 /// Drops inducing row `idx` by a trailing cholupdate of `L_mm` (ADR 0005).

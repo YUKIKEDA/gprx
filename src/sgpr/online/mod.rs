@@ -126,11 +126,21 @@ pub(super) enum InducingChange<T> {
 /// to `A` (`O(n·m)` plus the `O(m²)` border), and a delete drops a row of
 /// the factor of `K_mm` by a trailing rank-1 update and solves `A` and `B`
 /// again from the kept `K(Z, X) = L A` (`O(n·m²)`, no kernel evaluation).
-/// Only when that does not factor (a bordered pivot that is not positive,
-/// such as a new inducing point on top of one the model holds, or a `B`
-/// that does not factor) is the VFE system assembled again on the changed
-/// inducing set. A precision that refines in `f64` assembles its `f64`
-/// predict weights again after every change, as for `X`.
+/// The VFE system is assembled again on the changed inducing set instead
+/// (`O(n·m²)`, the factor a batch model of those inducing points takes)
+/// when any of these holds:
+///
+/// - the storage scalar is `f32` ([`crate::SinglePrecision`],
+///   [`crate::MixedPrecision`]): their assembly computes in `f64` and
+///   rounds, which an update in `f32` would not match;
+/// - the factor of `K_mm` took a jitter offset `j > 0` under
+///   [`Self::jitter_policy`]: the assembly chooses `j` again for the new
+///   inducing set;
+/// - a bordered pivot of an insert, of `K_mm + j I` or of `B`, is at most
+///   `1e-5` times the diagonal it is cancelled from, such as a new
+///   inducing point on or next to one the model holds;
+/// - the `B` of a delete does not factor.
+///
 /// Neither moves `X` or `θ`.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
@@ -889,11 +899,27 @@ where
         self.apply_vfe(state)
     }
 
+    /// Whether an inducing change may update the factors in place (ADR
+    /// 0005) rather than assemble the VFE system again.
+    ///
+    /// Not for a storage scalar that the assembly computes in `f64` and
+    /// rounds (`f32`, so [`crate::SinglePrecision`] and
+    /// [`crate::MixedPrecision`]): an update in that scalar would leave the
+    /// accuracy of a fresh factor, which the assembly keeps. Not when the
+    /// factor of `K_mm` took an offset `j > 0` either: the factor of the
+    /// changed inducing set chooses its own `j` (zero when the near
+    /// duplicate that needed it is gone), and only an assembly finds it.
+    fn updates_inducing_in_place(&self) -> bool {
+        !<P::Storage as ScalarOps>::ROUNDS_FROM_F64 && self.state.k_mm_jitter <= 0.0
+    }
+
     /// Commits one change of the inducing set: `change` gives it from the
     /// model once the training blocks of a model on supplied distances hold
     /// the new inducing set, and `z_train` / `z_obs` (`m × d`) are the
-    /// inducing points after it. On an error `undo` puts those blocks back,
-    /// so the model is unchanged.
+    /// inducing points after it. When [`Self::updates_inducing_in_place`]
+    /// does not hold, `change` is not called and the VFE system of the new
+    /// inducing set is assembled again. On an error `undo` puts those
+    /// blocks back, so the model is unchanged.
     fn commit_inducing(
         &mut self,
         change: impl FnOnce(&mut Self) -> Result<InducingChange<P::Storage>, GprError>,
@@ -902,8 +928,11 @@ where
         m: usize,
         undo: impl FnOnce(&mut SparseSupply),
     ) -> Result<(), GprError> {
-        let result =
-            change(self).and_then(|change| self.update_inducing(change, z_train, z_obs, m));
+        let result = if self.updates_inducing_in_place() {
+            change(self).and_then(|change| self.update_inducing(change, z_train, z_obs, m))
+        } else {
+            self.factor_inducing(z_train, z_obs, m)
+        };
         if result.is_err()
             && let Some(supply) = self.state.core.supply_mut()
         {
@@ -915,9 +944,10 @@ where
     /// Applies `change` by the incremental update of ADR 0005 on a copy of
     /// the factors, then takes that copy and publishes its predict weights
     /// ([`Self::apply_vfe`], as an `X` insert does). When the update fails
-    /// to factor (a bordered pivot of an insert that is not positive, or a
-    /// `B` of a delete that does not factor), the VFE system of the new
-    /// inducing set is assembled again instead ([`Self::factor_inducing`]).
+    /// to factor (a bordered pivot of an insert at or below its relative
+    /// threshold, or a `B` of a delete that does not factor), the VFE
+    /// system of the new inducing set is assembled again instead
+    /// ([`Self::factor_inducing`]).
     fn update_inducing(
         &mut self,
         change: InducingChange<P::Storage>,
@@ -984,12 +1014,14 @@ where
 
     /// Removes the inducing point identified by `id` and packs every buffer.
     ///
-    /// Drops that row of the factor of `K_mm + j I` by a trailing rank-1
-    /// update, removes the row of the kept `K(Z, X) = L A`, and solves `A`
-    /// against the new factor; `B` is formed and factored again from that
-    /// `A` (`O(n·m²)`, no kernel evaluation). If that `B` does not factor,
-    /// the VFE system of the reduced inducing set is assembled again
-    /// instead. The last remaining inducing point cannot be deleted.
+    /// Drops that row of the factor of `K_mm` by a trailing rank-1 update,
+    /// removes the row of the kept `K(Z, X) = L A`, and solves `A` against
+    /// the new factor; `B` is formed and factored again from that `A`
+    /// (`O(n·m²)`, no kernel evaluation). The VFE system of the reduced
+    /// inducing set is assembled again instead for an `f32` storage scalar,
+    /// when the factor of `K_mm` took a jitter offset `j > 0`, or when that
+    /// `B` does not factor (the conditions on [`OnlineSgpr`]). The last
+    /// remaining inducing point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -1537,14 +1569,15 @@ where
     /// The returned [`InducingId`] is new and is never reused after a later
     /// [`Self::delete_inducing`].
     ///
-    /// With `l = L⁻¹ k(Z, z_new)`, the factor of `K_mm + j I` gains the row
-    /// `[lᵀ, ℓ]` with `ℓ² = k(z_new, z_new) + j − ‖l‖²`, where `j` is the
-    /// offset the factor of `K_mm` took under [`Self::jitter_policy`].
-    /// `A` gains the row `(k(z_new, X) − lᵀ A) / ℓ` and the factor of `B`
-    /// its border; `w` is solved again (`O(n·m)` plus `O(m²)`). When `ℓ²`
-    /// or the pivot of `B` is not positive (`z_new` on top of an inducing
-    /// point, say), the VFE system of the enlarged inducing set is
-    /// assembled again instead (`O(n·m²)`).
+    /// With `l = L⁻¹ k(Z, z_new)`, the factor of `K_mm` gains the row
+    /// `[lᵀ, ℓ]` with `ℓ² = k(z_new, z_new) − ‖l‖²`. `A` gains the row
+    /// `(k(z_new, X) − lᵀ A) / ℓ` and the factor of `B` its border; `w` is
+    /// solved again (`O(n·m)` plus `O(m²)`). The VFE system of the enlarged
+    /// inducing set is assembled again instead (`O(n·m²)`) for an `f32`
+    /// storage scalar, when the factor of `K_mm` took a jitter offset
+    /// `j > 0`, or when `ℓ²` or the pivot of `B` is at most `1e-5` times
+    /// the diagonal it is cancelled from (`z_new` on or next to an inducing
+    /// point, say): the conditions on [`OnlineSgpr`].
     ///
     /// # Errors
     ///
@@ -1609,22 +1642,23 @@ where
         self.state.core.map_point(z_obs, &mut z_new)?;
         let z_new = z_new.as_slice();
         let (n, m, d) = (self.state.core.n, self.state.core.m, self.state.core.d);
-        let border = with_kernel_exp!(self.state.core.math, M => coordinate_border::<M, _>(
-            &self.state.core.kernel,
-            &self.state.core.x_train,
-            n,
-            d,
-            &self.state.core.z_train,
-            m,
-            z_new,
-            &mut self.scratch.storage,
-        ))?;
         let mut z_train = self.state.core.z_train.clone();
         append_point(&mut z_train, m, d, z_new);
         let mut z_obs_next = self.state.core.z_obs.clone();
         append_point(&mut z_obs_next, m, d, z_obs);
         self.commit_inducing(
-            |_| {
+            |model| {
+                let core = &model.state.core;
+                let border = with_kernel_exp!(core.math, M => coordinate_border::<M, _>(
+                    &core.kernel,
+                    &core.x_train,
+                    n,
+                    d,
+                    &core.z_train,
+                    m,
+                    z_new,
+                    &mut model.scratch.storage,
+                ))?;
                 Ok(InducingChange::Insert {
                     border,
                     replace: None,

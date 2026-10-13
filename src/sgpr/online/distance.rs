@@ -243,6 +243,10 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             };
             with_kernel_exp!(core.math, M => ks.cross::<M, SuppliedSpec>(&compiled, views))
         })?;
+        // Invariant: the caller has just added the new inducing point, so
+        // `supply.inducing` holds `m + 1` training rows (the first `m` are
+        // the inducing points before it), each `< n`, and `k_xz` is `n × 1`.
+        // The slice and the `(point, 0)` index stay in range.
         let mut k_z = Mat::zeros(m, 1);
         for (i, &point) in core.supplied.supply.inducing[..m].iter().enumerate() {
             k_z[(i, 0)] = k_xz[(point, 0)];
@@ -466,9 +470,11 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// `insert_inducing`, with `k(X, point)` read from that column and
     /// `k(Z, point)` from its rows of the inducing points. When the repair
     /// of a tidy source moved a value of `point`'s own row, its column of
-    /// `A` is replaced first (a rank-1 update and downdate of `B`). As for
-    /// coordinates, the VFE system is assembled again only when that does
-    /// not factor. The returned
+    /// `A` is replaced first (a rank-1 update and downdate of `B`). The VFE
+    /// system is assembled again instead under the conditions on
+    /// [`OnlineSgpr`] (an `f32` storage scalar, a jitter offset `j > 0` of
+    /// the factor of `K_mm`, or a bordered pivot at most `1e-5` times its
+    /// diagonal). The returned
     /// [`InducingId`] is never reused after a later
     /// [`Self::delete_inducing`].
     ///
