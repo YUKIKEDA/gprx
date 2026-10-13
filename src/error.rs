@@ -2,7 +2,8 @@
 
 use thiserror::Error;
 
-/// Stage at which a Cholesky factorization failed.
+/// Names the stage at which a Cholesky factorization failed
+/// ([`GprError::CholeskyFailed`]).
 ///
 /// # Examples
 ///
@@ -11,6 +12,19 @@ use thiserror::Error;
 ///
 /// let stage = CholeskyStage::Predict;
 /// assert_eq!(format!("{stage:?}"), "Predict");
+///
+/// // A caller that reports where a factorization failed matches every stage.
+/// fn during(stage: CholeskyStage) -> &'static str {
+///     match stage {
+///         CholeskyStage::Fit => "a batch fit",
+///         CholeskyStage::Predict => "a prediction",
+///         CholeskyStage::OnlineInsert => "an online insert",
+///         CholeskyStage::OnlineDelete => "an online delete",
+///         _ => "another stage",
+///     }
+/// }
+/// assert_eq!(during(stage), "a prediction");
+/// assert_eq!(during(CholeskyStage::Fit), "a batch fit");
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -24,14 +38,51 @@ pub enum CholeskyStage {
     /// Marks an incremental delete on an online model.
     OnlineDelete,
 }
-/// The part of a save or load that failed ([`GprError::PersistFailed`]).
+/// Names the part of a save or load that failed ([`GprError::PersistFailed`]).
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::PersistErrorKind;
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::persist::LoadedSgpr;
+/// use gprx::{GaussianLikelihood, Gpr, GprError, PersistErrorKind, PersistRegistry};
 ///
+/// // A caller branches on the kind; `reason` is for a person to read.
+/// fn advice(kind: PersistErrorKind) -> &'static str {
+///     match kind {
+///         PersistErrorKind::Io => "check the path and its permissions",
+///         PersistErrorKind::Config | PersistErrorKind::Tensor => "the files are damaged",
+///         PersistErrorKind::InvalidPersistId
+///         | PersistErrorKind::NotPersistable
+///         | PersistErrorKind::UnregisteredId => "check the custom kernels and transforms",
+///         PersistErrorKind::WrongModel => "load it with the loader of its model",
+///         _ => "see the reason",
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
 /// assert_eq!(PersistErrorKind::Io.to_string(), "io");
+///
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doc-persist-kind-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// // The directory holds an exact GPR, not a sparse one.
+/// let refused = LoadedSgpr::load(&dir, &PersistRegistry::new());
+/// let _ = std::fs::remove_dir_all(&dir);
+/// let kind = match refused {
+///     Err(GprError::PersistFailed { kind, .. }) => Some(kind),
+///     _ => None,
+/// };
+/// assert_eq!(kind, Some(PersistErrorKind::WrongModel));
+/// assert_eq!(kind.map(advice), Some("load it with the loader of its model"));
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -66,8 +117,8 @@ impl std::fmt::Display for PersistErrorKind {
     }
 }
 
-/// What is wrong with how a call's [`crate::kernel::DistanceSource`]s match
-/// the slots of the kernel ([`GprError::DistanceSlot`]).
+/// Names what is wrong with how a call's [`crate::kernel::DistanceSource`]s
+/// match the slots of the kernel ([`GprError::DistanceSlot`]).
 ///
 /// # Examples
 ///
@@ -88,6 +139,21 @@ impl std::fmt::Display for PersistErrorKind {
 /// assert!(matches!(
 ///     refused,
 ///     Err(GprError::DistanceSlot { kind: SlotErrorKind::NotRead, slot: None })
+/// ));
+/// // Two sources for slot 0.
+/// let twice = fitted.predict(
+///     [image.from_vec(vec![0.25, 0.25]), image.from_vec(vec![0.25, 0.25])],
+///     1,
+/// );
+/// assert!(matches!(
+///     twice,
+///     Err(GprError::DistanceSlot { kind: SlotErrorKind::Duplicate, slot: Some(0) })
+/// ));
+/// // No source for slot 0.
+/// let none = fitted.predict(std::iter::empty(), 1);
+/// assert!(matches!(
+///     none,
+///     Err(GprError::DistanceSlot { kind: SlotErrorKind::Missing, slot: Some(0) })
 /// ));
 /// # Ok(())
 /// # }
@@ -148,11 +214,16 @@ impl std::fmt::Display for DistancePlace<'_> {
 ///
 /// Display text is English, matching crate identifiers and rustdoc.
 ///
+/// The type is `#[non_exhaustive]`: a `match` needs a wildcard arm, and a
+/// later 0.x release may add variants.
+///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::GprError;
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{GaussianLikelihood, Gpr, GprError, JitterPolicy};
 ///
+/// // A caller's own check can return the crate's error.
 /// fn reject_empty(n: usize) -> Result<(), GprError> {
 ///     if n == 0 {
 ///         return Err(GprError::EmptyInput);
@@ -160,8 +231,75 @@ impl std::fmt::Display for DistancePlace<'_> {
 ///     Ok(())
 /// }
 ///
+/// // Groups every variant by what the caller fixes.
+/// fn advice(err: &GprError) -> String {
+///     match err {
+///         // The data or arguments of the call.
+///         GprError::DimensionMismatch { x_dim, expected_dim } => {
+///             format!("pass {expected_dim} feature columns, not {x_dim}")
+///         }
+///         GprError::InsufficientData { n, min } => format!("keep at least {min} points, not {n}"),
+///         GprError::EmptyInput | GprError::NonFiniteInput | GprError::SizeOverflow => {
+///             format!("check the input values and sizes: {err}")
+///         }
+///         GprError::ShapeMismatch { reason }
+///         | GprError::LengthMismatch { reason }
+///         | GprError::IndexOutOfRange { reason } => format!("fix the call: {reason}"),
+///         GprError::InvalidDistance { slot, dim, pair, reason } => {
+///             format!("repair the squared distances (slot {slot:?}, dim {dim:?}, pair {pair:?}): {reason}")
+///         }
+///         GprError::DistanceSlot { kind, slot } => format!("match the sources to the slots ({slot:?}): {kind}"),
+///         GprError::InvalidPointId | GprError::InvalidInducingId => "use an id the model holds".to_owned(),
+///         // The settings of the model.
+///         GprError::InvalidHyperparameter { reason }
+///         | GprError::InvalidNoiseVariance { reason }
+///         | GprError::InvalidConfig { reason }
+///         | GprError::UnsupportedKernelOperation { reason } => format!("change the setting: {reason}"),
+///         GprError::InvalidInterval(interval) => format!("change the bounds or the value: {interval}"),
+///         GprError::CoordGradientUnsupported => "pick a kernel with the derivative".to_owned(),
+///         // The numerics of the model at this data.
+///         GprError::CholeskyFailed { jitter, matrix_size, stage } => {
+///             format!("raise the noise or the jitter ({stage:?}, n = {matrix_size}, jitter {jitter})")
+///         }
+///         GprError::NonFiniteKernelValue
+///         | GprError::NonPositiveDefiniteMatrix
+///         | GprError::WorkspaceTooSmall => format!("the model cannot evaluate here: {err}"),
+///         GprError::OptimizationNotConverged { iterations } => {
+///             format!("try another start or optimizer (after {iterations} iterations)")
+///         }
+///         // Save and load.
+///         GprError::PersistFailed { kind, reason } => format!("save or load ({kind}): {reason}"),
+///         GprError::UnsupportedPersistVersion { found, supported } => {
+///             format!("the files are version {found}; this crate reads {supported}")
+///         }
+///         _ => err.to_string(),
+///     }
+/// }
+///
 /// # fn main() -> Result<(), GprError> {
 /// reject_empty(1)?;
+/// assert_eq!(reject_empty(0), Err(GprError::EmptyInput));
+///
+/// let negative = GaussianLikelihood::new(-1.0);
+/// assert!(matches!(negative, Err(GprError::InvalidNoiseVariance { .. })));
+/// // Positive, but outside the default interval (1e-5, 1e5).
+/// let tiny = GaussianLikelihood::new(1e-6);
+/// assert!(matches!(tiny, Err(GprError::InvalidInterval(_))));
+/// let jitter = JitterPolicy::fixed(-1.0);
+/// assert!(matches!(jitter, Err(GprError::InvalidConfig { .. })));
+///
+/// let fitted = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// )
+/// .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+/// .map_err(|(_, e)| e)?;
+/// // The model was fit on one feature; the query has two.
+/// let wrong = fitted.predict(&[0.5, 0.5], 1, 2);
+/// assert!(matches!(wrong, Err(GprError::DimensionMismatch { x_dim: 2, expected_dim: 1 })));
+/// if let Err(err) = wrong {
+///     assert_eq!(advice(&err), "pass 1 feature columns, not 2");
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -193,7 +331,11 @@ pub enum GprError {
     /// A kernel evaluation produced `NaN` or `Inf`.
     #[error("kernel evaluation produced a non-finite value")]
     NonFiniteKernelValue,
-    /// Cholesky factorization of `A = K + noise` failed after applying jitter.
+    /// Reports that a Cholesky factorization failed after the retries the
+    /// [`crate::JitterPolicy`] allows.
+    ///
+    /// The matrix is usually `A = K + σn² I`; a posterior draw factors the
+    /// predictive covariance instead.
     #[error(
         "Cholesky factorization failed (stage={stage:?}, size={matrix_size}, jitter={jitter} already applied)"
     )]
@@ -221,7 +363,15 @@ pub enum GprError {
          a Custom leaf must implement the KernelTerm cross / squared-distance derivatives)"
     )]
     CoordGradientUnsupported,
-    /// Marks the hyperparameter optimizer stopped without meeting its convergence test.
+    /// Reports that the hyperparameter search found no usable point.
+    ///
+    /// The solver of the first run stopped with an error of its own (not a
+    /// [`GprError`] of the objective), the best point of a run is one where
+    /// the value, gradient, or Hessian was not finite, no run reached a
+    /// finite objective value,
+    /// or an optimizer returned a result of the wrong length or with a
+    /// non-finite value. A built-in optimizer that stops at its iteration cap
+    /// returns its best point instead of this error.
     #[error("optimizer did not converge after {iterations} iterations")]
     OptimizationNotConverged {
         /// Holds the number of optimizer iterations performed.
@@ -313,7 +463,11 @@ pub enum GprError {
     /// `n_rows × n_cols` (or another buffer size) overflows `usize`.
     #[error("size overflows usize")]
     SizeOverflow,
-    /// Marks an [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
+    /// Reports that an [`crate::Interval`] or [`crate::BoundedParam`] could not be built.
+    ///
+    /// A hyperparameter or noise variance that leaves its interval (for
+    /// example [`crate::GaussianLikelihood::new`] below `1e-5`) also returns
+    /// this.
     #[error(transparent)]
     InvalidInterval(#[from] crate::param::IntervalError),
     /// Observation-noise variance is outside its valid domain.

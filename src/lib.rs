@@ -19,14 +19,17 @@
 //! module (`bench-internals`, `insert-stages`) is outside semantic
 //! versioning.
 //!
-//! Distance fills and lower-triangle kernel writes use the process-wide thread pool (shared
-//! with the linear-algebra backend). There is no parallel on/off flag and no `n_jobs`
-//! setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process starts, or call the global
-//! thread-pool builder before the first [`Gpr::fit`] / [`FittedGpr::predict`]. One worker
-//! (`RAYON_NUM_THREADS=1`) is sequential. The global pool can be initialized only once.
-//! Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n
-//! / 64)`. Predict / covariance triangular solves also cap at `n · m / 16384` and `m / 12`
-//! so a 1024×100 `L⁻¹ k_*` does not start 16 workers. Kernel fills still use the full pool.
+//! Distance fills and lower-triangle kernel writes run on the process-wide Rayon thread
+//! pool, which the linear-algebra backend shares. There is no parallel on/off flag and no
+//! `n_jobs` setter on [`Gpr`]. Set `RAYON_NUM_THREADS` before the process starts, or call
+//! `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first
+//! [`Gpr::fit`] / [`FittedGpr::predict`]. One worker (`RAYON_NUM_THREADS=1`) is
+//! sequential. The global pool can be initialized only once. A factor or solve of `n` rows
+//! and `k` columns (the training Cholesky factor and the `n`-column solve that forms the
+//! gradient matrix `ααᵀ − A⁻¹` have `k = n`; a predict or covariance solve has one column per
+//! query point) runs the linear-algebra backend on `min(pool, n / 64, n · k / 16384, k / 12)`
+//! workers, at least one, so a 1024 × 100 solve does not start 16 workers. Kernel fills
+//! still use the full pool.
 //!
 //! # Examples
 //!

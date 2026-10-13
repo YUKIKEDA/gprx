@@ -5,9 +5,12 @@ use crate::param::{BoundedParam, Interval};
 
 /// Represents the Gaussian likelihood with observation noise variance `σn²`.
 ///
-/// The optimizer parameter is `θ = log(σn²)`, so positivity is unconstrained.
-/// Differentiating the kernel matrix with respect to that parameter gives
-/// `∂K/∂θ = σn² I`, not `2 σn I`.
+/// The optimizer parameter is `θ = log(σn²)`, which keeps `σn²` positive;
+/// a `θ` whose `exp` overflows to infinity or underflows to zero is
+/// [`GprError::InvalidNoiseVariance`]. `σn²` must also stay strictly inside
+/// its [`Interval`] ([`Interval::DEFAULT_POSITIVE`], `(1e-5, 1e5)`, unless
+/// [`Self::with_bounds`] sets another). Differentiating the kernel matrix
+/// with respect to that parameter gives `∂K/∂θ = σn² I`, not `2 σn I`.
 ///
 /// Observation noise lives here. Do not also add a large white kernel term;
 /// that double-counts noise. Cholesky jitter ([`crate::JitterPolicy`]) is a
@@ -16,13 +19,37 @@ use crate::param::{BoundedParam, Interval};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::GaussianLikelihood;
+/// use gprx::{GaussianLikelihood, Interval};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let lik = GaussianLikelihood::new(0.25)?;
 /// let mut diag = [1.0, 1.0];
 /// lik.add_noise_diag(&mut diag);
-/// # let _ = diag;
+/// assert!((diag[0] - 1.25).abs() < 1e-12);
+///
+/// // The same likelihood from `θ = log(σn²)`.
+/// let same = GaussianLikelihood::from_log_noise_variance(0.25_f64.ln())?;
+/// assert!((same.noise_variance() - lik.noise_variance()).abs() < 1e-12);
+/// assert!((same.log_noise_variance() - 0.25_f64.ln()).abs() < 1e-12);
+///
+/// // Bounds on `σn²`, in user units.
+/// assert_eq!(lik.bounds(), Interval::DEFAULT_POSITIVE);
+/// let mut lik = lik.with_bounds(Interval::new(1e-3, 1.0)?)?;
+/// assert_eq!(lik.bounds().hi(), 1.0);
+///
+/// // The optimizer's view: one parameter `θ`.
+/// assert_eq!(lik.num_params(), 1);
+/// let mut theta = [0.0];
+/// lik.get_params(&mut theta)?;
+/// lik.set_params(&[0.5_f64.ln()])?;
+/// assert!((lik.noise_variance() - 0.5).abs() < 1e-12);
+/// // `σn² = 2` is outside the new bounds.
+/// assert!(lik.set_params(&[2.0_f64.ln()]).is_err());
+///
+/// // `∂K/∂θ` on the diagonal is `σn²`.
+/// let mut grad = [0.0; 2];
+/// lik.noise_grad_diag(&mut grad, 0)?;
+/// assert!((grad[1] - 0.5).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -37,7 +64,9 @@ impl GaussianLikelihood {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidNoiseVariance`] if `noise_variance` is not
-    /// finite or not strictly positive.
+    /// finite or not strictly positive, and [`GprError::InvalidInterval`] if
+    /// it is not strictly inside [`Interval::DEFAULT_POSITIVE`] `(1e-5, 1e5)`
+    /// (for example `1e-6`).
     ///
     /// See the example on [`GaussianLikelihood`].
     pub fn new(noise_variance: f64) -> Result<Self, GprError> {
@@ -58,7 +87,8 @@ impl GaussianLikelihood {
     ///
     /// Returns [`GprError::InvalidNoiseVariance`] if `θ` is not finite, if
     /// `exp(θ)` overflows to a non-finite variance, or if `exp(θ)` underflows
-    /// to zero.
+    /// to zero, and [`GprError::InvalidInterval`] if `exp(θ)` is not strictly
+    /// inside [`Interval::DEFAULT_POSITIVE`] `(1e-5, 1e5)`.
     ///
     /// See the example on [`GaussianLikelihood`].
     pub fn from_log_noise_variance(log_noise_variance: f64) -> Result<Self, GprError> {
@@ -93,8 +123,8 @@ impl GaussianLikelihood {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::IntervalError`] if the current `σn²` is not strictly
-    /// inside `interval`.
+    /// Returns [`crate::IntervalError::OutOfRange`] if the current `σn²` is
+    /// not strictly inside `interval`.
     ///
     /// See the example on [`GaussianLikelihood`].
     pub fn with_bounds(self, interval: Interval) -> Result<Self, crate::IntervalError> {
@@ -128,7 +158,10 @@ impl GaussianLikelihood {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
-    /// or [`GprError::InvalidNoiseVariance`] if the new `θ` is invalid.
+    /// [`GprError::InvalidNoiseVariance`] if the new `θ` is not finite or
+    /// `exp(θ)` overflows or underflows, and [`GprError::InvalidInterval`] if
+    /// `exp(θ)` is not strictly inside [`Self::bounds`]. On an error the
+    /// likelihood is unchanged.
     ///
     /// See the example on [`GaussianLikelihood`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -149,7 +182,7 @@ impl GaussianLikelihood {
         }
     }
 
-    /// Writes the diagonal of `∂K/∂θ_i`.
+    /// Writes the diagonal of `∂K/∂θ_i` into `dk_diag`.
     ///
     /// For `i = 0` this is `σn²` in every entry.
     ///

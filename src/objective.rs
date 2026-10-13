@@ -70,7 +70,13 @@ pub(crate) use {count_joint_call, count_value_call};
 /// A solver that needs derivatives takes [`Differentiable`], not a runtime
 /// flag.
 ///
+/// The built-in optimizers read each parameter on a positive interval as
+/// `log` of a user-unit value inside that [`Interval`] (log-`θ` for the model
+/// fits), and any other parameter as the user-unit value itself.
+///
 /// # Examples
+///
+/// The smallest objective:
 ///
 /// ```rust
 /// use gprx::Objective;
@@ -93,6 +99,97 @@ pub(crate) use {count_joint_call, count_value_call};
 /// # Ok(())
 /// # }
 /// ```
+///
+/// A bowl `f(θ) = Σ (θ_i − c_i)²` with every capability, minimized by each
+/// built-in optimizer:
+///
+/// ```rust
+/// use gprx::{
+///     Differentiable, FastSimulatedAnnealing, GprError, IncrementalObjective, Interval, Lbfgs,
+///     NelderMead, Objective, Optimizer, TrustRegion, TwiceDifferentiable,
+/// };
+///
+/// struct Bowl {
+///     center: Vec<f64>,
+/// }
+///
+/// impl Bowl {
+///     fn check(&self, params: &[f64]) -> Result<(), GprError> {
+///         if params.len() == self.center.len() {
+///             Ok(())
+///         } else {
+///             Err(GprError::LengthMismatch {
+///                 reason: format!("expected {} parameters", self.center.len()),
+///             })
+///         }
+///     }
+/// }
+///
+/// impl Objective for Bowl {
+///     fn num_params(&self) -> usize {
+///         self.center.len()
+///     }
+///
+///     fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+///         self.check(params)?;
+///         Ok(params.iter().zip(&self.center).map(|(p, c)| (p - c).powi(2)).sum())
+///     }
+///
+///     // The default `fill_intervals` writes `Interval::DEFAULT_POSITIVE`, and
+///     // the default `value_at_changes` calls `value`.
+/// }
+///
+/// impl Differentiable for Bowl {
+///     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+///         self.check(params)?;
+///         for ((g, p), c) in out.iter_mut().zip(params).zip(&self.center) {
+///             *g = 2.0 * (p - c);
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// impl TwiceDifferentiable for Bowl {
+///     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+///         self.check(params)?;
+///         let n = params.len();
+///         for (k, h) in out.iter_mut().enumerate() {
+///             *h = if k / n == k % n { 2.0 } else { 0.0 };
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// impl IncrementalObjective for Bowl {
+///     // Every term depends on one coordinate, so nothing is cached to skip.
+///     fn value_with_changes(&mut self, params: &[f64], _indices: &[usize]) -> Result<f64, GprError> {
+///         self.value(params)
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
+/// // The minimum is at user values 2 and 0.5, so at their logs.
+/// let center = vec![2.0_f64.ln(), 0.5_f64.ln()];
+/// let mut bowl = Bowl { center: center.clone() };
+/// let init = [0.0, 0.0];
+///
+/// let mut intervals = [Interval::DEFAULT_POSITIVE; 2];
+/// bowl.fill_intervals(&mut intervals)?;
+/// assert_eq!(intervals, [Interval::DEFAULT_POSITIVE; 2]);
+/// let start = bowl.value(&init)?;
+/// assert!((bowl.value_at_changes(&[center[0], 0.0], &[0])? - center[1].powi(2)).abs() < 1e-12);
+/// assert!((bowl.value_with_changes(&init, &[0])? - start).abs() < 1e-12);
+///
+/// let close = |params: &[f64]| params.iter().zip(&center).all(|(p, c)| (p - c).abs() < 1e-3);
+/// assert!(close(&NelderMead::new().minimize(&mut bowl, &init)?.params));
+/// assert!(close(&Lbfgs::new().minimize(&mut bowl, &init)?.params));
+/// assert!(close(&TrustRegion::new().minimize(&mut bowl, &init)?.params));
+/// // Annealing is a random search: it keeps the best point it visited.
+/// let annealed = FastSimulatedAnnealing::new().minimize(&mut bowl, &init)?;
+/// assert!(annealed.value <= start);
+/// # Ok(())
+/// # }
+/// ```
 pub trait Objective {
     /// Returns the concatenated parameter count.
     ///
@@ -103,8 +200,13 @@ pub trait Objective {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `params` is the wrong length or the model
-    /// cannot evaluate at that point.
+    /// An implementation chooses its errors. The exact GPR fit objective
+    /// returns [`GprError::LengthMismatch`] when `params` is not
+    /// [`Self::num_params`] long, [`GprError::InvalidHyperparameter`] or
+    /// [`GprError::InvalidNoiseVariance`] when a coordinate is not finite or
+    /// its `exp` overflows or underflows, [`GprError::InvalidInterval`] when a
+    /// value leaves its [`Interval`], and [`GprError::CholeskyFailed`] when
+    /// `A = K + σn² I` does not factor at `params`.
     ///
     /// See the example on [`Objective`].
     fn value(&mut self, params: &[f64]) -> Result<f64, GprError>;
@@ -123,9 +225,11 @@ pub trait Objective {
     ///
     /// # Errors
     ///
-    /// Same as [`Self::value`]. An incremental implementation also rejects
-    /// an empty, duplicate, or out-of-range `indices`, and a step that
-    /// changed a coordinate `indices` does not list.
+    /// Same as [`Self::value`]. The exact GPR fit objective, when it
+    /// rebuilds only the touched leaves, also returns
+    /// [`GprError::IndexOutOfRange`] for an empty, duplicate, or out-of-range
+    /// `indices`, and for a step that changed a coordinate `indices` does not
+    /// list.
     ///
     /// See the example on [`Objective`].
     fn value_at_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
@@ -156,7 +260,8 @@ pub trait Objective {
 
 /// Represents the first-order objective.
 ///
-/// Supertrait of [`Objective`].
+/// [`Objective`] is its supertrait: an implementation also implements
+/// [`Objective`].
 ///
 /// The GPR fit objective overrides [`Self::value_and_gradient_into`] so one
 /// Cholesky produces `L`, `α`, and `W`.
@@ -194,6 +299,9 @@ pub trait Objective {
 /// let mut grad = [1.0];
 /// objective.gradient_into(&[0.0], &mut grad)?;
 /// assert_eq!(grad, [0.0]);
+/// // The default joint call runs `value`, then `gradient_into`.
+/// let value = objective.value_and_gradient_into(&[0.0], &mut grad)?;
+/// assert_eq!((value, grad), (0.0, [0.0]));
 /// # Ok(())
 /// # }
 /// ```
@@ -202,7 +310,9 @@ pub trait Differentiable: Objective {
     ///
     /// # Errors
     ///
-    /// Same as [`Objective::value`], plus a length mismatch on `out`.
+    /// Same as [`Objective::value`]. The exact GPR fit objective also
+    /// returns [`GprError::LengthMismatch`] when `out` is not
+    /// [`Objective::num_params`] long.
     ///
     /// See the example on [`Differentiable`].
     fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
@@ -229,10 +339,15 @@ pub trait Differentiable: Objective {
 
 /// Represents the second-order objective.
 ///
-/// Supertrait of [`Differentiable`].
+/// [`Differentiable`] is its supertrait: an implementation also implements
+/// [`Differentiable`] and [`Objective`].
 ///
-/// The GPR fit objective implements this by forwarding to
-/// [`crate::FittedGpr::hessian_into`]. There is no runtime `NotImplemented`.
+/// The exact GPR fit objective implements it with the analytic Hessian that
+/// [`crate::FittedGpr::hessian_into`] also returns, so [`crate::TrustRegion`]
+/// takes it at compile time; there is no runtime "not implemented" error.
+///
+/// The second example on [`Objective`] minimizes an implementation with
+/// [`crate::TrustRegion`].
 ///
 /// # Examples
 ///
@@ -278,6 +393,10 @@ pub trait Differentiable: Objective {
 /// let mut hess = [1.0];
 /// objective.hessian_into(&[0.0], &mut hess)?;
 /// assert_eq!(hess, [0.0]);
+/// // The default joint call runs the value, gradient, and Hessian in turn.
+/// let mut grad = [1.0];
+/// let value = objective.value_gradient_hessian_into(&[0.0], &mut grad, &mut hess)?;
+/// assert_eq!((value, grad, hess), (0.0, [0.0], [0.0]));
 /// # Ok(())
 /// # }
 /// ```
@@ -286,8 +405,8 @@ pub trait TwiceDifferentiable: Differentiable {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when a slice length is wrong or the model cannot
-    /// evaluate at `params`.
+    /// Same as [`Objective::value`]. The exact GPR fit objective also
+    /// returns [`GprError::LengthMismatch`] when `out` is not `n²` long.
     ///
     /// See the example on [`TwiceDifferentiable`].
     fn hessian_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError>;
@@ -365,9 +484,10 @@ pub trait IncrementalObjective: Objective {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `params` is the wrong length, `indices` is
-    /// empty, contains a duplicate, contains `i >= n_params`, or leaves out a
-    /// coordinate that changed, or when the model cannot evaluate.
+    /// Same as [`Objective::value`]. The exact GPR fit objective also
+    /// returns [`GprError::IndexOutOfRange`] when `indices` is empty,
+    /// contains a duplicate or an `i >= n_params`, or leaves out a coordinate
+    /// that changed since the previous evaluation.
     ///
     /// See the example on [`IncrementalObjective`].
     fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError>;

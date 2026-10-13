@@ -14,15 +14,33 @@ use crate::transform::TargetTransform;
 
 /// Selects storage and residual-refinement scalar types for GP computations.
 ///
-/// See the example on [`DoublePrecision`].
+/// `Refine` is also the scalar a model's predictions use: a model of
+/// precision `P` returns [`crate::Prediction`]`<P::Refine>`.
+///
+/// # Examples
+///
+/// ```rust
+/// use gprx::{DoublePrecision, MixedPrecision, PrecisionPolicy, SinglePrecision};
+///
+/// fn scalars<P: PrecisionPolicy>() -> (&'static str, &'static str) {
+///     (
+///         std::any::type_name::<P::Storage>(),
+///         std::any::type_name::<P::Refine>(),
+///     )
+/// }
+///
+/// assert_eq!(scalars::<DoublePrecision>(), ("f64", "f64"));
+/// assert_eq!(scalars::<SinglePrecision>(), ("f32", "f32"));
+/// assert_eq!(scalars::<MixedPrecision>(), ("f32", "f64"));
+/// ```
 pub trait PrecisionPolicy {
     /// Represents the scalar used for `K`, `L`, and other stored buffers.
     ///
-    /// See the example on [`crate::Gpr`].
+    /// See the example on [`PrecisionPolicy`].
     type Storage: KernelScalar;
-    /// Represents the scalar used when refining a solve against a higher-precision residual.
+    /// Represents the scalar used when refining a solve against a higher-precision residual, and the scalar of predictions.
     ///
-    /// See the example on [`crate::Gpr`].
+    /// See the example on [`PrecisionPolicy`].
     type Refine: KernelScalar;
 }
 
@@ -50,7 +68,8 @@ impl PrecisionPolicy for DoublePrecision {
 /// Uses `f32` for stored factors and keeps that factorization as-is.
 ///
 /// The same Gram, Cholesky, and predict steps as [`DoublePrecision`] run in
-/// `f32`. There is no residual type parameter.
+/// `f32`, and predictions are `f32` ([`crate::Prediction`]`<f32>`). There is
+/// no residual type parameter.
 ///
 /// # Examples
 ///
@@ -77,13 +96,37 @@ impl PrecisionPolicy for SinglePrecision {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel};
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::{
+///     GaussianLikelihood, Gpr, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
+/// };
 ///
 /// type DefaultResidual = MixedPrecision;
 /// type FreshKernel = MixedPrecision<ReevaluateKernel>;
+///
+/// # fn main() -> Result<(), gprx::GprError> {
 /// let _: <DefaultResidual as PrecisionPolicy>::Storage = 0.0_f32;
 /// let _: <FreshKernel as PrecisionPolicy>::Refine = 0.0_f64;
-/// let _ = core::marker::PhantomData::<PromoteStorage>;
+/// let gpr = Gpr::new(
+///     KernelSpec::from(RbfKernel::new(1.0)?),
+///     GaussianLikelihood::new(0.1)?,
+/// );
+/// // `MixedPrecision` alone is `MixedPrecision<PromoteStorage>`.
+/// let promoted = gpr
+///     .clone()
+///     .with_precision::<MixedPrecision<PromoteStorage>>()
+///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// let fresh = gpr
+///     .with_precision::<FreshKernel>()
+///     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// // Both factor in `f32` and predict in `f64`.
+/// let a: Vec<f64> = promoted.predict(&[0.5], 1, 1)?.mean;
+/// let b: Vec<f64> = fresh.predict(&[0.5], 1, 1)?.mean;
+/// assert!((a[0] - b[0]).abs() < 1e-4);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MixedPrecision<R: ResidualFormula = PromoteStorage>(core::marker::PhantomData<R>);
@@ -111,6 +154,7 @@ mod residual_seal {
 /// Describes how [`MixedPrecision`] builds the refinement residual `r = y − Aα`.
 ///
 /// The only implementations are [`PromoteStorage`] and [`ReevaluateKernel`].
+/// A caller names it only as the bound of [`MixedPrecision`]'s parameter.
 ///
 /// See the example on [`MixedPrecision`].
 pub trait ResidualFormula: residual_seal::Sealed + Copy + Send + Sync + 'static {}
@@ -118,14 +162,16 @@ pub trait ResidualFormula: residual_seal::Sealed + Copy + Send + Sync + 'static 
 /// Represents the residual `r = y − Aα` from the saved `f32` matrix promoted to `f64`.
 ///
 /// This is the residual when [`MixedPrecision`] omits its type parameter.
+/// It reads the stored `f32` kernel matrix, so it costs no kernel
+/// evaluation.
 ///
-/// See the example on [`crate::Gpr`].
+/// See the example on [`MixedPrecision`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PromoteStorage;
 
 /// Represents the residual `r = y − Aα` from a fresh `f64` kernel evaluation.
 ///
-/// See the example on [`crate::Gpr`].
+/// See the example on [`MixedPrecision`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReevaluateKernel;
 
@@ -577,7 +623,7 @@ fn f64_cross_means<M: crate::math::KernelMath, S: Supply>(
     Ok(())
 }
 
-/// Represents the A model precision: [`DoublePrecision`], [`SinglePrecision`], or a [`MixedPrecision`].
+/// Represents a model precision: [`DoublePrecision`], [`SinglePrecision`], or a [`MixedPrecision`].
 ///
 /// This is the `P` parameter of `with_precision` on [`crate::Gpr`],
 /// [`crate::Sgpr`], and [`crate::Svgp`]. It is sealed: only those four

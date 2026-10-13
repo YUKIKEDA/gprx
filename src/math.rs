@@ -14,9 +14,11 @@ pub struct ExpJet<T> {
     pub d2: T,
 }
 
-/// Uses the exact language `exp` and SIMD `exp`.
+/// Selects the exact language `exp` and SIMD `exp` for kernel evaluation.
 ///
-/// Callers select this mode by omitting an explicit math parameter.
+/// It is a [`KernelMath`] type argument of the
+/// [`crate::kernel::CompiledKernel`] evaluators. A model selects the same
+/// `exp` with [`crate::KernelExp::Accurate`], its default.
 ///
 /// # Examples
 ///
@@ -25,10 +27,16 @@ pub struct ExpJet<T> {
 ///
 /// let _mode = Accurate;
 /// ```
+///
+/// The example on [`KernelMath`] evaluates a kernel with it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Accurate;
 
-/// Represents the polynomial `exp` for kernel evaluation, including `fit`.
+/// Selects the polynomial `exp` for kernel evaluation.
+///
+/// It is a [`KernelMath`] type argument of the
+/// [`crate::kernel::CompiledKernel`] evaluators. A model selects the same
+/// `exp` for fit and predict with [`crate::KernelExp::FastApprox`].
 ///
 /// Coefficients are the degree-7 Taylor terms of `exp` after range reduction.
 /// f64 nonzero values stay within a relative `2^{-23}` of `f64::exp`. f32
@@ -42,27 +50,50 @@ pub struct Accurate;
 ///
 /// let _mode = FastApprox;
 /// ```
+///
+/// The example on [`KernelMath`] evaluates a kernel with it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FastApprox;
 
 /// Represents the kernel `exp` mode: [`Accurate`] or [`FastApprox`].
 ///
 /// This is the `M` parameter of the [`crate::kernel::CompiledKernel`]
-/// evaluators. Models take the runtime [`crate::KernelExp`] instead
-/// (`with_math`) and dispatch to one of these once per kernel call. It is sealed: only those two
-/// types implement it, and its operations are crate-private.
+/// evaluators, which take `faer` matrices. Models take the runtime
+/// [`crate::KernelExp`] instead (`with_math`) and dispatch to one of these
+/// once per kernel call. It is sealed: only those two types implement it, and
+/// its operations are crate-private.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::{Accurate, FastApprox, KernelMath};
+/// use faer::Mat;
+/// use gprx::kernel::{KernelSpec, RbfKernel, Triangle};
+/// use gprx::{Accurate, FastApprox, GprError, KernelMath};
 ///
 /// fn mode_name<M: KernelMath>() -> &'static str {
 ///     std::any::type_name::<M>()
 /// }
 ///
+/// // The RBF Gram matrix of three points on a line, with either `exp`.
+/// fn gram<M: KernelMath>() -> Result<Mat<f64>, GprError> {
+///     let compiled = KernelSpec::from(RbfKernel::new(1.0)?).compile();
+///     let x = Mat::from_fn(3, 1, |i, _| i as f64);
+///     let mut k = Mat::<f64>::zeros(3, 3);
+///     let mut scratch = Mat::<f64>::zeros(3, 3);
+///     compiled.apply_points::<M>(x.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())?;
+///     Ok(k)
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
 /// assert!(mode_name::<Accurate>().ends_with("Accurate"));
 /// assert!(mode_name::<FastApprox>().ends_with("FastApprox"));
+///
+/// let exact = gram::<Accurate>()?;
+/// let fast = gram::<FastApprox>()?;
+/// let rel = (fast[(1, 0)] - exact[(1, 0)]).abs() / exact[(1, 0)];
+/// assert!(rel < 1e-6);
+/// # Ok(())
+/// # }
 /// ```
 pub trait KernelMath: MathOps {}
 
