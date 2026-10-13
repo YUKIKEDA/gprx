@@ -20,8 +20,13 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if shapes mismatch, `scratch` is the wrong size, a
-    /// leaf fails, or a sum/product has no terms.
+    /// Returns [`GprError::WorkspaceTooSmall`] if `scratch` is not the shape
+    /// of `out`, [`GprError::UnsupportedKernelOperation`] if a sum/product
+    /// has no terms or a leaf reads coordinates (ARD or Linear; use
+    /// [`Self::apply_points`] for such trees), or a leaf's own error:
+    /// [`GprError::ShapeMismatch`] or [`GprError::EmptyInput`] for the shapes,
+    /// [`GprError::NonFiniteInput`] for a distance that is not finite, as
+    /// [`super::super::RbfKernel::apply`] documents.
     ///
     /// See the example on [`CompiledKernel`].
     pub fn apply<M: crate::math::KernelMath>(
@@ -126,7 +131,8 @@ impl<T: KernelScalar> CompiledKernel<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
+    /// Returns [`GprError::EmptyInput`] if `x` has no column,
+    /// [`GprError::UnsupportedKernelOperation`] if a sum/product has no
     /// terms, [`GprError::LengthMismatch`] if a sum/product's `out` is not
     /// `x.nrows()` long, or the same shape errors as the leaf.
     ///
@@ -295,15 +301,17 @@ impl<T: KernelScalar> CompiledKernel<T> {
 impl<T: KernelScalar, S: Supply> CompiledKernel<T, S> {
     /// Writes the diagonal `k(x, x)` into `out`.
     ///
-    /// Leaf `fill_diag` methods cannot fail and return `()`. This one returns
-    /// a `Result` because a tree may hold a leaf whose diagonal needs the
-    /// coordinates ([`super::super::LinearKernel`]); use
-    /// [`Self::fill_diag_points`] for such trees.
+    /// The `fill_diag` methods of built-in leaves cannot fail and return
+    /// `()`. This one returns a `Result` because a tree may hold a leaf whose
+    /// diagonal needs the coordinates ([`super::super::LinearKernel`]; use
+    /// [`Self::fill_diag_points`] for such trees) or a custom leaf whose
+    /// [`super::super::KernelTerm::fill_diag`] fails.
     ///
     /// # Errors
     ///
     /// Returns [`GprError::UnsupportedKernelOperation`] if a sum/product has no
-    /// terms or a leaf needs coordinates.
+    /// terms or a leaf needs coordinates, or the error a custom leaf's
+    /// [`super::super::KernelTerm::fill_diag`] returns.
     ///
     /// See the example on [`CompiledKernel`].
     pub fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {

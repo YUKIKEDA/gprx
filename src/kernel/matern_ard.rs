@@ -26,11 +26,44 @@ use wide::{CmpGt, f64x4};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{MaternArdKernel, MaternNu};
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{MaternArdKernel, MaternNu, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Parameters: `θ_d = log(ℓ_d)`, one per feature; `ν` is fixed.
 /// let k = MaternArdKernel::new(&[1.0, 2.5], MaternNu::FiveHalves)?;
 /// assert_eq!(k.num_params(), 2);
+/// assert_eq!(k.nu(), MaternNu::FiveHalves);
+/// assert!((k.lengthscale(1)? - 2.5).abs() < 1e-12);
+/// assert_eq!(k.lengthscales().num_params(), 2);
+/// let same = MaternArdKernel::from_log_lengthscales(k.log_lengthscales(), MaternNu::FiveHalves)?;
+/// assert!((same.lengthscale(1)? - 2.5).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(0.1, 10.0)?)?;
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[0.0, 2.0_f64.ln()])?; // ℓ = [1, 2]
+///
+/// // Three points with two features, one point per row (column-major).
+/// let x = Mat::from_fn(3, 2, |i, d| [[0.0, 0.0], [1.0, 2.0], [2.0, 0.0]][i][d]);
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(x.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// // ν = 5/2 at r = √2 between the first two points.
+/// let r = 2.0_f64.sqrt();
+/// let s5 = 5.0_f64.sqrt();
+/// let expected = (1.0 + s5 * r + 5.0 * r * r / 3.0) * (-s5 * r).exp();
+/// assert!((gram[(1, 0)] - expected).abs() < 1e-12);
+/// let xs = Mat::from_fn(1, 2, |_, d| [0.5, 0.5][d]);
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(x.as_ref(), xs.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0; 3];
+/// k.fill_diag(&mut diag);
+///
+/// // ∂K/∂θ_1 and ∂²K/∂θ_0 ∂θ_1.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(x.as_ref(), d_k.as_mut(), 1, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(x.as_ref(), d2_k.as_mut(), 0, 1, Triangle::Lower)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -46,7 +79,10 @@ impl MaternArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
-    /// lengthscale is invalid.
+    /// lengthscale is not finite and strictly positive, or
+    /// [`GprError::InvalidInterval`] if one is not inside
+    /// [`crate::Interval::DEFAULT_POSITIVE`], the bounds a new leaf starts
+    /// with.
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn new(lengthscales: &[f64], nu: MaternNu) -> Result<Self, GprError> {
@@ -61,7 +97,9 @@ impl MaternArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
-    /// `θ_d` is invalid.
+    /// `θ_d` is not finite or its `exp` overflows or underflows to zero, or
+    /// [`GprError::InvalidInterval`] if an `ℓ_d` is not inside
+    /// [`crate::Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn from_log_lengthscales(log_lengthscales: &[f64], nu: MaternNu) -> Result<Self, GprError> {
@@ -78,7 +116,7 @@ impl MaternArdKernel {
         self.nu
     }
 
-    /// Returns the shared ARD lengthscale mouth.
+    /// Returns the per-feature lengthscales.
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn lengthscales(&self) -> &ArdLengthscales {
@@ -150,7 +188,8 @@ impl MaternArdKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
+    /// length, [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid, or
+    /// [`GprError::InvalidInterval`] if a new `ℓ_d` is not inside its bounds.
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -164,8 +203,11 @@ impl MaternArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if `x` is empty, `d` does not match the
-    /// lengthscales, `out` is not `n×n`, or a coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if `x` is empty,
+    /// [`GprError::DimensionMismatch`] if `x` does not have one column per
+    /// lengthscale, [`GprError::ShapeMismatch`] if `out` is not `n×n`,
+    /// [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn apply<T: KernelScalar>(
@@ -205,8 +247,11 @@ impl MaternArdKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if a matrix is empty, feature dimensions differ,
-    /// `out` is the wrong shape, or a coordinate is non-finite.
+    /// Returns [`GprError::EmptyInput`] if a matrix is empty,
+    /// [`GprError::DimensionMismatch`] if `x` or `xs` does not have one column per
+    /// lengthscale, [`GprError::ShapeMismatch`] if `out` is not `x.nrows() ×
+    /// xs.nrows()`, [`GprError::NonFiniteInput`] if a coordinate is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`MaternArdKernel`].
     pub fn apply_cross<T: KernelScalar>(

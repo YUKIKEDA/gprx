@@ -165,6 +165,26 @@ pub(crate) mod sealed {
 ///
 /// assert!((half_exp(2.0_f64) - 1.0_f64.exp()).abs() < 1e-15);
 /// assert!((half_exp(2.0_f32) - 1.0_f32.exp()).abs() < 1e-6);
+///
+/// /// Every operation once, on `x = 0.5`; returns how far each identity
+/// /// is from exact, as `f64`.
+/// fn identities<T: KernelScalar>() -> f64 {
+///     let x = T::from_f64(0.5);
+///     let two = T::from_f64(2.0);
+///     let errors = [
+///         x.exp().ln() - x,                          // ln(eˣ) = x
+///         x.powf(two).sqrt() - x,                    // √(x²) = x
+///         (T::from_f64(-0.5)).abs() - x,             // |−x| = x
+///         x.sin() * x.sin() + x.cos() * x.cos() - T::from_f64(1.0),
+///         x.max(two) - two,
+///         x.min(two) - x,
+///     ];
+///     assert!(errors.iter().all(|e| e.is_finite()));
+///     errors.iter().map(|e| e.abs().to_f64()).fold(0.0, f64::max)
+/// }
+///
+/// assert!(identities::<f64>() < 1e-15);
+/// assert!(identities::<f32>() < 1e-6);
 /// ```
 pub trait KernelScalar:
     sealed::ScalarOps + faer_traits::RealField + Copy + fmt::Debug + Default + Send + Sync + 'static
@@ -179,7 +199,7 @@ pub trait KernelScalar:
     /// See the example on [`KernelScalar`].
     fn to_f64(self) -> f64;
 
-    /// Returns the `eˣ`.
+    /// Returns `eˣ`.
     ///
     /// See the example on [`KernelScalar`].
     fn exp(self) -> Self;
@@ -199,12 +219,12 @@ pub trait KernelScalar:
     /// See the example on [`KernelScalar`].
     fn abs(self) -> Self;
 
-    /// Records whether the value is neither infinite nor `NaN`.
+    /// Returns whether the value is neither infinite nor `NaN`.
     ///
     /// See the example on [`KernelScalar`].
     fn is_finite(self) -> bool;
 
-    /// Returns the `selfᵉ` for a real exponent.
+    /// Returns `self` raised to the real power `e`.
     ///
     /// See the example on [`KernelScalar`].
     fn powf(self, e: Self) -> Self;

@@ -3,6 +3,15 @@
 //! Built-in leaves are enum arms. User distance leaves implement [`KernelTerm`]
 //! and enter the tree as [`KernelSpec::Custom`].
 //!
+//! A model can also read squared distances the caller supplies instead of
+//! computing them from coordinates. A slot ([`ScalarDistance`], or
+//! [`ArdDistance`] with one table per dimension) names such a supply, its
+//! leaves form a [`DistanceKernel`], and a [`DistanceSource`] binds the
+//! tables, or a [`DistanceFill`] that writes them, to the slot for one call.
+//! [`DistanceKernel<WithPoints>`] also holds coordinate leaves of a
+//! [`KernelSpec`]. [`ModelKernel`] is what the models accept: a coordinate
+//! [`KernelSpec`] or a [`DistanceKernel`].
+//!
 //! Isotropic RBF, Matérn, Periodic, and rational quadratic evaluate from a
 //! squared-Euclidean distance matrix (Periodic then takes the square root). ARD RBF, ARD
 //! Matérn, and ARD rational quadratic evaluate from coordinates via [`ArdLengthscales`]
@@ -97,9 +106,26 @@ use faer::{MatMut, MatRef};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::Triangle;
+/// use faer::Mat;
+/// use gprx::kernel::{RbfKernel, Triangle};
 ///
+/// # fn main() -> Result<(), gprx::GprError> {
 /// assert_ne!(Triangle::Lower, Triangle::Upper);
+/// let rbf = RbfKernel::new(1.0)?;
+/// let dist = Mat::from_fn(2, 2, |i, j| if i == j { 0.0 } else { 1.0 });
+/// // `Lower` leaves the strict upper triangle as it was.
+/// let mut lower = Mat::<f64>::zeros(2, 2);
+/// rbf.apply(dist.as_ref(), lower.as_mut(), Triangle::Lower)?;
+/// assert!(lower[(0, 1)].abs() < 1e-12 && lower[(1, 0)] > 0.0);
+/// // `Upper` writes the other side, `Full` both.
+/// let mut upper = Mat::<f64>::zeros(2, 2);
+/// rbf.apply(dist.as_ref(), upper.as_mut(), Triangle::Upper)?;
+/// assert!(upper[(1, 0)].abs() < 1e-12 && upper[(0, 1)] > 0.0);
+/// let mut full = Mat::<f64>::zeros(2, 2);
+/// rbf.apply(dist.as_ref(), full.as_mut(), Triangle::Full)?;
+/// assert!((full[(0, 1)] - full[(1, 0)]).abs() < 1e-12);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Triangle {

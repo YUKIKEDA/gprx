@@ -225,12 +225,21 @@ impl LeafParams for SuppliedLeafSpec {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{RbfKernel, ScalarDistance};
+/// use gprx::kernel::{
+///     DistanceKernel, DistanceSource, MaternKernel, MaternNu, RbfKernel, ScalarDistance,
+///     ScalarDistanceLeaf,
+/// };
 /// use gprx::{GaussianLikelihood, Gpr};
+///
+/// /// Adds a second leaf on the slot of `image`.
+/// fn plus(kernel: DistanceKernel, image: ScalarDistance, leaf: impl ScalarDistanceLeaf) -> DistanceKernel {
+///     kernel + image.kernel(leaf)
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
 /// let kernel = image.kernel(RbfKernel::new(1.0)?);
+/// let kernel = plus(kernel, image, MaternKernel::new(1.0, MaternNu::FiveHalves)?);
 /// // Squared distances between three training samples.
 /// let train = vec![0.0, 1.0, 4.0, 1.0, 0.0, 1.0, 4.0, 1.0, 0.0];
 /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
@@ -238,7 +247,8 @@ impl LeafParams for SuppliedLeafSpec {
 ///     .map_err(|(_, e)| e)?;
 /// // Squared distances from the three training samples to one query.
 /// let cross = [0.25, 0.25, 2.25];
-/// let pred = fitted.predict([image.borrow(&cross)], 1)?;
+/// let source: DistanceSource<'_> = image.borrow(&cross);
+/// let pred = fitted.predict([source], 1)?;
 /// assert_eq!(pred.mean.len(), 1);
 /// # Ok(())
 /// # }
@@ -269,7 +279,8 @@ impl ScalarDistance {
     /// Returns a leaf that evaluates `leaf` on this slot's `d²`.
     ///
     /// The leaf is an isotropic RBF, Matérn, periodic, or rational
-    /// quadratic, or a user [`KernelTerm`] (or a [`CustomKernel`]).
+    /// quadratic, a [`CustomKernel`], or a `Clone` user type that implements
+    /// [`KernelTerm`] at both `f64` and `f32`.
     ///
     /// See the example on [`ScalarDistance`].
     pub fn kernel(&self, leaf: impl ScalarDistanceLeaf) -> DistanceKernel {
@@ -315,10 +326,9 @@ impl ScalarDistance {
 
     /// Binds a function that writes this slot's `d²`.
     ///
-    /// A fit calls it once into the buffer the model keeps, whatever the
-    /// [`crate::DistanceCachePolicy`]; a prediction calls it once into
-    /// scratch.
-    /// See [`DistanceFill`].
+    /// A fit fills the table once, into the buffer the model keeps, whatever
+    /// the [`crate::DistanceCachePolicy`]; a prediction fills it once into
+    /// scratch. [`DistanceFill`] says which columns and rows it asks for.
     ///
     /// See the example on [`DistanceFill`].
     pub fn fill<'a>(&self, filler: &'a dyn DistanceFill) -> DistanceSource<'a> {
@@ -348,19 +358,58 @@ impl ScalarDistance {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{ArdDistance, RbfArdKernel};
+/// use gprx::kernel::{
+///     ArdDistance, ArdDistanceLeaf, DistanceFill, MaternArdKernel, MaternNu, RbfArdKernel,
+/// };
 /// use gprx::{GaussianLikelihood, Gpr};
+/// use std::ops::Range;
+///
+/// /// The number of `d²` tables a slot made from `leaf` takes.
+/// fn tables(leaf: impl ArdDistanceLeaf) -> usize {
+///     ArdDistance::from_leaf(leaf).0.dims()
+/// }
+///
+/// /// Per-feature squared differences between two sets of two-feature
+/// /// samples: one run of rows per feature.
+/// struct Bands<'a> {
+///     rows: &'a [[f64; 2]],
+///     cols: &'a [[f64; 2]],
+/// }
+///
+/// impl DistanceFill for Bands<'_> {
+///     fn fill_column(&self, col: usize, rows: Range<usize>, out: &mut [f64]) {
+///         let len = rows.len();
+///         for k in 0..2 {
+///             let run = &mut out[k * len..(k + 1) * len];
+///             for (slot, i) in run.iter_mut().zip(rows.clone()) {
+///                 let diff = self.rows[i][k] - self.cols[col][k];
+///                 *slot = diff * diff;
+///             }
+///         }
+///     }
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let (bands, kernel) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+/// assert_eq!(bands.dims(), 2);
+/// assert_eq!(tables(MaternArdKernel::new(&[1.0, 1.0, 1.0], MaternNu::Half)?), 3);
+/// // A second leaf on the same slot reads the same supply.
+/// let kernel = kernel + bands.kernel(MaternArdKernel::new(&[1.0, 1.0], MaternNu::FiveHalves)?)?;
+/// assert_eq!(kernel.slots().len(), 1);
+///
+/// // Squared differences of the samples (0, 0) and (1, 2), one table per feature.
 /// let b0 = vec![0.0, 1.0, 1.0, 0.0];
 /// let b1 = vec![0.0, 4.0, 4.0, 0.0];
 /// let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
 ///     .fit([bands.from_vecs(vec![b0, b1])], 2, &[0.0, 1.0])
 ///     .map_err(|(_, e)| e)?;
+/// // The query (0.5, 1.0), from tables and from a fill.
 /// let (c0, c1) = ([0.25, 0.25], [1.0, 1.0]);
 /// let pred = fitted.predict([bands.borrow(&[&c0, &c1])], 1)?;
 /// assert_eq!(pred.mean.len(), 1);
+/// let (samples, queries) = ([[0.0, 0.0], [1.0, 2.0]], [[0.5, 1.0]]);
+/// let filled = fitted.predict([bands.fill(&Bands { rows: &samples, cols: &queries })], 1)?;
+/// assert!((filled.mean[0] - pred.mean[0]).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -500,21 +549,35 @@ impl ArdDistance {
     }
 }
 
-/// One slot of a [`DistanceKernel`].
+/// Names one slot of a [`DistanceKernel`], scalar or ARD.
+///
+/// [`DistanceKernel::slots`] lists them; each source of a fit or a
+/// prediction binds one.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{DistanceSlot, RbfKernel, ScalarDistance};
+/// use gprx::kernel::{ArdDistance, DistanceSlot, RbfArdKernel, RbfKernel, ScalarDistance};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
-/// let kernel = image.kernel(RbfKernel::new(1.0)?);
-/// assert_eq!(kernel.slots(), vec![DistanceSlot::Scalar(image)]);
-/// // A slot is a key: here, the tables to bind to each slot.
-/// let tables: std::collections::HashMap<DistanceSlot, Vec<f64>> =
-///     kernel.slots().into_iter().map(|slot| (slot, vec![0.0])).collect();
-/// assert!(tables.contains_key(&DistanceSlot::Scalar(image)));
+/// let (bands, ard) = ArdDistance::from_leaf(RbfArdKernel::new(&[1.0, 2.0])?);
+/// let kernel = image.kernel(RbfKernel::new(1.0)?) * ard;
+/// assert_eq!(
+///     kernel.slots(),
+///     vec![DistanceSlot::Scalar(image), DistanceSlot::Ard(bands)]
+/// );
+/// // A slot is a key: here, the number of tables to bind to each slot.
+/// let tables: std::collections::HashMap<DistanceSlot, usize> = kernel
+///     .slots()
+///     .into_iter()
+///     .map(|slot| match slot {
+///         DistanceSlot::Scalar(_) => (slot, 1),
+///         DistanceSlot::Ard(ard) => (slot, ard.dims()),
+///         _ => (slot, 0),
+///     })
+///     .collect();
+/// assert_eq!(tables[&DistanceSlot::Ard(bands)], 2);
 /// # Ok(())
 /// # }
 /// ```
@@ -579,7 +642,8 @@ mod sealed {
 
 /// Represents a leaf [`ScalarDistance::kernel`] accepts: [`RbfKernel`],
 /// [`MaternKernel`], [`PeriodicKernel`], [`RationalQuadraticKernel`],
-/// [`CustomKernel`], or a user [`KernelTerm`].
+/// [`CustomKernel`], or a `Clone` user type that implements [`KernelTerm`]
+/// at both `f64` and `f32` (the bound of [`CustomKernel::new`]).
 ///
 /// Sealed: the crate implements it.
 ///
@@ -666,6 +730,9 @@ pub struct WithPoints;
 /// Represents whether a [`DistanceKernel`] reads coordinates:
 /// [`DistanceOnly`] or [`WithPoints`]. Sealed.
 ///
+/// A model of `DistanceKernel<C>` with `C: PointUse` has the methods both
+/// kinds share.
+///
 /// See the example on [`DistanceKernel`].
 pub trait PointUse: sealed::Points + Send + Sync + 'static {}
 
@@ -686,7 +753,9 @@ impl PointUse for WithPoints {}
 ///
 /// See the example on [`DistanceKernel`].
 pub trait JoinPoints<Rhs: PointUse>: PointUse {
-    /// The joined marker.
+    /// Names the [`PointUse`] of the sum or product.
+    ///
+    /// See the example on [`DistanceKernel`].
     type Output: PointUse;
 }
 
@@ -713,13 +782,38 @@ impl JoinPoints<WithPoints> for WithPoints {
 /// goes on the left through `DistanceKernel::from`. Parameters follow the
 /// leaves in depth-first, left-to-right order, as in [`KernelSpec`].
 ///
+/// The marker `C` ([`PointUse`]) says whether the kernel reads coordinates;
+/// [`JoinPoints`] picks the marker of a sum or product. A model takes a
+/// [`ModelKernel`] ([`KernelSpec`] or `DistanceKernel`); the models of a
+/// [`PointKernel`] also take coordinates and report their feature count.
+///
 /// # Examples
 ///
 /// ```rust
 /// use gprx::kernel::{
-///     ArdDistance, ConstantKernel, DistanceKernel, DistanceOnly, KernelSpec, RbfArdKernel,
-///     RbfKernel, ScalarDistance, WithPoints,
+///     ArdDistance, ConstantKernel, DistanceKernel, DistanceOnly, JoinPoints, KernelSpec,
+///     ModelKernel, PointKernel, PointUse, RbfArdKernel, RbfKernel, ScalarDistance, WithPoints,
 /// };
+/// use gprx::{DoublePrecision, FittedGpr, Fixed, GaussianLikelihood, Gpr};
+///
+/// /// Sums two distance kernels: the sum reads coordinates when either term does.
+/// fn sum<A, B>(a: DistanceKernel<A>, b: DistanceKernel<B>) -> DistanceKernel<A::Output>
+/// where
+///     A: JoinPoints<B>,
+///     B: PointUse,
+/// {
+///     a + b
+/// }
+///
+/// /// Every model kernel has a training count.
+/// fn points<K: ModelKernel>(model: &FittedGpr<Fixed, DoublePrecision, K>) -> usize {
+///     model.n()
+/// }
+///
+/// /// Only a kernel that reads coordinates has a feature count.
+/// fn features<K: PointKernel>(model: &FittedGpr<Fixed, DoublePrecision, K>) -> usize {
+///     model.d()
+/// }
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let image = ScalarDistance::new();
@@ -731,6 +825,18 @@ impl JoinPoints<WithPoints> for WithPoints {
 /// assert_eq!(mixed.slots().len(), 2);
 /// let left = DistanceKernel::from(KernelSpec::from(RbfKernel::new(0.5)?)) + mixed;
 /// assert_eq!(left.num_params(), 6);
+///
+/// // `DistanceOnly` joined with `WithPoints` is `WithPoints`.
+/// let coordinates = DistanceKernel::from(KernelSpec::from(RbfKernel::new(0.5)?));
+/// let joined: DistanceKernel<WithPoints> = sum(image.kernel(RbfKernel::new(1.0)?), coordinates);
+///
+/// // A `WithPoints` model takes the coordinates `x` with the distances.
+/// let train = [0.0, 1.0, 1.0, 0.0];
+/// let fitted = Gpr::new(joined, GaussianLikelihood::new(0.1)?)
+///     .with_optimizer(Fixed)
+///     .factor([image.from_slice(&train)], 2, &[0.0, 1.0], 1, &[0.0, 1.0])
+///     .map_err(|(_, e)| e)?;
+/// assert_eq!((points(&fitted), features(&fitted)), (2, 1));
 /// # Ok(())
 /// # }
 /// ```
@@ -1025,14 +1131,15 @@ pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed
 ///
 /// The crate asks for the columns it needs, into a buffer it reuses, so a
 /// fill never makes the crate hold a dense table it would not keep. For a
-/// training square it asks, for each column `col`, only the rows
-/// `col..n` (the lower triangle, diagonal included): the square is
+/// square of the pairs of one set (the training square, or the query square
+/// of a covariance) it asks, for each column `col`, only the rows `col..n`
+/// (the lower triangle, diagonal included) and mirrors them: the square is
 /// symmetric by construction. For a block of two sets (train × query) it
 /// asks every row. A fit calls it once per column and keeps what it wrote,
 /// whatever the [`crate::DistanceCachePolicy`]; a prediction calls it into
 /// scratch. The caller knows which samples the rows and columns are: it
 /// binds a filler to a slot for one call with [`ScalarDistance::fill`] or
-/// [`ArdDistance::fill`].
+/// [`ArdDistance::fill`]. The example on [`ArdDistance`] fills an ARD slot.
 ///
 /// # Examples
 ///
@@ -1070,8 +1177,12 @@ pub(crate) type CompiledOf<T, K> = crate::kernel::CompiledKernel<T, <K as sealed
 /// ```
 pub trait DistanceFill: Send + Sync {
     /// Writes `d²(i, col)` for each row `i` of `rows` into `out`, in row
-    /// order. A slot of [`ArdDistance::dims`] `d` writes `d` runs one after
+    /// order.
+    ///
+    /// A slot of [`ArdDistance::dims`] `d` writes `d` runs one after
     /// another: dimension `k` at `k * rows.len()`.
+    ///
+    /// See the examples on [`DistanceFill`] and [`ArdDistance`].
     fn fill_column(&self, col: usize, rows: std::ops::Range<usize>, out: &mut [f64]);
 }
 

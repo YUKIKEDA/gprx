@@ -3,24 +3,36 @@
 use crate::error::GprError;
 use crate::param::{BoundedParam, Interval};
 
-/// ARD lengthscales for stationary leaves that scale each input dimension.
+/// Holds the ARD lengthscales `ℓ_d` that scale each input dimension of a stationary leaf.
 ///
 /// `num_params` is the feature dimension `d`. [`Self::get_params`] /
 /// [`Self::set_params`] read and write `θ_d = log(ℓ_d)`. Isotropic leaves keep
-/// a single `θ = log(ℓ)` and do not use this type. [`super::MaternArdKernel`]
-/// and [`super::RationalQuadraticArdKernel`] use this mouth.
+/// a single `θ = log(ℓ)` and do not use this type. [`super::RbfArdKernel`],
+/// [`super::MaternArdKernel`], and [`super::RationalQuadraticArdKernel`] hold
+/// their lengthscales in one and return it from `lengthscales()`.
 ///
 /// Cloning copies the `d`-vectors.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::ArdLengthscales;
+/// use gprx::Interval;
+/// use gprx::kernel::{ArdLengthscales, RbfArdKernel};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let scales = ArdLengthscales::new(&[1.0, 2.0])?;
 /// assert_eq!(scales.num_params(), 2);
 /// assert!((scales.lengthscale(1)? - 2.0).abs() < 1e-12);
+/// let same = ArdLengthscales::from_log_lengthscales(scales.log_lengthscales())?;
+/// assert!((same.lengthscale(1)? - 2.0).abs() < 1e-12);
+/// let mut scales = scales.with_bounds(Interval::new(0.1, 10.0)?)?;
+/// let mut theta = [0.0; 2];
+/// scales.get_params(&mut theta)?;
+/// scales.set_params(&[0.0, 3.0_f64.ln()])?; // ℓ = [1, 3]
+/// assert!((scales.lengthscale(1)? - 3.0).abs() < 1e-12);
+/// // An ARD leaf returns its own.
+/// let rbf = RbfArdKernel::new(&[1.0, 3.0])?;
+/// assert!((rbf.lengthscales().lengthscale(1)? - 3.0).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -37,7 +49,9 @@ impl ArdLengthscales {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty or a
-    /// value is not finite and strictly positive.
+    /// value is not finite and strictly positive, or
+    /// [`GprError::InvalidInterval`] if one is not inside
+    /// [`Interval::DEFAULT_POSITIVE`], the bounds new lengthscales start with.
     ///
     /// See the example on [`ArdLengthscales`].
     pub fn new(lengthscales: &[f64]) -> Result<Self, GprError> {
@@ -55,7 +69,9 @@ impl ArdLengthscales {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if the slice is empty, a
-    /// `θ_d` is not finite, or `exp(θ_d)` overflows or underflows to zero.
+    /// `θ_d` is not finite, or `exp(θ_d)` overflows or underflows to zero, or
+    /// [`GprError::InvalidInterval`] if an `ℓ_d` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`ArdLengthscales`].
     pub fn from_log_lengthscales(log_lengthscales: &[f64]) -> Result<Self, GprError> {
@@ -179,7 +195,8 @@ impl ArdLengthscales {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is the wrong
-    /// length, or [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid.
+    /// length, [`GprError::InvalidHyperparameter`] if a `θ_d` is invalid, or
+    /// [`GprError::InvalidInterval`] if a new `ℓ_d` is not inside its bounds.
     ///
     /// See the example on [`ArdLengthscales`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {

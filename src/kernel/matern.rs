@@ -20,7 +20,11 @@ use faer::{MatMut, MatRef};
 /// ```rust
 /// use gprx::kernel::MaternNu;
 ///
-/// assert_eq!(MaternNu::ThreeHalves.value(), 1.5);
+/// let values: Vec<f64> = [MaternNu::Half, MaternNu::ThreeHalves, MaternNu::FiveHalves]
+///     .into_iter()
+///     .map(MaternNu::value)
+///     .collect();
+/// assert_eq!(values, [0.5, 1.5, 2.5]);
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaternNu {
@@ -54,12 +58,45 @@ impl MaternNu {
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::{MaternKernel, MaternNu};
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{MaternKernel, MaternNu, Triangle};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Parameters: `θ = log(ℓ)`; `ν` is fixed, and the bounds are on `ℓ`.
 /// let k = MaternKernel::new(1.5, MaternNu::ThreeHalves)?;
-/// assert!(k.lengthscale() > 0.0);
+/// assert!((k.lengthscale() - 1.5).abs() < 1e-12);
 /// assert_eq!(k.nu(), MaternNu::ThreeHalves);
+/// let same = MaternKernel::from_log_lengthscale(1.5_f64.ln(), MaternNu::ThreeHalves)?;
+/// assert!((same.log_lengthscale() - k.log_lengthscale()).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(0.1, 10.0)?)?;
+/// assert!((k.bounds().lo() - 0.1).abs() < 1e-12);
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[0.0])?; // ℓ = 1
+///
+/// // Squared distances between the points 0, 1, and 2.
+/// let x = [0.0_f64, 1.0, 2.0];
+/// let dist = Mat::from_fn(3, 3, |i, j| (x[i] - x[j]).powi(2));
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(dist.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// // ν = 3/2 at r = 1: (1 + √3) e^(−√3).
+/// let s3 = 3.0_f64.sqrt();
+/// assert!((gram[(1, 0)] - (1.0 + s3) * (-s3).exp()).abs() < 1e-12);
+/// let cross = Mat::from_fn(3, 1, |i, _| (x[i] - 0.5).powi(2));
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(cross.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0; 3];
+/// k.fill_diag(&mut diag);
+///
+/// // ∂K/∂θ and ∂²K/∂θ², then ∂K(x, x')/∂x' from the coordinates.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(dist.as_ref(), d_k.as_mut(), 0, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(dist.as_ref(), d2_k.as_mut(), 0, 0, Triangle::Lower)?;
+/// let points = Mat::from_fn(3, 1, |i, _| x[i]);
+/// let mut d_x = Mat::<f64>::zeros(3, 3);
+/// k.grad_wrt_coord_dim(points.as_ref(), points.as_ref(), d_x.as_mut(), 0)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -75,7 +112,9 @@ impl MaternKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `lengthscale` is not
-    /// finite or not strictly positive.
+    /// finite or not strictly positive, or [`GprError::InvalidInterval`] if
+    /// it is not inside [`Interval::DEFAULT_POSITIVE`], the bounds a new leaf
+    /// starts with.
     ///
     /// See the example on [`MaternKernel`].
     pub fn new(lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
@@ -91,7 +130,9 @@ impl MaternKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
-    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero, or
+    /// [`GprError::InvalidInterval`] if `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`MaternKernel`].
     pub fn from_log_lengthscale(log_lengthscale: f64, nu: MaternNu) -> Result<Self, GprError> {
@@ -173,7 +214,9 @@ impl MaternKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
-    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    /// [`GprError::InvalidHyperparameter`] if the new `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if the new `ℓ` is not inside
+    /// [`Self::bounds`].
     ///
     /// See the example on [`MaternKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -190,8 +233,10 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, not square, or size
-    /// mismatched, or if `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `dist` is not square or `out` is not
+    /// its shape, [`GprError::EmptyInput`] if they are empty,
+    /// [`GprError::NonFiniteInput`] if `dist` holds a value that is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`MaternKernel`].
     pub fn apply<T: KernelScalar>(
@@ -218,8 +263,10 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, size mismatched, or if
-    /// `dist` contains a non-finite value.
+    /// Returns [`GprError::ShapeMismatch`] if `out` is not the shape of `dist`,
+    /// [`GprError::EmptyInput`] if they are empty, [`GprError::NonFiniteInput`] if
+    /// `dist` holds a value that is not finite, or
+    /// [`GprError::NonFiniteKernelValue`] if a kernel value is not finite.
     ///
     /// See the example on [`MaternKernel`].
     pub fn apply_cross<T: KernelScalar>(
@@ -424,8 +471,10 @@ impl MaternKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is `1/2`,
-    /// or the same shape / non-finite errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
+    /// Returns [`GprError::CoordGradientUnsupported`] when `ν` is `1/2`
+    /// (the kernel is not differentiable at `x = x'`), or the same shape and
+    /// non-finite errors as
+    /// [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
     ///
     /// See the example on [`MaternKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(

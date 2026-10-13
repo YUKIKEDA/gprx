@@ -19,11 +19,48 @@ use faer::{MatMut, MatRef};
 /// # Examples
 ///
 /// ```rust
-/// use gprx::kernel::WhiteKernel;
+/// use faer::Mat;
+/// use gprx::Interval;
+/// use gprx::kernel::{Triangle, WhiteKernel};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
+/// // Parameter: `θ = log(σw²)`; the bounds are on `σw²`.
 /// let k = WhiteKernel::new(0.05)?;
-/// assert!(k.variance() > 0.0);
+/// assert!((k.variance() - 0.05).abs() < 1e-12);
+/// let same = WhiteKernel::from_log_variance(k.log_variance())?;
+/// assert!((same.variance() - 0.05).abs() < 1e-12);
+/// let mut k = k.with_bounds(Interval::new(1e-4, 1.0)?)?;
+/// assert!((k.bounds().hi() - 1.0).abs() < 1e-12);
+/// let mut theta = vec![0.0; k.num_params()];
+/// k.get_params(&mut theta)?;
+/// k.set_params(&[0.1_f64.ln()])?; // σw² = 0.1
+///
+/// // `dist` (squared distances) and `x` (coordinates) only give the shape.
+/// let dist = Mat::<f64>::zeros(3, 3);
+/// let x = Mat::from_fn(3, 1, |i, _| i as f64);
+/// let mut gram = Mat::<f64>::zeros(3, 3);
+/// k.apply(dist.as_ref(), gram.as_mut(), Triangle::Full)?;
+/// assert!((gram[(1, 1)] - 0.1).abs() < 1e-12);
+/// assert!(gram[(1, 0)].abs() < 1e-12);
+/// k.apply_points(x.as_ref(), gram.as_mut(), Triangle::Lower)?;
+/// // Train × query is zero.
+/// let xs = Mat::from_fn(1, 1, |_, _| 0.5);
+/// let mut k_cross = Mat::<f64>::zeros(3, 1);
+/// k.apply_cross(Mat::<f64>::zeros(3, 1).as_ref(), k_cross.as_mut())?;
+/// k.apply_cross_points(x.as_ref(), xs.as_ref(), k_cross.as_mut())?;
+/// let mut diag = [0.0; 3];
+/// k.fill_diag(&mut diag);
+///
+/// // ∂K/∂θ and ∂²K/∂θ² are `σw²` on the diagonal, from either view; the
+/// // coordinate derivative is zero.
+/// let mut d_k = Mat::<f64>::zeros(3, 3);
+/// k.grad(dist.as_ref(), d_k.as_mut(), 0, Triangle::Lower)?;
+/// k.grad_points(x.as_ref(), d_k.as_mut(), 0, Triangle::Lower)?;
+/// let mut d2_k = Mat::<f64>::zeros(3, 3);
+/// k.hess(dist.as_ref(), d2_k.as_mut(), 0, 0, Triangle::Lower)?;
+/// k.hess_points(x.as_ref(), d2_k.as_mut(), 0, 0, Triangle::Lower)?;
+/// let mut d_x = Mat::<f64>::zeros(3, 1);
+/// k.grad_wrt_coord_dim(x.as_ref(), xs.as_ref(), d_x.as_mut(), 0)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -38,7 +75,9 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `variance` is not finite
-    /// or not strictly positive.
+    /// or not strictly positive, or [`GprError::InvalidInterval`] if it is
+    /// not inside [`Interval::DEFAULT_POSITIVE`], the bounds a new leaf
+    /// starts with.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn new(variance: f64) -> Result<Self, GprError> {
@@ -53,7 +92,9 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError::InvalidHyperparameter`] if `θ` is not finite, if
-    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero.
+    /// `exp(θ)` overflows, or if `exp(θ)` underflows to zero, or
+    /// [`GprError::InvalidInterval`] if `exp(θ)` is not inside
+    /// [`Interval::DEFAULT_POSITIVE`].
     ///
     /// See the example on [`WhiteKernel`].
     pub fn from_log_variance(log_variance: f64) -> Result<Self, GprError> {
@@ -123,7 +164,9 @@ impl WhiteKernel {
     /// # Errors
     ///
     /// Returns [`GprError::LengthMismatch`] if `params` is not length 1,
-    /// or [`GprError::InvalidHyperparameter`] if the new `θ` is invalid.
+    /// [`GprError::InvalidHyperparameter`] if the new `θ` is invalid, or
+    /// [`GprError::InvalidInterval`] if the new `σw²` is not inside
+    /// [`Self::bounds`].
     ///
     /// See the example on [`WhiteKernel`].
     pub fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
@@ -140,8 +183,8 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty, not square, or size
-    /// mismatched.
+    /// Returns [`GprError::ShapeMismatch`] if `dist` is not square or `out` is not
+    /// its shape, or [`GprError::EmptyInput`] if they are empty.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn apply<T: KernelScalar>(
@@ -158,7 +201,8 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if the matrices are empty or size mismatched.
+    /// Returns [`GprError::ShapeMismatch`] if `out` is not the shape of `dist`, or
+    /// [`GprError::EmptyInput`] if they are empty.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn apply_cross<T: KernelScalar>(
@@ -179,7 +223,8 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if `x` is empty or `out` is not `n×n`.
+    /// Returns [`GprError::EmptyInput`] if `x` has no row or no column, or
+    /// [`GprError::ShapeMismatch`] if `out` is not `n×n`.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn apply_points<T: KernelScalar>(
@@ -208,7 +253,8 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] if a matrix is empty or `out` is the wrong shape.
+    /// Returns [`GprError::EmptyInput`] if `x` or `xs` has no row or no column, or
+    /// [`GprError::ShapeMismatch`] if `out` is not `x.nrows() × xs.nrows()`.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn apply_cross_points<T: KernelScalar>(
@@ -364,7 +410,10 @@ impl WhiteKernel {
     ///
     /// # Errors
     ///
-    /// Same shape errors as [`RbfKernel::grad_wrt_coord_dim`](super::RbfKernel::grad_wrt_coord_dim).
+    /// Returns [`GprError::EmptyInput`] if a view is empty,
+    /// [`GprError::DimensionMismatch`] if `x1` and `x2` have different column
+    /// counts, [`GprError::IndexOutOfRange`] if `dim` is not a column, or
+    /// [`GprError::ShapeMismatch`] if `d_k` is not `x1.nrows() × x2.nrows()`.
     ///
     /// See the example on [`WhiteKernel`].
     pub fn grad_wrt_coord_dim<T: KernelScalar>(
