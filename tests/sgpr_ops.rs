@@ -4,17 +4,20 @@
 //! identity to a batch factor at the same `θ` and `Z`. Each inducing step
 //! compares the same public numerics at the same `θ` and `X` after `m`
 //! changes (incremental, ADR 0005), for coordinate and supplied-distance
-//! models, and the reassembly an insert falls back to. This file uses only
-//! the public API.
+//! models, and the reassembly an inducing change takes instead (an `f32`
+//! storage scalar, a jittered `K_mm`, a pivot below the threshold). This
+//! file uses only the public API.
 
 use std::collections::HashSet;
 
+use gprx::kernel::KernelScalar;
 use gprx::kernel::{
     DistanceKernel, KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, ScalarDistance,
     WhiteKernel,
 };
 use gprx::{
-    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSgpr, PointId, Sgpr,
+    DoublePrecision, Fixed, FreeInducing, GaussianLikelihood, GpScalar, GprError, InducingId,
+    MixedPrecision, OnlineSgpr, PointId, Sgpr, SinglePrecision,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
@@ -636,8 +639,9 @@ fn delete_last_inducing_is_insufficient_data() {
 
 /// An inducing point equal to one the model holds makes the bordered pivot
 /// of `K_mm` zero, so the insert assembles the VFE system again (with the
-/// jitter the policy gives the singular `K_mm`). The next insert borders
-/// that jittered factor with the same offset.
+/// jitter the policy gives the singular `K_mm`). The next insert finds the
+/// factor jittered and assembles again too, so `j` is chosen as the factor
+/// of those inducing points chooses it.
 #[test]
 fn insert_inducing_next_to_an_inducing_point_reassembles() {
     let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
@@ -663,11 +667,6 @@ fn insert_inducing_next_to_an_inducing_point_reassembles() {
         "duplicate",
         TOL,
     );
-    // The factor of the four points takes the same `j = 1e-8`. `K_mm + j I`
-    // has a condition number near `1e8`, so rounding alone could reach
-    // `1e8 · ε ≈ 2e-8`; measured, the bordered insert is within `5e-16`.
-    // Bordering with `k(z, z)` instead of `k(z, z) + j` is off by `1e-8`
-    // (NLML) and `3e-10` (mean), which `INDUCING_TOL` catches.
     online
         .insert_inducing(&[1.5])
         .expect("insert after duplicate");
@@ -682,7 +681,7 @@ fn insert_inducing_next_to_an_inducing_point_reassembles() {
         1,
         &deleted,
         "after duplicate",
-        INDUCING_TOL,
+        TOL,
     );
 }
 
@@ -889,4 +888,251 @@ fn distance_insert_inducing_with_a_repaired_column_matches_a_reassembly() {
         reassembled.neg_log_marginal_likelihood().expect("nlml"),
         INDUCING_TOL,
     );
+}
+
+/// Training points of the reassembly cases: `x = 0.3 i`, `i = 0..12`.
+const LINE_N: usize = 12;
+/// Queries of the reassembly cases.
+const LINE_QUERY: [f64; 4] = [0.4, 1.3, 2.45, 3.0];
+
+fn line_x() -> Vec<f64> {
+    (0..LINE_N).map(|i| 0.3 * i as f64).collect()
+}
+
+fn line_y() -> Vec<f64> {
+    line_x()
+        .iter()
+        .map(|&x| (1.3 * x).sin() + 0.1 * x)
+        .collect()
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_rbf() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_likelihood() -> GaussianLikelihood {
+    GaussianLikelihood::new(0.1).expect("noise")
+}
+
+/// [`OnlineSgpr`] at precision `P` from a factor of the line data at the
+/// 1-D inducing points `z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_online<P: GpScalar>(z: &[f64]) -> OnlineSgpr<Fixed, P> {
+    Sgpr::new(line_rbf(), line_likelihood())
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&line_x(), LINE_N, 1, &line_y(), z, z.len())
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online()
+}
+
+/// The largest relative difference ([`common::rel_err`]) of the mean and
+/// the variance at [`LINE_QUERY`] and of the NLML between `online` and a
+/// factor of the line data at the same precision and the inducing points
+/// `z`, after checking that `online` holds `z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_err_vs_factor<P: GpScalar>(online: &OnlineSgpr<Fixed, P>, z: &[f64]) -> f64 {
+    assert_slice_close(online.z(), z, TOL);
+    let full = line_online::<P>(z);
+    let q = LINE_QUERY.len();
+    let got = online.predict(&LINE_QUERY, q, 1).expect("online predict");
+    let want = full.predict(&LINE_QUERY, q, 1).expect("factor predict");
+    let nlml = common::rel_err(
+        online.neg_log_marginal_likelihood().expect("online nlml"),
+        full.neg_log_marginal_likelihood().expect("factor nlml"),
+    );
+    got.mean
+        .iter()
+        .zip(&want.mean)
+        .chain(got.variance.iter().zip(&want.variance))
+        .map(|(a, b)| common::rel_err(a.to_f64(), b.to_f64()))
+        .fold(nlml, f64::max)
+}
+
+/// Relative tolerance of an `f32`-storage model against a factor of the
+/// same precision: what `tests/distance_persist.rs` allows an online
+/// `SinglePrecision` / `MixedPrecision` model factored again on load.
+const F32_FACTOR_TOL: f64 = 1e-5;
+
+/// One inducing step of [`f32_storage_inducing_ops_match_factor`]: an
+/// insert at these coordinates, or a delete at this index.
+enum Step {
+    Insert(f64),
+    Delete(usize),
+}
+
+const F32_STEPS: [Step; 18] = [
+    Step::Insert(1.5),
+    Step::Insert(3.2),
+    Step::Insert(0.1),
+    Step::Insert(1.0),
+    Step::Insert(2.0),
+    Step::Delete(0),
+    Step::Insert(2.9),
+    Step::Insert(0.6),
+    Step::Delete(3),
+    Step::Insert(1.8),
+    Step::Insert(2.4),
+    Step::Delete(6),
+    Step::Insert(0.3),
+    Step::Insert(3.0),
+    Step::Insert(1.25),
+    Step::Delete(1),
+    Step::Insert(2.15),
+    Step::Delete(0),
+];
+
+/// Runs [`F32_STEPS`] from the inducing points `[0.5, 2.5]`, checking
+/// [`line_err_vs_factor`] against [`F32_FACTOR_TOL`] after each step.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_f32_inducing_steps<P: GpScalar>(label: &str) {
+    let mut z = vec![0.5, 2.5];
+    let mut online = line_online::<P>(&z);
+    for (step, op) in F32_STEPS.iter().enumerate() {
+        match *op {
+            Step::Insert(at) => {
+                online.insert_inducing(&[at]).expect("insert inducing");
+                z.push(at);
+            }
+            Step::Delete(index) => {
+                online
+                    .delete_inducing(online.inducing_ids()[index])
+                    .expect("delete inducing");
+                z.remove(index);
+            }
+        }
+        let err = line_err_vs_factor(&online, &z);
+        assert!(
+            err <= F32_FACTOR_TOL,
+            "{label} step={step}: rel_err={err} > {F32_FACTOR_TOL}"
+        );
+    }
+}
+
+/// An `f32` storage scalar assembles the VFE system again on every
+/// inducing change, so a sequence of inserts and deletes keeps the
+/// accuracy of a fresh factor of the same precision. Updated in `f32`, the
+/// same steps were up to `5.8e-5` (single) and `4.8e-5` (mixed) off.
+#[test]
+fn f32_storage_inducing_ops_match_factor() {
+    run_f32_inducing_steps::<SinglePrecision>("single");
+    run_f32_inducing_steps::<MixedPrecision>("mixed");
+}
+
+/// A duplicate inducing point makes the factor take a jitter offset
+/// `j = 1e-8`. Deleting the duplicate again assembles the system, which
+/// finds `j = 0` as the factor of the remaining points does, instead of
+/// keeping the stale `j` (which was `2e-8` off). A delete of another point
+/// while `j > 0` takes the offset the factor of the points that stay takes
+/// as well.
+#[test]
+fn delete_inducing_with_a_jittered_factor_matches_factor() {
+    let mut online = line_online::<DoublePrecision>(&[0.5, 2.5]);
+    let duplicate = online.insert_inducing(&[0.5]).expect("insert duplicate");
+    let err = line_err_vs_factor(&online, &[0.5, 2.5, 0.5]);
+    assert!(err <= TOL, "duplicate: rel_err={err}");
+    let mut other = online.clone();
+    online.delete_inducing(duplicate).expect("delete duplicate");
+    let err_dup = line_err_vs_factor(&online, &[0.5, 2.5]);
+    assert!(err_dup <= TOL, "delete duplicate: rel_err={err_dup}");
+    other
+        .delete_inducing(other.inducing_ids()[1])
+        .expect("delete 2.5");
+    let err_other = line_err_vs_factor(&other, &[0.5, 0.5]);
+    assert!(err_other <= TOL, "delete 2.5: rel_err={err_other}");
+}
+
+/// A near duplicate leaves `K_mm` with a pivot `ℓ² ≈ 1e-10` that the factor
+/// takes without jitter; an exact duplicate of another point then leaves
+/// `ℓ²` a rounding residue, which the relative pivot threshold sends to an
+/// assembly. Dividing by that residue was `0.56` off.
+#[test]
+fn insert_inducing_at_a_rounding_pivot_matches_factor() {
+    let z = [0.5, 0.5 + 1e-5, 2.5];
+    let mut online = line_online::<DoublePrecision>(&z);
+    online.insert_inducing(&[2.5]).expect("insert duplicate");
+    let err = line_err_vs_factor(&online, &[0.5, 0.5 + 1e-5, 2.5, 2.5]);
+    assert!(err <= TOL, "rel_err={err}");
+}
+
+/// A new inducing point `1e-4` from one the model holds has a positive
+/// `ℓ² ≈ 1e-8` that the factor takes without jitter, below the relative
+/// threshold of `1e-5`: the insert assembles the system again instead of
+/// dividing by a pivot with a relative rounding error near `ε / ℓ²` (the
+/// update was `8.7e-11` off).
+#[test]
+fn insert_inducing_below_the_pivot_threshold_matches_factor() {
+    let mut online = line_online::<DoublePrecision>(&[0.5, 2.5]);
+    online.insert_inducing(&[2.5 + 1e-4]).expect("insert");
+    let err = line_err_vs_factor(&online, &[0.5, 2.5, 2.5 + 1e-4]);
+    assert!(err <= TOL, "rel_err={err}");
+}
+
+/// Deletes down to one inducing point, each by the incremental update.
+#[test]
+fn delete_inducing_down_to_one_matches_factor() {
+    let mut z = vec![0.5, 1.5, 2.5];
+    let mut online = line_online::<DoublePrecision>(&z);
+    while z.len() > 1 {
+        online
+            .delete_inducing(online.inducing_ids()[0])
+            .expect("delete inducing");
+        z.remove(0);
+        let err = line_err_vs_factor(&online, &z);
+        assert!(err <= INDUCING_TOL, "m={}: rel_err={err}", z.len());
+    }
+    assert_eq!(online.m(), 1);
+}
+
+/// A delete at the first, a middle, and the last index of four inducing
+/// points, each from the same model.
+#[test]
+fn delete_inducing_at_first_middle_last_matches_factor() {
+    let z = [0.25, 1.25, 2.25, 3.25];
+    let start = line_online::<DoublePrecision>(&z);
+    for index in [0, 2, 3] {
+        let mut online = start.clone();
+        online
+            .delete_inducing(online.inducing_ids()[index])
+            .expect("delete inducing");
+        let mut kept = z.to_vec();
+        kept.remove(index);
+        let err = line_err_vs_factor(&online, &kept);
+        assert!(err <= INDUCING_TOL, "index={index}: rel_err={err}");
+    }
+}
+
+/// [`delete_inducing_at_first_middle_last_matches_factor`] on supplied
+/// distances.
+#[test]
+fn distance_delete_inducing_at_first_middle_last_matches_factor() {
+    let image = ScalarDistance::new();
+    let kernel = distance_rbf(&image);
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let points = dist_points();
+    let inducing = [0, 4, 8, 12];
+    let start = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq_block(&points, &coords_of(&inducing)))],
+            DIST_N,
+            &dist_y(),
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    for index in [0, 2, 3] {
+        let mut online = start.clone();
+        online
+            .delete_inducing(online.inducing_ids()[index])
+            .expect("delete inducing");
+        let mut kept = inducing.to_vec();
+        kept.remove(index);
+        let ctx = format!("index={index}");
+        assert_distance_matches_factor(&online, &kernel, &image, &kept, &ctx);
+    }
 }
