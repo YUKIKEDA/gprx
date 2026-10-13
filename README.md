@@ -4,11 +4,11 @@ English | [日本語](README.ja.md)
 
 Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load.
 
-`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.1.0** (tag `v0.1.0`) is the default-feature public API. This README follows `main`, which is unreleased: supplied distances (`ScalarDistance`, `ArdDistance`, and their save/load) arrive with 0.2.0. The MSRV of `main` is 1.88 (1.85 at 0.1.0). A 0.x minor may break that API. `internals` (`bench-internals` and `insert-stages`) is outside that contract.
+`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.2.0** (tag `v0.2.0`) is the default-feature public API. The MSRV is 1.88. A 0.x minor may break that API: what 0.2.0 changed from 0.1.0, and how to move, is in the [changelog](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md). `internals` (`bench-internals` and `insert-stages`) is outside that contract.
 
 ```toml
 [dependencies]
-gprx = "0.1"
+gprx = "0.2"
 ```
 
 ## Example
