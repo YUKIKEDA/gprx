@@ -282,7 +282,8 @@ impl LoadedGpr {
     /// directory, JSON, tensors, or registry lookup is invalid, and
     /// [`GprError::NonFiniteInput`] when the saved maps send the training
     /// data past `f64`. Factorization errors from a file written without `L`
-    /// use the same variants as [`crate::Gpr<Fixed>::factor`].
+    /// use the same variants as the `factor` of a coordinate [`crate::Gpr`]
+    /// with [`Fixed`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -317,7 +318,7 @@ impl LoadedGpr {
     ///
     /// # Errors
     ///
-    /// Same as [`crate::FittedGpr::predict`].
+    /// Same as the `predict` of a coordinate [`crate::FittedGpr`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn predict(
@@ -333,7 +334,7 @@ impl LoadedGpr {
     ///
     /// # Errors
     ///
-    /// Same as [`crate::FittedGpr::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`crate::FittedGpr`].
     ///
     /// See the example on [`LoadedGpr`].
     pub fn predict_with(

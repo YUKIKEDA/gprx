@@ -34,7 +34,7 @@ use super::{PersistRegistry, Variants, load_precision, read_exact_config, widen}
 /// [`crate::kernel::ArdDistance`] from before the save names none of them.
 /// Take the slots from [`Self::slots`] (in the order of
 /// [`DistanceKernel::slots`] of the saved kernel) and bind each query's
-/// sources to them. [`Self::predict`], [`Self::predict_with`], [`Self::n`],
+/// sources to them. `predict`, `predict_with` (of either marker), [`Self::n`],
 /// [`Self::is_online`], [`Self::slots`], and [`Self::to_kernel`] work on
 /// any variant; match a variant for the typed model.
 ///
@@ -315,7 +315,7 @@ impl LoadedDistanceGpr<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -675,7 +675,7 @@ impl LoadedDistanceSgpr<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -917,8 +917,9 @@ impl LoadedDistanceSvgp<WithPoints> {
     }
 
     /// Returns the predictive mean and observation variance at the `q`
-    /// queries `xs` (column-major `q × n_cols`); `sources` as
-    /// [`LoadedDistanceSgpr::predict`] takes them.
+    /// queries `xs` (column-major `q × n_cols`); `sources` as the `predict`
+    /// of a `LoadedDistanceSgpr<WithPoints>` ([`LoadedDistanceSgpr`]) takes
+    /// them.
     ///
     /// # Errors
     ///
@@ -935,7 +936,7 @@ impl LoadedDistanceSvgp<WithPoints> {
         self.predict_with(sources, xs, q, n_cols, PredictOptions::default())
     }
 
-    /// Returns the predictive mean and variance of [`Self::predict`], with the variance kind of `options`.
+    /// Returns the predictive mean and variance at the queries `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///

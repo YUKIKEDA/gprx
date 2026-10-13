@@ -406,7 +406,7 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
     Ok((q_mean, q_l))
 }
 
-/// Represents the prediction-only sparse GPR loaded from a persist directory written by [`FittedSgpr::save`] or [`OnlineSgpr::save`].
+/// Represents the prediction-only sparse GPR loaded from a persist directory written by the `save` of a coordinate [`FittedSgpr`] or [`OnlineSgpr`].
 ///
 /// One variant per precision and model, as [`super::LoadedGpr`]. The kernel,
 /// likelihood, kernel `exp`, `K_mm` jitter policy, and transforms are read
@@ -531,7 +531,7 @@ pub(super) fn load_sgpr_as<P: GpScalar, K: ModelKernel, L>(
 }
 
 impl LoadedSgpr {
-    /// Reads `dir/config.json` and `dir/model.safetensors` written by [`FittedSgpr::save`] (a [`FittedSgpr`] variant) or [`OnlineSgpr::save`] (an [`OnlineSgpr`] variant with the saved identifiers).
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the `save` of a coordinate [`FittedSgpr`] (loads a [`FittedSgpr`] variant) or [`OnlineSgpr`] (loads an [`OnlineSgpr`] variant with the saved identifiers).
     ///
     /// # Errors
     ///
@@ -540,7 +540,8 @@ impl LoadedSgpr {
     /// directory holds another model, or its JSON, tensors, or registry
     /// lookup is invalid, and [`GprError::NonFiniteInput`] when the saved
     /// maps send the training data past `f64`. Factorization errors use the
-    /// same variants as [`crate::Sgpr<Fixed>::factor`].
+    /// same variants as the `factor` of a coordinate [`crate::Sgpr`] with
+    /// [`Fixed`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn load(dir: impl AsRef<Path>, registry: &PersistRegistry) -> Result<Self, GprError> {
@@ -589,7 +590,7 @@ impl LoadedSgpr {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSgpr::predict`].
+    /// Same as the `predict` of a coordinate [`FittedSgpr`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn predict(
@@ -605,7 +606,7 @@ impl LoadedSgpr {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSgpr::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`FittedSgpr`].
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn predict_with(
@@ -633,7 +634,7 @@ impl LoadedSgpr {
     }
 }
 
-/// Represents the prediction-only SVGP loaded from a persist directory written by [`FittedSvgp::save`].
+/// Represents the prediction-only SVGP loaded from a persist directory written by the `save` of a coordinate [`FittedSvgp`].
 ///
 /// One variant per precision, as [`super::LoadedGpr`]. `K_mm` and `A` are
 /// factored again at the saved `θ` and `Z`, with the saved `q(u)`.
@@ -715,7 +716,7 @@ pub(super) fn load_svgp_as<P: GpScalar, K: ModelKernel, L>(
 }
 
 impl LoadedSvgp {
-    /// Reads `dir/config.json` and `dir/model.safetensors` written by [`FittedSvgp::save`].
+    /// Reads `dir/config.json` and `dir/model.safetensors` written by the `save` of a coordinate [`FittedSvgp`].
     ///
     /// # Errors
     ///
@@ -757,7 +758,7 @@ impl LoadedSvgp {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSvgp::predict`].
+    /// Same as the `predict` of a coordinate [`FittedSvgp`].
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn predict(
@@ -773,7 +774,7 @@ impl LoadedSvgp {
     ///
     /// # Errors
     ///
-    /// Same as [`FittedSvgp::predict_with`].
+    /// Same as the `predict_with` of a coordinate [`FittedSvgp`].
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn predict_with(
