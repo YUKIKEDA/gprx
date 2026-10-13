@@ -13,7 +13,7 @@ Every model uses an RBF kernel with one length per input dimension, and Gaussian
 
 There are three scores. RMSE is the prediction error. NLPD is the log loss of the predictive distribution. The third is the fraction of test points that fall inside the 95% predictive interval. Units are the original units of `y`, written as the mean and standard error over the data splits.
 
-Before the comparison, every library is evaluated at one fixed set of hyperparameters, with no training (`just perf-real-check`). The negative log marginal likelihood, RMSE, and NLPD agree to 1e-6. A difference after training is a difference in the optimizer, not in the objective. The same check on the inducing-point model (`just perf-real-check yacht 0 sgpr`) finds the lower bound of the marginal likelihood equal in gprx, GPyTorch, and GPy. GPyTorch alone computes the test variance with its own low-rank formula, so at the same parameters and inducing points its RMSE and NLPD differ from the other two by less than one percent.
+Before the comparison, every library is evaluated at one fixed set of hyperparameters, with no training (`just perf-real-check`). The negative log marginal likelihood, RMSE, and NLPD agree to 1e-6. A difference after training is a difference in the optimizer, not in the objective. The same check on the inducing-point model, which `just perf-real-full` also runs on yacht and which prints its numbers without committing them, finds the lower bound of the marginal likelihood equal in gprx, GPyTorch, and GPy. GPyTorch alone computes the test variance with its own low-rank formula, so at the same parameters and inducing points its RMSE and NLPD differ from the other two by less than one percent.
 
 ### Optimizers matter
 
@@ -309,13 +309,13 @@ These two figures use Snelson's 200 training points. Measured on Intel64 Family 
 
 **Snelson, sparse GP**
 
-Eight inducing inputs, from k-means (seed 0) on the standardized inputs, then held fixed. The optimizer is the same matched L-BFGS as the tables, at most 100 iterations. One panel per library that has a sparse GP: gprx `Sgpr`, GPyTorch, and GPy. The line is the predictive mean, the band is the 95% interval, and the dots are the training data. The vertical ticks are those inducing inputs, the same in every panel. The curve is drawn on Snelson's test inputs. scikit-learn, libgp, and friedrich have no sparse GP, so they are not in the figure. The combined likelihood-and-gradient counts were 64 for gprx, 45 for GPyTorch, and 46 for GPy.
+Eight inducing inputs, from k-means (seed 0) on the standardized inputs, then held fixed. The optimizer is the same matched L-BFGS as the tables, at most 100 iterations. One panel per library that has a sparse GP: gprx `Sgpr`, GPyTorch, and GPy. The line is the predictive mean, the band is the 95% interval, and the dots are the training data. The vertical ticks are those inducing inputs, the same in every panel. The curve is drawn on Snelson's test inputs. scikit-learn, libgp, and friedrich have no sparse GP, so they are not in the figure. `just perf-visual` prints the combined likelihood-and-gradient counts when it draws this figure; they were 64 for gprx, 45 for GPyTorch, and 46 for GPy, and they are not committed.
 
 ![Snelson, sparse GP](bench/curve_snelson_sgpr.svg)
 
 **Snelson, adding points**
 
-The same points, added from the smallest input to the largest. The lengthscale is 1, the signal variance is 1, and the noise variance is 0.1, on standardized inputs and targets. Nothing is trained. Each frame is the posterior with the points added so far. The animation shows 24 of those posteriors, drawn on 160 evenly spaced inputs from Snelson's test inputs. gprx uses `OnlineGpr::insert`, libgp uses `add_pattern`, and GPyTorch uses `get_fantasy_model`. On the last frame, the largest absolute gap among the three predictive means is 9.4e-14 on the standardized targets. GPy and scikit-learn have no operation that adds a training point. friedrich is not in the figure; its kernel is not this comparison's RBF.
+The same points, added from the smallest input to the largest. The lengthscale is 1, the signal variance is 1, and the noise variance is 0.1, on standardized inputs and targets. Nothing is trained. Each frame is the posterior with the points added so far. The animation shows 24 of those posteriors, drawn on 160 evenly spaced inputs from Snelson's test inputs. gprx uses `OnlineGpr::insert`, libgp uses `add_pattern`, and GPyTorch uses `get_fantasy_model`. On the last frame, the largest absolute gap among the three predictive means is 9.4e-14 on the standardized targets; `just perf-visual` prints it when it draws the animation, and it is not committed. GPy and scikit-learn have no operation that adds a training point. friedrich is not in the figure; its kernel is not this comparison's RBF.
 
 ![Snelson, adding points](bench/online_snelson.gif)
 

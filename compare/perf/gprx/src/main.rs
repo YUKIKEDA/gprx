@@ -14,6 +14,7 @@
 
 mod case;
 mod exact;
+#[cfg(feature = "fit-counts")]
 mod fit;
 mod online;
 mod rss;
@@ -97,9 +98,24 @@ fn sparse_online(path: &str, flags: &[String]) -> Result<ExitCode, String> {
     Ok(print_row(&row))
 }
 
+#[cfg(feature = "fit-counts")]
 fn fit(path: &str) -> Result<ExitCode, String> {
     let case: RealCase = read_case(path)?;
     let row = fit::run(&case).unwrap_or_else(|e| FitRow::na("gprx", &case.name, &case.protocol, e));
+    Ok(print_row(&row))
+}
+
+/// Without `fit-counts` the `fit` mode is not built: the other modes must not
+/// need `gprx::internals`.
+#[cfg(not(feature = "fit-counts"))]
+fn fit(path: &str) -> Result<ExitCode, String> {
+    let case: RealCase = read_case(path)?;
+    let row = FitRow::na(
+        "gprx",
+        &case.name,
+        &case.protocol,
+        "build with --features fit-counts".into(),
+    );
     Ok(print_row(&row))
 }
 

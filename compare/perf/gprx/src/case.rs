@@ -195,6 +195,8 @@ pub struct FrameDump {
 /// B1-1 real-dataset cell. `x` / `xs` are column-major and standardized, `y`
 /// is standardized with the training statistics, `ys` is in original units.
 #[derive(Debug, Deserialize)]
+// Without `fit-counts` only `name` and `protocol` are read (the `na` row).
+#[cfg_attr(not(feature = "fit-counts"), allow(dead_code))]
 pub struct RealCase {
     pub name: String,
     pub n_rows: usize,

@@ -2,7 +2,7 @@
 
 # gprx
 
-Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組み、オンライン更新とディレクトリへの保存も行う。
+Rust のガウス過程回帰。Exact、スパース（VFE）、SVGP を含む。`Gpr` は未学習のトレーナー。`Gpr::fit` はそれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化して `FittedGpr` を返す。同じ部品で `Sgpr` と `Svgp` を組む。Exact と SGPR のモデルはオンラインでも更新でき、どのモデルもディレクトリに保存して読み込める。カーネルは座標を読むほか、呼び出し側が与えた二乗距離も読める。
 
 `X` は列優先である。点は `n` 個、特徴は `d` 個で、特徴 0 の全行のあとに特徴 1 が続く。`fit` はトレーナーを消費する。観測ノイズは `GaussianLikelihood` に置く。**0.2.0**（タグ `v0.2.0`）は既定フィーチャの公開 API である。MSRV は 1.88。0.x はマイナー番号で、公開 API を壊してよい。0.1.0 から 0.2.0 で変わったことと移行の方法は、[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にある。`internals`（`bench-internals` と `insert-stages`）は、その契約の外である。
 
@@ -32,30 +32,37 @@ fn main() -> Result<(), gprx::GprError> {
 
 ## 使用方法
 
-`fit` と `factor` の戻り値は `Result<Fitted, (Trainer, GprError)>`。`?` を使うとトレーナーは捨てられ、`GprError` だけが残る（`From<(Trainer, GprError)> for GprError`）。トレーナーも残すなら、`.map_err(|(_, e)| e)` でエラーだけ取り出す。同じトレーナーでやり直すなら、`Err((trainer, err))` を照合する。
+`fit` と `factor` の戻り値は `Result<Fitted, (Trainer, GprError)>`。`Gpr` では `?` を使うとトレーナーは捨てられ、`GprError` だけが残る（`From<(Gpr<O, P, K>, GprError)> for GprError`）。`Sgpr` と `Svgp` にはこの変換が無いので、下の例のように `.map_err(|(_, e)| e)?` と書く。同じトレーナーでやり直すなら、`Err((trainer, err))` を照合する。
+
+モデルのメソッドは値に対して呼ぶ（`fitted.predict(..)`）。`FittedGpr::predict(&fitted, ..)` のように型パラメータを書かずに型のパスから呼ぶと、コンパイルできない（`E0034`）。座標のモデルと距離のモデルが、同じ名前のメソッドを持つためである。既定の型パラメータで呼ぶなら `<FittedGpr>::predict(&fitted, ..)` と書く。
 
 `X` と誘導点 `Z` は列優先の `f64` である。特徴 0 の全行、次に特徴 1。`n_rows` が点数、`n_cols` が特徴数。`y` の長さは `n_rows`。空、長さが `n_rows * n_cols` でない、`NaN` か `Inf` は `GprError`。
 
 `n_jobs` は scikit-learn のスレッド数のノブで、gprx には無い。距離の計算はプロセス全体の Rayon プールを使い、そのプールの大きさがスレッド数になる。プロセス開始前の `RAYON_NUM_THREADS` か、最初の `fit` か `predict` の前に呼ぶ `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` で決まる。プールの初期化は一度だけ。ワーカーが 1 つなら、計算は逐次になる。
 
-学習のコレスキーと、`W` の複数右辺は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散は三角行列 `L` への代入で、その並列度はさらに `n · m / 16384` と `m / 12` で頭打ちにする。カーネルを埋める処理は、プール全体を使う。
+学習のコレスキー分解と、勾配に要る `n` 個の右辺の求解は、線形代数側の並列度を `min(プール, n / 64)` で頭打ちにする。予測と共分散は三角行列 `L` への代入で、その並列度はさらに `n · m / 16384` と `m / 12` で頭打ちにする。カーネルを埋める処理は、プール全体を使う。
 
 `gprx::internals`（`bench-internals`、`insert-stages`）はセマンティックバージョニングの対象外である。直接依存してはならない。
 
 ### 全学習点: `Gpr`、`FittedGpr`、`OnlineGpr`
 
-`Gpr::new(kernel, likelihood)` は `Gpr<Lbfgs, DoublePrecision>`。`fit(x, n_rows, n_cols, y)` はそれを消費し、負の対数周辺尤度を最適化して `FittedGpr` を返す。
+`KernelSpec` を渡した `Gpr::new(kernel, likelihood)` は `Gpr<Lbfgs, DoublePrecision, KernelSpec>`。`fit(x, n_rows, n_cols, y)` はそれを消費し、負の対数周辺尤度を最適化して、同じ型パラメータの `FittedGpr` を返す。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Fixed, GaussianLikelihood, Gpr, PredictOptions, Prediction, VarianceKind};
+use gprx::{
+    DoublePrecision, Fixed, FittedGpr, GaussianLikelihood, Gpr, Lbfgs, PredictOptions, Prediction,
+    VarianceKind,
+};
 
 fn main() -> Result<(), gprx::GprError> {
-    let fitted = Gpr::new(
+    let trainer: Gpr<Lbfgs, DoublePrecision, KernelSpec> = Gpr::new(
         KernelSpec::from(RbfKernel::new(1.0)?),
         GaussianLikelihood::new(0.1)?,
-    )
-    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    );
+    let fitted: FittedGpr = trainer.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    // The same call by path, with the type's defaults.
+    let _ = <FittedGpr>::predict(&fitted, &[0.5], 1, 1)?;
 
     let pred = fitted.predict(&[0.5], 1, 1)?;
     let latent = fitted.predict_with(
@@ -71,6 +78,7 @@ fn main() -> Result<(), gprx::GprError> {
     let mut fitted = fitted;
     let mut reused = Prediction::default();
     fitted.predict_into(&[0.5], 1, 1, &mut reused)?;
+    fitted.predict_with_into(&[0.5], 1, 1, PredictOptions::default(), &mut reused)?;
 
     let frozen = fitted
         .into_trainer()
@@ -91,7 +99,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
+use gprx::{GaussianLikelihood, Gpr, PredictOptions, PredictiveCovariance, VarianceKind};
 
 fn main() -> Result<(), gprx::GprError> {
     let mut fitted = Gpr::new(
@@ -99,7 +107,7 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+    let cov: PredictiveCovariance = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
     let cov_latent = fitted.predict_covariance_with(
         &[0.25, 0.75],
         2,
@@ -141,7 +149,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr};
+use gprx::{GaussianLikelihood, Gpr, OnlineGpr, PointId};
 
 fn main() -> Result<(), gprx::GprError> {
     let fitted = Gpr::new(
@@ -149,8 +157,8 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let mut online = fitted.into_online()?;
-    let id = online.insert(&[0.5], 0.25)?;
+    let mut online: OnlineGpr = fitted.into_online()?;
+    let id: PointId = online.insert(&[0.5], 0.25)?;
     assert!(online.point_ids().contains(&id));
     let _ = online.alpha()?;
     online.delete(id)?;
@@ -170,7 +178,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `with_precision::<P>()` | `DoublePrecision`（既定）、`SinglePrecision`、`MixedPrecision`。 |
 | `with_math(KernelExp::FastApprox)` | カーネルの `exp` を多項式にする。既定は `KernelExp::Accurate`。 |
 | `with_input_transform(map)` | 既定は恒等。 |
-| `with_target_transform(map)` | 既定は恒等。平均が零なら `StandardizeTarget::new()`。 |
+| `with_target_transform(map)` | 既定は恒等。事前分布の平均は零なので、`y` の中心が零から離れているなら `StandardizeTarget::new()`。 |
 | `with_jitter_policy(policy)` | 既定は `JitterPolicy::fixed(0.0)`。 |
 | `with_prefer_speed` | `DistanceCachePolicy::Cached` と `CholeskyBuffer::Retain`（既定）。両方を設定する。 |
 | `with_prefer_memory` | `DistanceCachePolicy::Uncached` と `CholeskyBuffer::Reuse`。両方を設定する。 |
@@ -182,7 +190,10 @@ fn main() -> Result<(), gprx::GprError> {
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp, SinglePrecision};
+use gprx::{
+    CholeskyBuffer, DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp,
+    Prediction, SinglePrecision,
+};
 
 fn main() -> Result<(), gprx::GprError> {
     let gpr = Gpr::new(
@@ -197,18 +208,25 @@ fn main() -> Result<(), gprx::GprError> {
     .with_prefer_memory()
     .with_prefer_speed();
     assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
-    let _ = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Retain);
+    let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+    // A single-precision model predicts in `f32`.
+    let pred: Prediction<f32> = fitted.predict(&[0.5], 1, 1)?;
+    let _ = pred.mean[0];
     Ok(())
 }
 ```
 
 ### 誘導点: `Sgpr`、`FittedSgpr`、`OnlineSgpr`
 
-`Sgpr::new` は `Sgpr<Lbfgs, FixedInducing, DoublePrecision>`。誘導点は渡した位置のまま。`with_inducing(FreeInducing)` は `Z` も探索する。
+`KernelSpec` を渡した `Sgpr::new` は `Sgpr<Lbfgs, FixedInducing, DoublePrecision, KernelSpec>`。誘導点は渡した位置のまま。`with_inducing(FreeInducing)` は `Z` も探索する。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Fixed, FreeInducing, GaussianLikelihood, Sgpr};
+use gprx::{
+    Fixed, FittedSgpr, FixedInducing, FreeInducing, GaussianLikelihood, InducingId, OnlineSgpr,
+    Sgpr,
+};
 
 fn main() -> Result<(), gprx::GprError> {
     let x = &[0.0, 1.0, 2.0, 3.0];
@@ -217,7 +235,8 @@ fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     let likelihood = GaussianLikelihood::new(0.1)?;
 
-    let fitted = Sgpr::new(kernel.clone(), likelihood.clone())
+    let fitted: FittedSgpr = Sgpr::new(kernel.clone(), likelihood.clone())
+        .with_inducing(FixedInducing)
         .fit(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
     let _moved = Sgpr::new(kernel.clone(), likelihood.clone())
@@ -230,6 +249,15 @@ fn main() -> Result<(), gprx::GprError> {
         .map_err(|(_, e)| e)?;
     assert_eq!(fitted.neg_log_marginal_likelihood()?.is_finite(), true);
     let _ = frozen.m();
+
+    // Online: add a point and an inducing point, then return to a fitted model.
+    let mut online: OnlineSgpr = fitted.into_online();
+    let point = online.insert(&[1.5], 0.75)?;
+    let inducing: InducingId = online.insert_inducing(&[1.5])?;
+    online.delete_inducing(inducing)?;
+    online.delete(point)?;
+    let back = online.into_fitted();
+    assert_eq!(back.m(), 2);
     Ok(())
 }
 ```
@@ -246,7 +274,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Adam, GaussianLikelihood, Svgp};
+use gprx::{Adam, FittedSvgp, GaussianLikelihood, Svgp};
 
 fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
@@ -254,7 +282,7 @@ fn main() -> Result<(), gprx::GprError> {
     let x = &[0.0, 1.0, 2.0, 3.0];
     let y = &[0.0, 1.0, 0.5, 0.25];
     let z = &[0.5, 2.5];
-    let factored = Svgp::new(kernel.clone(), likelihood.clone())
+    let factored: FittedSvgp = Svgp::new(kernel.clone(), likelihood.clone())
         .factor(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
     let trained = Svgp::new(kernel, likelihood)
@@ -339,11 +367,11 @@ fn main() -> Result<(), gprx::GprError> {
 
 ARD の `lengthscale(dim)` は、1 つの `ℓ_d` を返す。`log_lengthscales` は保存されたベクトル。`lengthscales()` は `ArdLengthscales` を返す。そのメソッドは `new`、`from_log_lengthscales`、`with_bounds`、`lengthscale(dim)`、`log_lengthscales`、`num_params`、`get_params`、`set_params`。ARD の `with_bounds` は、すべての `ℓ_d` に同じ区間を 1 つ渡す。有理二次 ARD の `with_bounds` は、長さ尺度の区間と `α` の区間を取る。
 
-カーネルの葉と `CompiledKernel` は、`apply`、`apply_cross`、`fill_diag`、`fill_diag_points`、`grad`、`hess` で評価する。`fill_diag_points` は、座標から対角 `k(x, x)` を書く。線形のカーネルの葉の対角には、この呼び出しが要る。カーネルの葉によっては `apply_points`、`apply_cross_points`、`grad_points`、`hess_points`、`grad_wrt_coord_dim` もある。
+カーネルの葉と `CompiledKernel` は、`faer` の行列（`MatRef` / `MatMut`。呼ぶには `faer = "0.24"` を足す）の上で、`apply`、`apply_cross`、`grad`、`hess` で評価する。`LinearKernel` 以外の葉は、対角を `fill_diag` で書く。`LinearKernel` は座標を読むので、対角は `fill_diag_points` で書く。`ConstantKernel` と `WhiteKernel` には `apply_points`、`apply_cross_points`、`grad_points`、`hess_points` もあり、RBF、Matérn、白色ノイズの葉には `grad_wrt_coord_dim` もある。
 
-書く要素は `Triangle` で選ぶ。`Triangle::Lower` はコレスキーで、ほかに `Upper` と `Full` がある。`apply` は `KernelMath` を取る。`Accurate` は libm / SIMD の `exp`。`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は、`f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` は、この選択を使わない。
+書く要素は `Triangle` で選ぶ。`Triangle::Lower` はコレスキーで、ほかに `Upper` と `Full` がある。カーネルの葉は `exp` を `Accurate` で計算する。`CompiledKernel::apply::<M>` とその他のメソッドは、`KernelMath` の型 `M` と、出力と同じ形の作業用の行列を取る。`Accurate` は libm / SIMD の `exp`。`FastApprox` は 7 次の多項式。`f64` の `FastApprox` は、`f64::exp` との相対差が `2^{-23}` 以内。ハイパーパラメータの `exp(θ)` は、この選択を使わない。
 
-`KernelTerm` は、距離を使うカーネルの葉のトレイト。実装するのは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`、`clone_box`。疎なモデルには、さらに `grad_cross` と `hess_cross` が要る。自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` も要る。自作のカーネルの葉を保存するなら `persist_id` と `persist_state`。`CustomKernel::new(term)` が `Box` に入れ、`KernelSpec::custom` が木に入れる。疎なモデルが要る微分の無いカーネルの葉は `CoordGradientUnsupported`。
+`KernelTerm<T>` は、二乗距離を読む自作のカーネルの葉のトレイト。実装するのは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points`、`clone_box`。疎なモデルには、さらに `grad_cross` と `hess_cross` が要る。自由な誘導点には `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` も要る。保存するなら `persist_id` と `persist_state` も実装する（`serde_json::Value` を返すので、`serde_json = "1"` を足す）。実装は、すべての `T: KernelScalar` について一度だけ書く。モデルには、その葉が `f64` と `f32` で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` であることが必要である。`CustomKernel::new(term)` が `Box` に入れ、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` が木に入れる。疎なモデルが要る微分の無いカーネルの葉は `CoordGradientUnsupported`。下の保存と読み込みの例で 1 つ実装している。
 
 ```rust
 use gprx::kernel::{
@@ -387,11 +415,67 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+カーネルの葉とコンパイルした木を二乗距離で評価する例。パラメータからのコンストラクタと、スカラーについて総称な関数も示す。
+
+```rust
+use faer::Mat;
+use gprx::kernel::{
+    ConstantKernel, KernelScalar, KernelSpec, LinearKernel, ParameterBinding, PeriodicKernel,
+    RationalQuadraticKernel, RbfKernel, Triangle, WhiteKernel,
+};
+use gprx::{Accurate, FastApprox, KernelMath};
+
+/// `exp(−d² / 2)` at `f32` or `f64`.
+fn unit_rbf<T: KernelScalar>(d2: f64) -> f64 {
+    (T::from_f64(-0.5) * T::from_f64(d2)).exp().to_f64()
+}
+
+/// The `(0, 1)` entry of `k` for the `KernelMath` mode `M`.
+fn off_diagonal<M: KernelMath>(spec: &KernelSpec, d2: &Mat<f64>) -> Result<f64, gprx::GprError> {
+    let mut k = Mat::<f64>::zeros(2, 2);
+    let mut scratch = Mat::<f64>::zeros(2, 2);
+    spec.compile()
+        .apply::<M>(d2.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())?;
+    Ok(k[(0, 1)])
+}
+
+fn main() -> Result<(), gprx::GprError> {
+    // Two points at 0 and 1: d² is [[0, 1], [1, 0]].
+    let d2 = Mat::from_fn(2, 2, |i, j| (i as f64 - j as f64).powi(2));
+    let rbf = RbfKernel::new(1.0)?;
+    let mut k = Mat::<f64>::zeros(2, 2);
+    rbf.apply(d2.as_ref(), k.as_mut(), Triangle::Lower)?;
+    assert!((k[(1, 0)] - unit_rbf::<f64>(1.0)).abs() < 1e-12);
+    assert!((unit_rbf::<f32>(1.0) - unit_rbf::<f64>(1.0)).abs() < 1e-6);
+    rbf.apply_cross(d2.as_ref(), k.as_mut())?;
+    let mut diag = [0.0; 2];
+    rbf.fill_diag(&mut diag);
+    rbf.grad(d2.as_ref(), k.as_mut(), 0, Triangle::Full)?;
+    rbf.hess(d2.as_ref(), k.as_mut(), 0, 0, Triangle::Full)?;
+    let x = Mat::from_fn(2, 1, |i, _| i as f64);
+    LinearKernel::from_log_variance(0.0)?.fill_diag_points(x.as_ref(), &mut diag)?;
+
+    let _ = (WhiteKernel::from_log_variance(-2.0)?, ConstantKernel::from_log_constant(0.0)?);
+    let periodic = PeriodicKernel::from_log(0.0, 0.5_f64.ln())?;
+    let _ = (periodic.lengthscale_bounds(), periodic.period_bounds());
+    let rq = RationalQuadraticKernel::from_log(0.0, 0.0)?;
+    let _ = (rq.lengthscale_bounds(), rq.alpha_bounds());
+
+    let spec = KernelSpec::from(rbf);
+    let bindings: Vec<ParameterBinding> = spec.parameter_bindings();
+    assert_eq!(bindings.len(), 1);
+    let accurate = off_diagonal::<Accurate>(&spec, &d2)?;
+    let fast = off_diagonal::<FastApprox>(&spec, &d2)?;
+    assert!((accurate - fast).abs() < 1e-6);
+    Ok(())
+}
+```
+
 ### 与えられた二乗距離（`ScalarDistance`、`ArdDistance`）
 
-カーネルの葉は、座標の代わりに、与えられた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel`、`KernelTerm` を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
+カーネルの葉は、座標の代わりに、与えられた二乗距離を読める。測地距離やグラフ距離、別のプログラムで求めた距離など。`ScalarDistance::new()` は対ごとに `d²` を 1 つ持つスロット。`kernel(leaf)` は `RbfKernel`、`MaternKernel`、`PeriodicKernel`、`RationalQuadraticKernel` と、`KernelTerm` を `f64` と `f32` で実装し `Clone + Debug + Send + Sync + 'static` である自作の葉を受ける（境界は `ScalarDistanceLeaf`）。`ArdDistance::from_leaf(leaf)` は `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` を受け（境界は `ArdDistanceLeaf`）、`d` 個のブロック（次元ごとに `(Δ_k)²` を 1 つ）を持つスロットと、その上の葉を返す。`d` は葉の長さスケールの数。同じスロットに 2 つ目以降の葉を置くときは `kernel(leaf)` を使い、長さスケールの数が `d` でなければ `DimensionMismatch` を返す。1 つのスロットの葉は、すべて同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` は `KernelSpec` の葉のまま。
 
-結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。右に `KernelSpec` を置いた `DistanceKernel` は `WithPoints`。座標の項を左に置くときは `DistanceKernel::from(spec)`（スロットの無い `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないので、`KernelSpec + leaf.into()` は座標の和として推論される。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` はこれまでと同じ型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
+結果は `KernelSpec` とは別の型 `DistanceKernel<C>`。`C` は `DistanceOnly`（座標なし）か `WithPoints`（座標の葉も持つ）。`DistanceKernel + DistanceKernel` と `*` は印を合わせる（`JoinPoints`）。`DistanceKernel` と `ConstantKernel` または `WhiteKernel` は、どちらの順でも `C` を保つ。右に `KernelSpec` を置いた `DistanceKernel` は `WithPoints`。座標の項を左に置くときは `DistanceKernel::from(spec)`（スロットの無い `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないので、`KernelSpec + leaf.into()` は座標の和として推論される。`num_params`、`get_params`、`set_params`、`parameter_bindings` は `KernelSpec` と同じ。`slots()` は `DistanceSlot` を、深さ優先で最初に使った順に返す。`KernelSpec<S>` と `CompiledKernel<T, S>` は、最後の型パラメータに封印した `Supply` の種類 `S` を取る。既定の `NoSupply` は座標の木で、値を持たない。そのため `KernelSpec` と `CompiledKernel<T>` は座標の型を指し、もう一方の種類を持つのは `DistanceKernel` だけである。
 
 `Gpr::new` は任意の `ModelKernel`（`KernelSpec` か `DistanceKernel<C>`）を受ける。`with_input_transform` は `PointKernel` のモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけにある。各スロットは、呼び出しごとに `DistanceSource` を 1 つ受ける。
 
@@ -515,8 +599,9 @@ fn main() -> Result<(), gprx::GprError> {
     // The 2 × 2 block from the inducing points to the queries at 0.5 and 1.5.
     let cross_z = [0.25, 2.25, 2.25, 0.25];
     let _ = sgpr.predict([image.borrow(&cross_z)], 2)?;
-    // OnlineSgpr: x = 4 の点（誘導点への二乗距離）を足し、学習点 1 を
-    // 3 つめの誘導点にする（5 つの学習点への二乗距離）。
+    // OnlineSgpr: a point at 4 (its squared distances to the inducing
+    // points), then training point 1 as a third inducing point (its squared
+    // distances to the five training points).
     let mut online = sgpr.clone().into_online();
     online.insert([image.from_vec(vec![16.0, 4.0])], 0.1)?;
     let point = online.point_ids()[1];
@@ -639,7 +724,7 @@ fn main() -> Result<(), GprError> {
 
 ### 尤度
 
-`GaussianLikelihood::new(noise_variance)` は、`σn²` を log パラメータで持つ。メソッドとして `from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params` を提供する。`add_noise_diag` は、カーネル対角に `σn²` を足す。`noise_grad_diag` は、その対角の、1 パラメータについての微分。定義域の外のノイズは `InvalidNoiseVariance`。
+`GaussianLikelihood::new(noise_variance)` は、`σn²` を log パラメータで持つ。メソッドとして `from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params` を提供する。`add_noise_diag` は、カーネル対角に `σn²` を足す。`noise_grad_diag` は、その対角の、1 パラメータについての微分。有限でないか正でないノイズの分散は `InvalidNoiseVariance`。正でもノイズの区間（既定は `(1e-5, 1e5)`）の外なら `InvalidInterval`。
 
 ```rust
 use gprx::{GaussianLikelihood, Interval};
@@ -674,25 +759,27 @@ fn main() -> Result<(), gprx::GprError> {
 | `TargetPipeline` | `y` について同じ。`FittedTargetPipeline` に学習する |
 | `ColumnwiseInput` | `new().then(map)` が次の特徴を割り当てる。`FittedColumnwiseInput` に学習する |
 
-具象の写像にも、型自身の `fit` がある。入力の引数は `(x, n_rows, n_cols)`、目的変数の引数は `y`。トレイトの `UnfittedTransform::fit` と `UnfittedTarget::fit` は `Box<Self>` を取る。自作の写像は `clone_box` と `as_any` を実装する。保存するなら `persist_id` と `persist_state` も。
+具象の写像にも、型自身の `fit` がある。入力の引数は `(x, n_rows, n_cols)`、目的変数の引数は `y`。トレイトの `UnfittedTransform::fit` と `UnfittedTarget::fit` は `Box<Self>` を取る。自作の写像は `clone_box` と `as_any` を実装する。保存するなら `persist_id` と `persist_state` も。下の保存と読み込みの例で、入力の写像と目的変数の写像を 1 つずつ定義している。
 
 `Transform` は、学習後の入力トレイト。`apply` と `inverse_apply` は、列優先の配列をその場で書き換える。`TargetTransform` は、学習後の目的変数トレイト。メソッドは `transform`、`inverse_transform_mean`、`inverse_transform_variance`、`inverse_transform_covariance`。共分散の逆変換の既定は、分散と同じ倍率を全要素に掛ける。
 
 ```rust
 use gprx::transform::{
-    ColumnwiseInput, IdentityInput, IdentityTarget, MinMaxInput, MinMaxTarget, Pipeline,
-    StandardizeInput, StandardizeTarget, TargetPipeline, TargetTransform, Transform,
+    ColumnwiseInput, FittedColumnwiseInput, FittedMinMaxInput, FittedMinMaxTarget, FittedPipeline,
+    FittedStandardizeInput, FittedStandardizeTarget, FittedTargetPipeline, IdentityInput,
+    IdentityTarget, MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget,
+    TargetPipeline, TargetTransform, Transform,
 };
 
 fn main() -> Result<(), gprx::GprError> {
     let x = [0.0, 2.0, 10.0, 30.0];
-    let input = StandardizeInput::new().fit(&x, 2, 2)?;
+    let input: FittedStandardizeInput = StandardizeInput::new().fit(&x, 2, 2)?;
     let _ = (input.mean(), input.std());
     let mut applied = x;
     input.apply(&mut applied, 2, 2)?;
     input.inverse_apply(&mut applied, 2, 2)?;
     let y = [0.0, 1.0, 3.0];
-    let target = StandardizeTarget::new().fit(&y)?;
+    let target: FittedStandardizeTarget = StandardizeTarget::new().fit(&y)?;
     let _ = (target.mean(), target.std());
     let mut mean = [0.0];
     target.inverse_transform_mean(&mut mean)?;
@@ -700,23 +787,29 @@ fn main() -> Result<(), gprx::GprError> {
     target.inverse_transform_variance(&mut variance)?;
     let mut cov = [1.0];
     target.inverse_transform_covariance(&mut cov)?;
-    let minmax = MinMaxInput::with_feature_range(0.0, 1.0)?.fit(&x, 2, 2)?;
-    let _ = minmax.feature_range();
-    let _ = MinMaxTarget::new().fit(&y)?;
+    let unfitted = MinMaxInput::with_feature_range(0.0, 1.0)?;
+    let _ = unfitted.feature_range();
+    let minmax: FittedMinMaxInput = unfitted.fit(&x, 2, 2)?;
+    let _ = (minmax.feature_range(), minmax.min(), minmax.max());
+    let target_range: FittedMinMaxTarget = MinMaxTarget::new().fit(&y)?;
+    let _ = (target_range.min(), target_range.max(), target_range.feature_range());
     let pipeline = Pipeline::new()
         .then(IdentityInput)
         .then(StandardizeInput::new());
     assert!(!pipeline.is_empty());
     let _ = pipeline.len();
-    let _ = pipeline.fit(&x, 2, 2)?;
+    let fitted_pipeline: FittedPipeline = pipeline.fit(&x, 2, 2)?;
+    assert_eq!(fitted_pipeline.len(), 2);
     let targets = TargetPipeline::new()
         .then(IdentityTarget)
         .then(StandardizeTarget::new());
-    let _ = targets.fit(&y)?;
+    let fitted_targets: FittedTargetPipeline = targets.fit(&y)?;
+    assert!(!fitted_targets.is_empty());
     let columns = ColumnwiseInput::new()
         .then(StandardizeInput::new())
         .then(IdentityInput);
-    let _ = columns.fit(&x, 2, 2)?;
+    let fitted_columns: FittedColumnwiseInput = columns.fit(&x, 2, 2)?;
+    assert_eq!(fitted_columns.len(), 2);
     Ok(())
 }
 ```
@@ -782,22 +875,152 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+自作の目的関数とソルバ。
+
+```rust
+use gprx::{
+    Differentiable, GprError, IncrementalObjective, Interval, Lbfgs, Objective, OptResult,
+    Optimizer, TrustRegion, TwiceDifferentiable,
+};
+
+/// `f(θ) = (θ − ln 2)²` on one log-parameter: its minimum is at `ℓ = 2`.
+struct Bowl;
+
+impl Objective for Bowl {
+    fn num_params(&self) -> usize {
+        1
+    }
+
+    fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        Ok((params[0] - 2.0_f64.ln()).powi(2))
+    }
+}
+
+impl Differentiable for Bowl {
+    fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        out[0] = 2.0 * (params[0] - 2.0_f64.ln());
+        Ok(())
+    }
+}
+
+impl TwiceDifferentiable for Bowl {
+    fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        out[0] = 2.0;
+        Ok(())
+    }
+}
+
+impl IncrementalObjective for Bowl {
+    fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+        // One parameter: every change is a full evaluation.
+        let _ = indices;
+        self.value(params)
+    }
+}
+
+/// Starts at the middle of each interval, then runs L-BFGS.
+struct FromMiddle;
+
+impl<P: Differentiable> Optimizer<P> for FromMiddle {
+    const USES_CHANGE_INDICES: bool = false;
+
+    fn minimize(&self, objective: &mut P, _init: &[f64]) -> Result<OptResult, GprError> {
+        let mut intervals = vec![Interval::DEFAULT_POSITIVE; objective.num_params()];
+        objective.fill_intervals(&mut intervals)?;
+        let start: Vec<f64> = intervals.iter().map(|i| (i.lo() * i.hi()).sqrt().ln()).collect();
+        Lbfgs::new().minimize(objective, &start)
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    let mut bowl = Bowl;
+    let _ = (bowl.value_at_changes(&[0.0], &[0])?, bowl.value_with_changes(&[0.0], &[0])?);
+    let mut grad = [0.0];
+    let value = bowl.value_and_gradient_into(&[0.0], &mut grad)?;
+    let mut hess = [0.0];
+    let _ = bowl.value_gradient_hessian_into(&[0.0], &mut grad, &mut hess)?;
+    let OptResult { params, value: best, iterations } = FromMiddle.minimize(&mut bowl, &[0.0])?;
+    assert!((params[0] - 2.0_f64.ln()).abs() < 1e-4 && best <= value);
+    let _ = iterations;
+    let _ = TrustRegion::new().minimize(&mut bowl, &[0.0])?;
+    Ok(())
+}
+```
+
 ### 精度、数学、ジッタ
 
-`DoublePrecision` は、保存も求解も `f64`（`PrecisionPolicy::Storage` と `Refine`）。`SinglePrecision` は `f32` で、その因子を保つ。`MixedPrecision` の既定は `MixedPrecision<PromoteStorage>`。因子は `f32` で作り、予測の重みは `f64` で精緻化する。もう一方の `ResidualFormula` は `MixedPrecision<ReevaluateKernel>`。`GpScalar` は、モデルの型パラメータが使うスカラー境界。選ぶには `with_precision::<SinglePrecision>()`。
+`DoublePrecision` は、保存も求解も `f64`（`PrecisionPolicy::Storage` と `Refine`）。`SinglePrecision` は `f32` で、その因子を保つ。予測は `Prediction<f32>`。`MixedPrecision` の既定は `MixedPrecision<PromoteStorage>`。因子は `f32` で作り、予測の重みは `f64` で精緻化し、`f64` で予測する。もう一方の `ResidualFormula` は `MixedPrecision<ReevaluateKernel>`。`GpScalar` は、学習済みモデルの精度の型パラメータ `P` の境界で、3 つの精度ポリシーが実装する。選ぶには `with_precision::<SinglePrecision>()`。
 
-`KernelExp::Accurate` と `FastApprox` は、実行時の切り替えで、`with_math` に渡す。クレート直下の `Accurate` と `FastApprox` は、`apply` を直接呼ぶときの `KernelMath`。
+`KernelExp::Accurate` と `FastApprox` は、実行時の切り替えで、`with_math` に渡す。クレート直下の `Accurate` と `FastApprox` は、`CompiledKernel::apply::<M>` に渡す `KernelMath`（カーネルの節を参照）。
 
 `JitterPolicy::fixed(j)` は、失敗したコレスキーを、対角の `j ≥ 0` で一度やり直す（`JitterPolicy::Fixed`、`FixedJitter`）。`adaptive(initial, multiplier, max_retries, max_jitter)` は、正則化なしの因子が失敗したあと、オフセットを増やす（`JitterPolicy::Adaptive`、`AdaptiveJitter`）。条件は `initial > 0`、`multiplier > 1`、`max_retries ≥ 1`、`max_jitter ≥ initial`。全学習点の既定は `fixed(0.0)`。`Sgpr` と `Svgp` の `K_mm` の既定は `adaptive(1e-8, 10.0, 5, 1e-3)`。保存された値は、`jitter`、または `initial`、`multiplier`、`max_retries`、`max_jitter` から取得できる。この列挙は non-exhaustive である。
+
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{
+    AdaptiveJitter, DoublePrecision, FittedGpr, FixedJitter, GaussianLikelihood, GpScalar, Gpr,
+    JitterPolicy, KernelExp, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
+    ResidualFormula,
+};
+
+/// The storage scalar of a precision policy, by name.
+fn storage<P: PrecisionPolicy>() -> &'static str {
+    std::any::type_name::<P::Storage>()
+}
+
+/// Reads the observation count of any fitted model on a `KernelSpec`.
+fn points<P: GpScalar>(model: &FittedGpr<gprx::Lbfgs, P>) -> usize {
+    model.n()
+}
+
+fn formula<R: ResidualFormula>(_: MixedPrecision<R>) {}
+
+fn main() -> Result<(), gprx::GprError> {
+    assert_eq!(storage::<DoublePrecision>(), "f64");
+    assert_eq!(storage::<MixedPrecision<PromoteStorage>>(), "f32");
+    let _ = formula::<ReevaluateKernel>;
+    let mixed = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .with_precision::<MixedPrecision<ReevaluateKernel>>()
+    .with_math(KernelExp::Accurate)
+    .with_jitter_policy(JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)?)
+    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    .map_err(|(_, e)| e)?;
+    assert_eq!(points(&mixed), 2);
+
+    match JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)? {
+        JitterPolicy::Adaptive(adaptive) => {
+            let adaptive: AdaptiveJitter = adaptive;
+            let _ = (adaptive.initial(), adaptive.multiplier());
+            let _ = (adaptive.max_retries(), adaptive.max_jitter());
+        }
+        JitterPolicy::Fixed(fixed) => {
+            let _ = fixed.jitter();
+        }
+        _ => {}
+    }
+    if let JitterPolicy::Fixed(fixed) = JitterPolicy::fixed(1e-6)? {
+        let fixed: FixedJitter = fixed;
+        assert_eq!(fixed.jitter(), 1e-6);
+    }
+    Ok(())
+}
+```
 
 ### パラメータ
 
 `Interval::new(lo, hi)` は有限の開区間で、`lo < hi`。メソッドは `lo`、`hi`、`contains`。失敗は `IntervalError::InvalidBounds` と `OutOfRange`。`GprError::InvalidInterval` がそれを包む。`BoundedParam::new(value, interval)` は、区間の厳密な内側にある、利用者単位の値を持つ。`default_positive(value)` は `Interval::DEFAULT_POSITIVE` を使う。`value` が値、`interval` が区間、`ln` が `log(value)`。`with_value` は区間を保ち、`with_interval` は値を保つ。カーネルの葉と `GaussianLikelihood` は、内部で `BoundedParam` を持つ。呼び出す側は、通常 `with_bounds` を使う。
 
 ```rust
-use gprx::{BoundedParam, Interval};
+use gprx::{BoundedParam, Interval, IntervalError};
 
 fn main() -> Result<(), gprx::GprError> {
+    assert!(matches!(
+        Interval::new(2.0, 1.0),
+        Err(IntervalError::InvalidBounds { .. })
+    ));
     let interval = Interval::new(1e-3, 1e2)?;
     assert!(interval.contains(1.0));
     let _ = (interval.lo(), interval.hi(), Interval::DEFAULT_POSITIVE);
@@ -805,7 +1028,10 @@ fn main() -> Result<(), gprx::GprError> {
     let _ = (param.value(), param.interval(), param.ln());
     let param = param.with_value(2.0)?.with_interval(interval)?;
     let _ = BoundedParam::default_positive(0.1)?;
-    let _ = param;
+    assert!(matches!(
+        param.with_value(1e3),
+        Err(IntervalError::OutOfRange { .. })
+    ));
     Ok(())
 }
 ```
@@ -905,6 +1131,252 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+自作のカーネルの葉、入力の写像、目的変数の写像を、レジストリを通して保存して読み込む例。
+
+```rust
+use std::any::Any;
+use std::sync::Arc;
+
+use faer::{MatMut, MatRef};
+use gprx::kernel::{CustomKernel, KernelScalar, KernelSpec, KernelTerm, RbfKernel, Triangle};
+use gprx::persist::{
+    FittedInputRestore, FittedTargetRestore, KernelRestore, LoadedGpr, PersistRegistry,
+    UnfittedInputRestore, UnfittedTargetRestore,
+};
+use gprx::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, Interval};
+
+/// `k(d²) = exp(−d² / 2)`: an RBF with `ℓ = 1` and no parameter.
+#[derive(Clone, Debug)]
+struct UnitRbf;
+
+fn no_params(len: usize) -> Result<(), GprError> {
+    if len == 0 {
+        Ok(())
+    } else {
+        Err(GprError::LengthMismatch {
+            reason: format!("UnitRbf has no parameters, got {len}"),
+        })
+    }
+}
+
+fn no_param(i: usize) -> GprError {
+    GprError::IndexOutOfRange {
+        reason: format!("UnitRbf has no parameter {i}"),
+    }
+}
+
+impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
+    fn num_params(&self) -> usize {
+        0
+    }
+
+    fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        no_params(out.len())
+    }
+
+    fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+        no_params(params.len())
+    }
+
+    fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        no_params(out.len())
+    }
+
+    fn apply(&self, dist: MatRef<'_, T>, mut out: MatMut<'_, T>, uplo: Triangle) -> Result<(), GprError> {
+        for col in 0..dist.ncols() {
+            let rows = match uplo {
+                Triangle::Lower => col..dist.nrows(),
+                Triangle::Upper => 0..col + 1,
+                Triangle::Full => 0..dist.nrows(),
+            };
+            for row in rows {
+                out[(row, col)] = (T::from_f64(-0.5) * dist[(row, col)]).exp();
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_cross(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError> {
+        self.apply(dist, out, Triangle::Full)
+    }
+
+    fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
+        out.fill(T::from_f64(1.0));
+        Ok(())
+    }
+
+    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
+        Box::new(self.clone())
+    }
+
+    fn persist_id(&self) -> &'static str {
+        "mine.unit_rbf"
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// Moves every input by `−1`. Fitting learns nothing, so one type is both forms.
+#[derive(Clone, Debug)]
+struct Shift;
+
+impl UnfittedTransform for Shift {
+    fn fit(self: Box<Self>, _x: &[f64], _n_rows: usize, _n_cols: usize) -> Result<Box<dyn Transform>, GprError> {
+        Ok(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn UnfittedTransform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.shift")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+impl Transform for Shift {
+    fn apply(&self, x: &mut [f64], _n_rows: usize, _n_cols: usize) -> Result<(), GprError> {
+        x.iter_mut().for_each(|v| *v -= 1.0);
+        Ok(())
+    }
+
+    fn inverse_apply(&self, x: &mut [f64], _n_rows: usize, _n_cols: usize) -> Result<(), GprError> {
+        x.iter_mut().for_each(|v| *v += 1.0);
+        Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.shift")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// Halves `y` for the model and doubles the predictions back.
+#[derive(Clone, Debug)]
+struct Half;
+
+impl UnfittedTarget for Half {
+    fn fit(self: Box<Self>, _y: &[f64]) -> Result<Box<dyn TargetTransform>, GprError> {
+        Ok(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn UnfittedTarget> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.half")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+impl TargetTransform for Half {
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
+        y.iter_mut().for_each(|v| *v *= 0.5);
+        Ok(())
+    }
+
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
+        mean.iter_mut().for_each(|v| *v *= 2.0);
+        Ok(())
+    }
+
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
+        var.iter_mut().for_each(|v| *v *= 4.0);
+        Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn TargetTransform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.half")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    // Two copies of the custom leaf, summed, times a built-in leaf.
+    let kernel = KernelSpec::from(CustomKernel::new(UnitRbf)) + KernelSpec::custom(UnitRbf);
+    let kernel = kernel * KernelSpec::from(RbfKernel::new(2.0)?);
+    let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(Shift)
+        .with_target_transform(Half)
+        .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5])?;
+    let dir = std::env::temp_dir().join(format!("gprx-readme-custom-ja-{}", std::process::id()));
+    fitted.save(&dir)?;
+
+    // One restore function per persist id.
+    let kernel: KernelRestore = Arc::new(|_state| Ok(CustomKernel::new(UnitRbf)));
+    let unfitted_input: UnfittedInputRestore = Arc::new(|_state| Ok(Box::new(Shift)));
+    let fitted_input: FittedInputRestore = Arc::new(|_state| Ok(Box::new(Shift)));
+    let unfitted_target: UnfittedTargetRestore = Arc::new(|_state| Ok(Box::new(Half)));
+    let fitted_target: FittedTargetRestore = Arc::new(|_state| Ok(Box::new(Half)));
+    let mut registry = PersistRegistry::new();
+    registry.register_kernel("mine.unit_rbf", move |state| kernel(state))?;
+    registry.register_unfitted_input("mine.shift", move |state| unfitted_input(state))?;
+    registry.register_fitted_input("mine.shift", move |state| fitted_input(state))?;
+    registry.register_unfitted_target("mine.half", move |state| unfitted_target(state))?;
+    registry.register_fitted_target("mine.half", move |state| fitted_target(state))?;
+
+    let loaded = LoadedGpr::load(&dir, &registry)?;
+    let query = [0.5];
+    assert_eq!(loaded.predict(&query, 1, 1)?, fitted.predict(&query, 1, 1)?);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+```
+
 与えられた二乗距離のモデルも同じ `save` / `save_with_factor` で保存する。ファイルには、モデルが持つ学習の `d²`（Exact なら下三角、Sparse なら `n × m` のブロックと誘導点の添字）と、カーネルの slot の表も入る。ローダーはカーネルのマーカー（`DistanceOnly` か `WithPoints`）で型が決まり、座標のファイルやもう一方のマーカーのファイルは `WrongModel` になる。読み込んだカーネルは新しい slot を持つ。保存前の `ScalarDistance` や `ArdDistance` はそのどれも指さないので、`slots()`（保存したカーネルの順）から取り、予測をそれに結び付ける。形式は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-与えられた二乗距離のモデル)。
 
 ```rust
@@ -994,7 +1466,7 @@ fn main() -> Result<(), GprError> {
 }
 ```
 
-読み込んだモデルの `predict` と `predict_with` は、ファイルが `f32` でも `f64` を返す。モデル情報として `n`、`d`（疎なら `m`）を参照できる。`is_online` は、全学習点か SGPR の `ldlt` ファイルなら真。型の付いたモデルが欲しいときは、バリアントを照合する。
+読み込んだモデルの `predict` と `predict_with` は、ファイルが `f32` でも `f64` を返す。モデル情報として `n`、`d`（疎なら `m`）を参照できる。`is_online` は、`OnlineGpr` か `OnlineSgpr` が書いたファイルなら真。型の付いたモデルが欲しいときは、バリアントを照合する。
 
 | 列挙 | バリアント |
 | --- | --- |
@@ -1005,7 +1477,7 @@ fn main() -> Result<(), GprError> {
 | `LoadedDistanceSgpr<C>` | `LoadedSgpr` と同じ 8 つで、中身は `DistanceKernel<C>` のモデル |
 | `LoadedDistanceSvgp<C>` | `LoadedSvgp` と同じ 4 つで、中身は `FittedSvgp<_, DistanceKernel<C>>` |
 
-読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain` となる。ファイルにソルバは含まれない。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` は `L` をメモリマップのまま使う。
+読み込んだ全学習点モデルは `Fixed` かつ `CholeskyBuffer::Retain` となる。ファイルにソルバは含まれない。照合したモデルで `with_optimizer` を呼び、`refit` すると、もう一度探索する。`save` で因子なしに書いたファイルは、読み込み時に因子を作る。`save_with_factor` で書いたファイルは因子を作り直さない。`f64` のモデルは `L` をメモリマップのまま使い、`f32` のモデルはコピーする。
 
 ### エラー
 
@@ -1030,7 +1502,7 @@ fn main() -> Result<(), GprError> {
 | `IndexOutOfRange { reason }` | パラメータ、カーネルの葉、次元の添字 |
 | `InvalidConfig { reason }` | 最適化、ジッタ、変換の設定 |
 | `SizeOverflow` | `n_rows * n_cols` が `usize` に収まらない |
-| `InvalidInterval` | `Interval` か `BoundedParam` を作れない |
+| `InvalidInterval` | `Interval` を作れないか、値が区間の外（既定ではノイズの分散が `(1e-5, 1e5)` の外） |
 | `InvalidNoiseVariance { reason }` | 観測ノイズが定義域の外 |
 | `UnsupportedKernelOperation { reason }` | そのカーネルの葉がその操作を実装しない |
 | `WorkspaceTooSmall` | バッファが問題より短い |
@@ -1042,9 +1514,14 @@ fn main() -> Result<(), GprError> {
 `CholeskyStage` は `Fit`、`Predict`、`OnlineInsert`、`OnlineDelete`。`PersistErrorKind` は `Io`、`Config`、`Tensor`、`InvalidPersistId`、`NotPersistable`、`UnregisteredId`、`WrongModel`。分岐は `kind`。`reason` は人が読むための説明文である。
 
 ```rust
-use gprx::{CholeskyStage, GprError, PersistErrorKind};
+use gprx::{CholeskyStage, GprError, PersistErrorKind, SlotErrorKind};
 
 fn main() -> Result<(), GprError> {
+    let missing = GprError::DistanceSlot {
+        kind: SlotErrorKind::Missing,
+        slot: Some(0),
+    };
+    assert!(matches!(missing, GprError::DistanceSlot { kind: SlotErrorKind::Missing, .. }));
     let err = GprError::DimensionMismatch {
         x_dim: 2,
         expected_dim: 1,

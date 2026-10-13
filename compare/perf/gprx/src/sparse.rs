@@ -107,7 +107,7 @@ impl SparseEvalPredict for FittedSgpr<Fixed> {
     }
 
     fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), String> {
-        FittedSgpr::predict(self, xs, n_rows, n_cols)
+        <FittedSgpr<Fixed>>::predict(self, xs, n_rows, n_cols)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -127,7 +127,7 @@ impl SparseEvalPredict for FittedSvgp {
     }
 
     fn predict(&self, xs: &[f64], n_rows: usize, n_cols: usize) -> Result<(), String> {
-        FittedSvgp::predict(self, xs, n_rows, n_cols)
+        <FittedSvgp>::predict(self, xs, n_rows, n_cols)
             .map(|_| ())
             .map_err(|e| e.to_string())
     }

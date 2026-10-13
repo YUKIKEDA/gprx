@@ -2,7 +2,7 @@ English | [日本語](README.ja.md)
 
 # gprx
 
-Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`, including online updates and directory save/load.
+Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`. Exact and sparse GPR models also update online, and every model saves to and loads from a directory. A kernel reads coordinates, or squared distances you supply.
 
 `X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.2.0** (tag `v0.2.0`) is the default-feature public API. The MSRV is 1.88. A 0.x minor may break that API: what 0.2.0 changed from 0.1.0, and how to move, is in the [changelog](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md). `internals` (`bench-internals` and `insert-stages`) is outside that contract.
 
@@ -32,28 +32,35 @@ Same program: `cargo run --example fit_predict`.
 
 ## Usage
 
-`fit` and `factor` return `Result<Fitted, (Trainer, GprError)>`. `?` drops the trainer (`From<(Trainer, GprError)> for GprError`). `.map_err(|(_, e)| e)` keeps the error. Match `Err((trainer, err))` to retry with the same trainer.
+`fit` and `factor` return `Result<Fitted, (Trainer, GprError)>`. On `Gpr`, `?` drops the trainer (`From<(Gpr<O, P, K>, GprError)> for GprError`). `Sgpr` and `Svgp` have no such conversion: write `.map_err(|(_, e)| e)?`, as the examples below do. Match `Err((trainer, err))` to retry with the same trainer.
+
+Call a model's methods on the value (`fitted.predict(..)`). A path call without the type's parameters, such as `FittedGpr::predict(&fitted, ..)`, does not compile (`E0034`): the coordinate and the distance models share the method name. Write `<FittedGpr>::predict(&fitted, ..)` to take the defaults.
 
 `X` and inducing inputs `Z` are column-major `f64`: feature 0 for every row, then feature 1. `n_rows` is the point count, `n_cols` the feature count. `y` has length `n_rows`. Empty input, a length that is not `n_rows * n_cols`, or `NaN` / `Inf` is `GprError`.
 
-scikit-learn's `n_jobs` knob is not on this crate. Distance fills use the process-wide Rayon pool, and that pool is the thread count. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential. Training Cholesky and the `W` n-RHS solve cap the linear-algebra backend at `min(pool, n / 64)`. Predict and covariance substitute into the triangular factor `L`, and that work also caps at `n · m / 16384` and `m / 12`. Kernel fills still use the full pool.
+scikit-learn's `n_jobs` knob is not on this crate. Distance fills use the process-wide Rayon pool, and that pool is the thread count. Set `RAYON_NUM_THREADS` before the process starts, or call `rayon::ThreadPoolBuilder::new().num_threads(n).build_global()` before the first fit or predict. The pool can be initialized only once. One worker is sequential. The training Cholesky factor, and the solve with `n` right-hand sides that the gradient needs, cap the linear-algebra backend at `min(pool, n / 64)`. Predict and covariance substitute into the triangular factor `L`, and that work also caps at `n · m / 16384` and `m / 12`. Kernel fills still use the full pool.
 
 `gprx::internals` (`bench-internals`, `insert-stages`) is outside semantic versioning. Do not depend on it.
 
 ### Exact: `Gpr`, `FittedGpr`, `OnlineGpr`
 
-`Gpr::new(kernel, likelihood)` is `Gpr<Lbfgs, DoublePrecision>`. `fit(x, n_rows, n_cols, y)` consumes it, runs the optimizer on the negative log marginal likelihood, and returns `FittedGpr`.
+`Gpr::new(kernel, likelihood)` with a `KernelSpec` is `Gpr<Lbfgs, DoublePrecision, KernelSpec>`. `fit(x, n_rows, n_cols, y)` consumes it, runs the optimizer on the negative log marginal likelihood, and returns `FittedGpr` with the same parameters.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Fixed, GaussianLikelihood, Gpr, PredictOptions, Prediction, VarianceKind};
+use gprx::{
+    DoublePrecision, Fixed, FittedGpr, GaussianLikelihood, Gpr, Lbfgs, PredictOptions, Prediction,
+    VarianceKind,
+};
 
 fn main() -> Result<(), gprx::GprError> {
-    let fitted = Gpr::new(
+    let trainer: Gpr<Lbfgs, DoublePrecision, KernelSpec> = Gpr::new(
         KernelSpec::from(RbfKernel::new(1.0)?),
         GaussianLikelihood::new(0.1)?,
-    )
-    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    );
+    let fitted: FittedGpr = trainer.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    // The same call by path, with the type's defaults.
+    let _ = <FittedGpr>::predict(&fitted, &[0.5], 1, 1)?;
 
     let pred = fitted.predict(&[0.5], 1, 1)?;
     let latent = fitted.predict_with(
@@ -69,6 +76,7 @@ fn main() -> Result<(), gprx::GprError> {
     let mut fitted = fitted;
     let mut reused = Prediction::default();
     fitted.predict_into(&[0.5], 1, 1, &mut reused)?;
+    fitted.predict_with_into(&[0.5], 1, 1, PredictOptions::default(), &mut reused)?;
 
     let frozen = fitted
         .into_trainer()
@@ -89,7 +97,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr, PredictOptions, VarianceKind};
+use gprx::{GaussianLikelihood, Gpr, PredictOptions, PredictiveCovariance, VarianceKind};
 
 fn main() -> Result<(), gprx::GprError> {
     let mut fitted = Gpr::new(
@@ -97,7 +105,7 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let cov = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
+    let cov: PredictiveCovariance = fitted.predict_covariance(&[0.25, 0.75], 2, 1)?;
     let cov_latent = fitted.predict_covariance_with(
         &[0.25, 0.75],
         2,
@@ -139,7 +147,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{GaussianLikelihood, Gpr};
+use gprx::{GaussianLikelihood, Gpr, OnlineGpr, PointId};
 
 fn main() -> Result<(), gprx::GprError> {
     let fitted = Gpr::new(
@@ -147,8 +155,8 @@ fn main() -> Result<(), gprx::GprError> {
         GaussianLikelihood::new(0.1)?,
     )
     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
-    let mut online = fitted.into_online()?;
-    let id = online.insert(&[0.5], 0.25)?;
+    let mut online: OnlineGpr = fitted.into_online()?;
+    let id: PointId = online.insert(&[0.5], 0.25)?;
     assert!(online.point_ids().contains(&id));
     let _ = online.alpha()?;
     online.delete(id)?;
@@ -168,7 +176,7 @@ Before `fit`, on `Gpr`:
 | `with_precision::<P>()` | `DoublePrecision` (default), `SinglePrecision`, or `MixedPrecision`. |
 | `with_math(KernelExp::FastApprox)` | Polynomial kernel `exp`. Default is `KernelExp::Accurate`. |
 | `with_input_transform(map)` | Default is identity. |
-| `with_target_transform(map)` | Default is identity. Use `StandardizeTarget::new()` when the mean is zero. |
+| `with_target_transform(map)` | Default is identity. The prior mean is zero, so use `StandardizeTarget::new()` when `y` is not centred near zero. |
 | `with_jitter_policy(policy)` | Default is `JitterPolicy::fixed(0.0)`. |
 | `with_prefer_speed` | `DistanceCachePolicy::Cached` and `CholeskyBuffer::Retain` (the defaults). Replaces both. |
 | `with_prefer_memory` | `DistanceCachePolicy::Uncached` and `CholeskyBuffer::Reuse`. Replaces both. |
@@ -178,7 +186,10 @@ Before `fit`, on `Gpr`:
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
 use gprx::transform::StandardizeTarget;
-use gprx::{DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp, SinglePrecision};
+use gprx::{
+    CholeskyBuffer, DistanceCachePolicy, GaussianLikelihood, Gpr, JitterPolicy, KernelExp,
+    Prediction, SinglePrecision,
+};
 
 fn main() -> Result<(), gprx::GprError> {
     let gpr = Gpr::new(
@@ -193,18 +204,25 @@ fn main() -> Result<(), gprx::GprError> {
     .with_prefer_memory()
     .with_prefer_speed();
     assert_eq!(gpr.distance_cache_policy(), DistanceCachePolicy::Cached);
-    let _ = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+    assert_eq!(gpr.cholesky_buffer(), CholeskyBuffer::Retain);
+    let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
+    // A single-precision model predicts in `f32`.
+    let pred: Prediction<f32> = fitted.predict(&[0.5], 1, 1)?;
+    let _ = pred.mean[0];
     Ok(())
 }
 ```
 
 ### Sparse: `Sgpr`, `FittedSgpr`, `OnlineSgpr`
 
-`Sgpr::new` is `Sgpr<Lbfgs, FixedInducing, DoublePrecision>`. Inducing points stay where you put them. `with_inducing(FreeInducing)` also searches `Z`.
+`Sgpr::new` with a `KernelSpec` is `Sgpr<Lbfgs, FixedInducing, DoublePrecision, KernelSpec>`. Inducing points stay where you put them. `with_inducing(FreeInducing)` also searches `Z`.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Fixed, FreeInducing, GaussianLikelihood, Sgpr};
+use gprx::{
+    Fixed, FittedSgpr, FixedInducing, FreeInducing, GaussianLikelihood, InducingId, OnlineSgpr,
+    Sgpr,
+};
 
 fn main() -> Result<(), gprx::GprError> {
     let x = &[0.0, 1.0, 2.0, 3.0];
@@ -213,7 +231,8 @@ fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
     let likelihood = GaussianLikelihood::new(0.1)?;
 
-    let fitted = Sgpr::new(kernel.clone(), likelihood.clone())
+    let fitted: FittedSgpr = Sgpr::new(kernel.clone(), likelihood.clone())
+        .with_inducing(FixedInducing)
         .fit(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
     let _moved = Sgpr::new(kernel.clone(), likelihood.clone())
@@ -226,6 +245,15 @@ fn main() -> Result<(), gprx::GprError> {
         .map_err(|(_, e)| e)?;
     assert_eq!(fitted.neg_log_marginal_likelihood()?.is_finite(), true);
     let _ = frozen.m();
+
+    // Online: add a point and an inducing point, then return to a fitted model.
+    let mut online: OnlineSgpr = fitted.into_online();
+    let point = online.insert(&[1.5], 0.75)?;
+    let inducing: InducingId = online.insert_inducing(&[1.5])?;
+    online.delete_inducing(inducing)?;
+    online.delete(point)?;
+    let back = online.into_fitted();
+    assert_eq!(back.m(), 2);
     Ok(())
 }
 ```
@@ -240,7 +268,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
-use gprx::{Adam, GaussianLikelihood, Svgp};
+use gprx::{Adam, FittedSvgp, GaussianLikelihood, Svgp};
 
 fn main() -> Result<(), gprx::GprError> {
     let kernel = KernelSpec::from(RbfKernel::new(1.0)?);
@@ -248,7 +276,7 @@ fn main() -> Result<(), gprx::GprError> {
     let x = &[0.0, 1.0, 2.0, 3.0];
     let y = &[0.0, 1.0, 0.5, 0.25];
     let z = &[0.5, 2.5];
-    let factored = Svgp::new(kernel.clone(), likelihood.clone())
+    let factored: FittedSvgp = Svgp::new(kernel.clone(), likelihood.clone())
         .factor(x, 4, 1, y, z, 2)
         .map_err(|(_, e)| e)?;
     let trained = Svgp::new(kernel, likelihood)
@@ -325,9 +353,9 @@ Observation noise belongs in `GaussianLikelihood`. `WhiteKernel` is an extra ker
 
 Isotropic leaves read `lengthscale` and `log_lengthscale`. Matérn also reads `nu`. Periodic reads `period` and `log_period`. Rational quadratic reads `alpha` and `log_alpha`. Linear and white read `variance` and `log_variance`. Constant reads `constant` and `log_constant`. Constructors from the optimizer coordinate are `from_log_lengthscale`, `from_log_lengthscales`, `from_log` (periodic: log lengthscale and log period; rational quadratic: log lengthscale and log `α`), `from_log_variance`, and `from_log_constant`. A single `bounds` covers RBF, Matérn, constant, linear, and white. Periodic uses `lengthscale_bounds` and `period_bounds`; `with_bounds` takes both intervals. Rational quadratic uses `lengthscale_bounds` and `alpha_bounds`; `with_bounds` takes both. `lengthscale(dim)` on an ARD leaf returns one `ℓ_d`. `log_lengthscales` is the stored vector. `lengthscales()` returns `ArdLengthscales` (`new`, `from_log_lengthscales`, `with_bounds`, `lengthscale(dim)`, `log_lengthscales`, `num_params`, `get_params`, `set_params`). ARD `with_bounds` takes one interval for every `ℓ_d`. Rational-quadratic ARD `with_bounds` takes a lengthscale interval and an `α` interval.
 
-A leaf and a `CompiledKernel` evaluate with `apply`, `apply_cross`, `fill_diag`, `fill_diag_points`, `grad`, and `hess`. `fill_diag_points` writes `k(x, x)` from coordinates. A linear leaf diagonal needs that call. Some leaves also have `apply_points`, `apply_cross_points`, `grad_points`, `hess_points`, and `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. `apply` takes a `KernelMath`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial). `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
+A leaf and a `CompiledKernel` evaluate on `faer` matrices (`MatRef` / `MatMut`; add `faer = "0.24"` to call them) with `apply`, `apply_cross`, `grad`, and `hess`. Every leaf but `LinearKernel` writes its diagonal with `fill_diag`; `LinearKernel` reads coordinates, so its diagonal is `fill_diag_points`. `ConstantKernel` and `WhiteKernel` also have `apply_points`, `apply_cross_points`, `grad_points`, and `hess_points`, and the RBF, Matérn, and white leaves `grad_wrt_coord_dim`. `Triangle::Lower` (Cholesky), `Upper`, or `Full` selects which entries are written. A leaf evaluates `exp` with `Accurate`. `CompiledKernel::apply::<M>` and its other methods take the `KernelMath` type `M`: `Accurate` (libm / SIMD `exp`) or `FastApprox` (degree-7 polynomial), plus a scratch matrix of the output's shape. `FastApprox` on `f64` stays within a relative `2^{-23}` of `f64::exp`. Hyperparameter `exp(θ)` does not use this choice.
 
-`KernelTerm` is the trait for a distance leaf: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save a custom leaf. `CustomKernel::new(term)` boxes it. `KernelSpec::custom` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`.
+`KernelTerm<T>` is the trait for a leaf of your own that reads squared distances: `num_params`, `get_params`, `set_params`, `bounds_into`, `apply`, `apply_cross`, `fill_diag`, `grad`, `hess`, `hess_points`, `clone_box`, and the derivative methods a sparse model needs (`grad_cross` / `hess_cross`, and `grad_wrt_sq_dist`, `hess_wrt_sq_dist`, `grad_wrt_sq_dist_theta` for `FreeInducing`). `persist_id` and `persist_state` save it (they return a `serde_json::Value`, so add `serde_json = "1"`). Implement it once for every `T: KernelScalar`: a model needs it at `f64` and `f32`, `Clone`, `Debug`, `Send`, `Sync`, and `'static`. `CustomKernel::new(term)` boxes it, and `KernelSpec::from(custom)` or `KernelSpec::custom(term)` inserts it. A custom leaf that omits a derivative a sparse model needs returns `CoordGradientUnsupported`. The save-and-load example below implements one.
 
 ```rust
 use gprx::kernel::{
@@ -371,11 +399,67 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+Evaluating a leaf and a compiled tree on squared distances, the parameter constructors, and a function generic over the scalar:
+
+```rust
+use faer::Mat;
+use gprx::kernel::{
+    ConstantKernel, KernelScalar, KernelSpec, LinearKernel, ParameterBinding, PeriodicKernel,
+    RationalQuadraticKernel, RbfKernel, Triangle, WhiteKernel,
+};
+use gprx::{Accurate, FastApprox, KernelMath};
+
+/// `exp(−d² / 2)` at `f32` or `f64`.
+fn unit_rbf<T: KernelScalar>(d2: f64) -> f64 {
+    (T::from_f64(-0.5) * T::from_f64(d2)).exp().to_f64()
+}
+
+/// The `(0, 1)` entry of `k` for the `KernelMath` mode `M`.
+fn off_diagonal<M: KernelMath>(spec: &KernelSpec, d2: &Mat<f64>) -> Result<f64, gprx::GprError> {
+    let mut k = Mat::<f64>::zeros(2, 2);
+    let mut scratch = Mat::<f64>::zeros(2, 2);
+    spec.compile()
+        .apply::<M>(d2.as_ref(), k.as_mut(), Triangle::Full, scratch.as_mut())?;
+    Ok(k[(0, 1)])
+}
+
+fn main() -> Result<(), gprx::GprError> {
+    // Two points at 0 and 1: d² is [[0, 1], [1, 0]].
+    let d2 = Mat::from_fn(2, 2, |i, j| (i as f64 - j as f64).powi(2));
+    let rbf = RbfKernel::new(1.0)?;
+    let mut k = Mat::<f64>::zeros(2, 2);
+    rbf.apply(d2.as_ref(), k.as_mut(), Triangle::Lower)?;
+    assert!((k[(1, 0)] - unit_rbf::<f64>(1.0)).abs() < 1e-12);
+    assert!((unit_rbf::<f32>(1.0) - unit_rbf::<f64>(1.0)).abs() < 1e-6);
+    rbf.apply_cross(d2.as_ref(), k.as_mut())?;
+    let mut diag = [0.0; 2];
+    rbf.fill_diag(&mut diag);
+    rbf.grad(d2.as_ref(), k.as_mut(), 0, Triangle::Full)?;
+    rbf.hess(d2.as_ref(), k.as_mut(), 0, 0, Triangle::Full)?;
+    let x = Mat::from_fn(2, 1, |i, _| i as f64);
+    LinearKernel::from_log_variance(0.0)?.fill_diag_points(x.as_ref(), &mut diag)?;
+
+    let _ = (WhiteKernel::from_log_variance(-2.0)?, ConstantKernel::from_log_constant(0.0)?);
+    let periodic = PeriodicKernel::from_log(0.0, 0.5_f64.ln())?;
+    let _ = (periodic.lengthscale_bounds(), periodic.period_bounds());
+    let rq = RationalQuadraticKernel::from_log(0.0, 0.0)?;
+    let _ = (rq.lengthscale_bounds(), rq.alpha_bounds());
+
+    let spec = KernelSpec::from(rbf);
+    let bindings: Vec<ParameterBinding> = spec.parameter_bindings();
+    assert_eq!(bindings.len(), 1);
+    let accurate = off_diagonal::<Accurate>(&spec, &d2)?;
+    let fast = off_diagonal::<FastApprox>(&spec, &d2)?;
+    assert!((accurate - fast).abs() < 1e-6);
+    Ok(())
+}
+```
+
 ### Supplied distances (`ScalarDistance`, `ArdDistance`)
 
-A kernel leaf can read squared distances you supply instead of coordinates: a geodesic or graph distance, or a distance from another program. `ScalarDistance::new()` is a slot of one `d²` per pair; `kernel(leaf)` takes an `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, or a `KernelTerm` (the `ScalarDistanceLeaf` bound). `ArdDistance::from_leaf(leaf)` takes an `RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel` (the `ArdDistanceLeaf` bound) and returns a slot of `d` blocks, one `(Δ_k)²` per dimension, where `d` is the leaf's lengthscale count, with the leaf on it. A further leaf on the same slot comes from `kernel(leaf)`, which returns `DimensionMismatch` when its lengthscale count is not `d`. Every leaf of one slot reads the same supply. `ConstantKernel`, `WhiteKernel`, and `LinearKernel` stay `KernelSpec` leaves.
+A kernel leaf can read squared distances you supply instead of coordinates: a geodesic or graph distance, or a distance from another program. `ScalarDistance::new()` is a slot of one `d²` per pair; `kernel(leaf)` takes an `RbfKernel`, `MaternKernel`, `PeriodicKernel`, `RationalQuadraticKernel`, or a leaf of your own that implements `KernelTerm` at `f64` and `f32` and is `Clone + Debug + Send + Sync + 'static` (the `ScalarDistanceLeaf` bound). `ArdDistance::from_leaf(leaf)` takes an `RbfArdKernel`, `MaternArdKernel`, or `RationalQuadraticArdKernel` (the `ArdDistanceLeaf` bound) and returns a slot of `d` blocks, one `(Δ_k)²` per dimension, where `d` is the leaf's lengthscale count, with the leaf on it. A further leaf on the same slot comes from `kernel(leaf)`, which returns `DimensionMismatch` when its lengthscale count is not `d`. Every leaf of one slot reads the same supply. `ConstantKernel`, `WhiteKernel`, and `LinearKernel` stay `KernelSpec` leaves.
 
-The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` on its right is `WithPoints`. For a coordinate term on the left, write `DistanceKernel::from(spec)` (a `DistanceKernel<WithPoints>` with no slot): `KernelSpec + DistanceKernel` is not implemented, so `KernelSpec + leaf.into()` still infers a coordinate sum. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use. `KernelSpec<S>` and `CompiledKernel<T, S>` take a sealed `Supply` kind `S` as their last type parameter. The default, `NoSupply`, is a coordinate tree: it has no value, so `KernelSpec` and `CompiledKernel<T>` name the same types as before, and only a `DistanceKernel` holds the other kind.
+The result is a `DistanceKernel<C>`, a separate type from `KernelSpec`. `C` is `DistanceOnly` (no coordinates) or `WithPoints` (the kernel also has coordinate leaves). `DistanceKernel + DistanceKernel` and `*` join the markers (`JoinPoints`). `DistanceKernel` with a `ConstantKernel` or `WhiteKernel`, in either order, keeps `C`. `DistanceKernel` with a `KernelSpec` on its right is `WithPoints`. For a coordinate term on the left, write `DistanceKernel::from(spec)` (a `DistanceKernel<WithPoints>` with no slot): `KernelSpec + DistanceKernel` is not implemented, so `KernelSpec + leaf.into()` still infers a coordinate sum. `num_params`, `get_params`, `set_params`, and `parameter_bindings` match `KernelSpec`. `slots()` returns the `DistanceSlot`s in depth-first order of first use. `KernelSpec<S>` and `CompiledKernel<T, S>` take a sealed `Supply` kind `S` as their last type parameter. The default, `NoSupply`, is a coordinate tree: it has no value, so `KernelSpec` and `CompiledKernel<T>` are the coordinate types, and only a `DistanceKernel` holds the other kind.
 
 `Gpr::new` takes any `ModelKernel` (`KernelSpec` or `DistanceKernel<C>`). `with_input_transform` is on the `PointKernel` models only (`KernelSpec` and `DistanceKernel<WithPoints>`). Each slot gets one `DistanceSource` per call:
 
@@ -624,7 +708,7 @@ fn main() -> Result<(), GprError> {
 
 ### Likelihood
 
-`GaussianLikelihood::new(noise_variance)` stores `σn²` as a log parameter. `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`. `add_noise_diag` adds `σn²` to a kernel diagonal. `noise_grad_diag` is the derivative of that diagonal with respect to one parameter. `InvalidNoiseVariance` is a noise value outside its domain.
+`GaussianLikelihood::new(noise_variance)` stores `σn²` as a log parameter. `from_log_noise_variance`, `noise_variance`, `log_noise_variance`, `bounds`, `with_bounds`, `num_params`, `get_params`, `set_params`. `add_noise_diag` adds `σn²` to a kernel diagonal. `noise_grad_diag` is the derivative of that diagonal with respect to one parameter. `InvalidNoiseVariance` is a noise variance that is not finite or not positive. A positive one outside the noise interval (default `(1e-5, 1e5)`) is `InvalidInterval`.
 
 ```rust
 use gprx::{GaussianLikelihood, Interval};
@@ -659,25 +743,27 @@ Pass an unfitted map to `with_input_transform` or `with_target_transform` before
 | `TargetPipeline` | the same for `y`, fits to `FittedTargetPipeline` |
 | `ColumnwiseInput` | `new().then(map)` assigns the next feature. Fits to `FittedColumnwiseInput` |
 
-Concrete maps also have an inherent `fit`. Input maps take `(x, n_rows, n_cols)`. Target maps take `y`. The trait methods `UnfittedTransform::fit` and `UnfittedTarget::fit` take `Box<Self>`. A caller-defined map implements `clone_box` and `as_any`. Saving it also implements `persist_id` and `persist_state`.
+Concrete maps also have an inherent `fit`. Input maps take `(x, n_rows, n_cols)`. Target maps take `y`. The trait methods `UnfittedTransform::fit` and `UnfittedTarget::fit` take `Box<Self>`. A caller-defined map implements `clone_box` and `as_any`. Saving it also implements `persist_id` and `persist_state`. The save-and-load example below defines one input map and one target map.
 
 `Transform` is the fitted input trait: `apply` and `inverse_apply`, in place, column-major. `TargetTransform` is the fitted target trait: `transform`, `inverse_transform_mean`, `inverse_transform_variance`, and `inverse_transform_covariance` (the default scales every entry the same way as the variance).
 
 ```rust
 use gprx::transform::{
-    ColumnwiseInput, IdentityInput, IdentityTarget, MinMaxInput, MinMaxTarget, Pipeline,
-    StandardizeInput, StandardizeTarget, TargetPipeline, TargetTransform, Transform,
+    ColumnwiseInput, FittedColumnwiseInput, FittedMinMaxInput, FittedMinMaxTarget, FittedPipeline,
+    FittedStandardizeInput, FittedStandardizeTarget, FittedTargetPipeline, IdentityInput,
+    IdentityTarget, MinMaxInput, MinMaxTarget, Pipeline, StandardizeInput, StandardizeTarget,
+    TargetPipeline, TargetTransform, Transform,
 };
 
 fn main() -> Result<(), gprx::GprError> {
     let x = [0.0, 2.0, 10.0, 30.0];
-    let input = StandardizeInput::new().fit(&x, 2, 2)?;
+    let input: FittedStandardizeInput = StandardizeInput::new().fit(&x, 2, 2)?;
     let _ = (input.mean(), input.std());
     let mut applied = x;
     input.apply(&mut applied, 2, 2)?;
     input.inverse_apply(&mut applied, 2, 2)?;
     let y = [0.0, 1.0, 3.0];
-    let target = StandardizeTarget::new().fit(&y)?;
+    let target: FittedStandardizeTarget = StandardizeTarget::new().fit(&y)?;
     let _ = (target.mean(), target.std());
     let mut mean = [0.0];
     target.inverse_transform_mean(&mut mean)?;
@@ -685,23 +771,29 @@ fn main() -> Result<(), gprx::GprError> {
     target.inverse_transform_variance(&mut variance)?;
     let mut cov = [1.0];
     target.inverse_transform_covariance(&mut cov)?;
-    let minmax = MinMaxInput::with_feature_range(0.0, 1.0)?.fit(&x, 2, 2)?;
-    let _ = minmax.feature_range();
-    let _ = MinMaxTarget::new().fit(&y)?;
+    let unfitted = MinMaxInput::with_feature_range(0.0, 1.0)?;
+    let _ = unfitted.feature_range();
+    let minmax: FittedMinMaxInput = unfitted.fit(&x, 2, 2)?;
+    let _ = (minmax.feature_range(), minmax.min(), minmax.max());
+    let target_range: FittedMinMaxTarget = MinMaxTarget::new().fit(&y)?;
+    let _ = (target_range.min(), target_range.max(), target_range.feature_range());
     let pipeline = Pipeline::new()
         .then(IdentityInput)
         .then(StandardizeInput::new());
     assert!(!pipeline.is_empty());
     let _ = pipeline.len();
-    let _ = pipeline.fit(&x, 2, 2)?;
+    let fitted_pipeline: FittedPipeline = pipeline.fit(&x, 2, 2)?;
+    assert_eq!(fitted_pipeline.len(), 2);
     let targets = TargetPipeline::new()
         .then(IdentityTarget)
         .then(StandardizeTarget::new());
-    let _ = targets.fit(&y)?;
+    let fitted_targets: FittedTargetPipeline = targets.fit(&y)?;
+    assert!(!fitted_targets.is_empty());
     let columns = ColumnwiseInput::new()
         .then(StandardizeInput::new())
         .then(IdentityInput);
-    let _ = columns.fit(&x, 2, 2)?;
+    let fitted_columns: FittedColumnwiseInput = columns.fit(&x, 2, 2)?;
+    assert_eq!(fitted_columns.len(), 2);
     Ok(())
 }
 ```
@@ -767,22 +859,152 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+An objective and a solver of your own:
+
+```rust
+use gprx::{
+    Differentiable, GprError, IncrementalObjective, Interval, Lbfgs, Objective, OptResult,
+    Optimizer, TrustRegion, TwiceDifferentiable,
+};
+
+/// `f(θ) = (θ − ln 2)²` on one log-parameter: its minimum is at `ℓ = 2`.
+struct Bowl;
+
+impl Objective for Bowl {
+    fn num_params(&self) -> usize {
+        1
+    }
+
+    fn value(&mut self, params: &[f64]) -> Result<f64, GprError> {
+        Ok((params[0] - 2.0_f64.ln()).powi(2))
+    }
+}
+
+impl Differentiable for Bowl {
+    fn gradient_into(&mut self, params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        out[0] = 2.0 * (params[0] - 2.0_f64.ln());
+        Ok(())
+    }
+}
+
+impl TwiceDifferentiable for Bowl {
+    fn hessian_into(&mut self, _params: &[f64], out: &mut [f64]) -> Result<(), GprError> {
+        out[0] = 2.0;
+        Ok(())
+    }
+}
+
+impl IncrementalObjective for Bowl {
+    fn value_with_changes(&mut self, params: &[f64], indices: &[usize]) -> Result<f64, GprError> {
+        // One parameter: every change is a full evaluation.
+        let _ = indices;
+        self.value(params)
+    }
+}
+
+/// Starts at the middle of each interval, then runs L-BFGS.
+struct FromMiddle;
+
+impl<P: Differentiable> Optimizer<P> for FromMiddle {
+    const USES_CHANGE_INDICES: bool = false;
+
+    fn minimize(&self, objective: &mut P, _init: &[f64]) -> Result<OptResult, GprError> {
+        let mut intervals = vec![Interval::DEFAULT_POSITIVE; objective.num_params()];
+        objective.fill_intervals(&mut intervals)?;
+        let start: Vec<f64> = intervals.iter().map(|i| (i.lo() * i.hi()).sqrt().ln()).collect();
+        Lbfgs::new().minimize(objective, &start)
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    let mut bowl = Bowl;
+    let _ = (bowl.value_at_changes(&[0.0], &[0])?, bowl.value_with_changes(&[0.0], &[0])?);
+    let mut grad = [0.0];
+    let value = bowl.value_and_gradient_into(&[0.0], &mut grad)?;
+    let mut hess = [0.0];
+    let _ = bowl.value_gradient_hessian_into(&[0.0], &mut grad, &mut hess)?;
+    let OptResult { params, value: best, iterations } = FromMiddle.minimize(&mut bowl, &[0.0])?;
+    assert!((params[0] - 2.0_f64.ln()).abs() < 1e-4 && best <= value);
+    let _ = iterations;
+    let _ = TrustRegion::new().minimize(&mut bowl, &[0.0])?;
+    Ok(())
+}
+```
+
 ### Precision, math, jitter
 
-`DoublePrecision` stores and solves in `f64` (`PrecisionPolicy::Storage` and `Refine`). `SinglePrecision` uses `f32` and keeps that factorization. `MixedPrecision` defaults to `MixedPrecision<PromoteStorage>`. It factors in `f32` and refines the predict weights in `f64`. `MixedPrecision<ReevaluateKernel>` is the other `ResidualFormula`. `GpScalar` is the scalar bound used on the model type parameter. Select with `with_precision::<SinglePrecision>()`.
+`DoublePrecision` stores and solves in `f64` (`PrecisionPolicy::Storage` and `Refine`). `SinglePrecision` uses `f32` and keeps that factorization; its predictions are `Prediction<f32>`. `MixedPrecision` defaults to `MixedPrecision<PromoteStorage>`. It factors in `f32`, refines the predict weights in `f64`, and predicts `f64`. `MixedPrecision<ReevaluateKernel>` is the other `ResidualFormula`. `GpScalar` is the bound on a fitted model's precision parameter `P`; the three policies implement it. Select with `with_precision::<SinglePrecision>()`.
 
-`KernelExp::Accurate` and `FastApprox` are the runtime switch (`with_math`). `Accurate` and `FastApprox` in `gprx` are the corresponding `KernelMath` types for a direct `apply`.
+`KernelExp::Accurate` and `FastApprox` are the runtime switch (`with_math`). `Accurate` and `FastApprox` in `gprx` are the corresponding `KernelMath` types for `CompiledKernel::apply::<M>` (see Kernels).
 
 `JitterPolicy::fixed(j)` retries a failed Cholesky once with `j ≥ 0` on the diagonal (`JitterPolicy::Fixed`, `FixedJitter`). `adaptive(initial, multiplier, max_retries, max_jitter)` grows the offset after the unregularized factor fails (`JitterPolicy::Adaptive`, `AdaptiveJitter`): `initial > 0`, `multiplier > 1`, `max_retries ≥ 1`, `max_jitter ≥ initial`. Exact models default to `fixed(0.0)`. `Sgpr` and `Svgp` default to `adaptive(1e-8, 10.0, 5, 1e-3)` on `K_mm`. Read the stored numbers with `jitter`, or `initial`, `multiplier`, `max_retries`, and `max_jitter`. The enum is non-exhaustive.
+
+```rust
+use gprx::kernel::{KernelSpec, RbfKernel};
+use gprx::{
+    AdaptiveJitter, DoublePrecision, FittedGpr, FixedJitter, GaussianLikelihood, GpScalar, Gpr,
+    JitterPolicy, KernelExp, MixedPrecision, PrecisionPolicy, PromoteStorage, ReevaluateKernel,
+    ResidualFormula,
+};
+
+/// The storage scalar of a precision policy, by name.
+fn storage<P: PrecisionPolicy>() -> &'static str {
+    std::any::type_name::<P::Storage>()
+}
+
+/// Reads the observation count of any fitted model on a `KernelSpec`.
+fn points<P: GpScalar>(model: &FittedGpr<gprx::Lbfgs, P>) -> usize {
+    model.n()
+}
+
+fn formula<R: ResidualFormula>(_: MixedPrecision<R>) {}
+
+fn main() -> Result<(), gprx::GprError> {
+    assert_eq!(storage::<DoublePrecision>(), "f64");
+    assert_eq!(storage::<MixedPrecision<PromoteStorage>>(), "f32");
+    let _ = formula::<ReevaluateKernel>;
+    let mixed = Gpr::new(
+        KernelSpec::from(RbfKernel::new(1.0)?),
+        GaussianLikelihood::new(0.1)?,
+    )
+    .with_precision::<MixedPrecision<ReevaluateKernel>>()
+    .with_math(KernelExp::Accurate)
+    .with_jitter_policy(JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)?)
+    .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])
+    .map_err(|(_, e)| e)?;
+    assert_eq!(points(&mixed), 2);
+
+    match JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)? {
+        JitterPolicy::Adaptive(adaptive) => {
+            let adaptive: AdaptiveJitter = adaptive;
+            let _ = (adaptive.initial(), adaptive.multiplier());
+            let _ = (adaptive.max_retries(), adaptive.max_jitter());
+        }
+        JitterPolicy::Fixed(fixed) => {
+            let _ = fixed.jitter();
+        }
+        _ => {}
+    }
+    if let JitterPolicy::Fixed(fixed) = JitterPolicy::fixed(1e-6)? {
+        let fixed: FixedJitter = fixed;
+        assert_eq!(fixed.jitter(), 1e-6);
+    }
+    Ok(())
+}
+```
 
 ### Parameters
 
 `Interval::new(lo, hi)` is a finite open interval, `lo < hi`. `lo`, `hi`, `contains`. `IntervalError::InvalidBounds` and `OutOfRange`. `GprError::InvalidInterval` wraps that error. `BoundedParam::new(value, interval)` stores a user-unit value strictly inside the interval. `default_positive(value)` uses `Interval::DEFAULT_POSITIVE`. `value` reads the value, `interval` the interval, `ln` is `log(value)`. `with_value` keeps the interval. `with_interval` keeps the value. Leaves and `GaussianLikelihood` hold a `BoundedParam` internally. Callers usually go through `with_bounds`.
 
 ```rust
-use gprx::{BoundedParam, Interval};
+use gprx::{BoundedParam, Interval, IntervalError};
 
 fn main() -> Result<(), gprx::GprError> {
+    assert!(matches!(
+        Interval::new(2.0, 1.0),
+        Err(IntervalError::InvalidBounds { .. })
+    ));
     let interval = Interval::new(1e-3, 1e2)?;
     assert!(interval.contains(1.0));
     let _ = (interval.lo(), interval.hi(), Interval::DEFAULT_POSITIVE);
@@ -790,7 +1012,10 @@ fn main() -> Result<(), gprx::GprError> {
     let _ = (param.value(), param.interval(), param.ln());
     let param = param.with_value(2.0)?.with_interval(interval)?;
     let _ = BoundedParam::default_positive(0.1)?;
-    let _ = param;
+    assert!(matches!(
+        param.with_value(1e3),
+        Err(IntervalError::OutOfRange { .. })
+    ));
     Ok(())
 }
 ```
@@ -890,6 +1115,252 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
+A kernel leaf, an input map, and a target map of your own, saved and loaded through the registry:
+
+```rust
+use std::any::Any;
+use std::sync::Arc;
+
+use faer::{MatMut, MatRef};
+use gprx::kernel::{CustomKernel, KernelScalar, KernelSpec, KernelTerm, RbfKernel, Triangle};
+use gprx::persist::{
+    FittedInputRestore, FittedTargetRestore, KernelRestore, LoadedGpr, PersistRegistry,
+    UnfittedInputRestore, UnfittedTargetRestore,
+};
+use gprx::transform::{TargetTransform, Transform, UnfittedTarget, UnfittedTransform};
+use gprx::{Fixed, GaussianLikelihood, Gpr, GprError, Interval};
+
+/// `k(d²) = exp(−d² / 2)`: an RBF with `ℓ = 1` and no parameter.
+#[derive(Clone, Debug)]
+struct UnitRbf;
+
+fn no_params(len: usize) -> Result<(), GprError> {
+    if len == 0 {
+        Ok(())
+    } else {
+        Err(GprError::LengthMismatch {
+            reason: format!("UnitRbf has no parameters, got {len}"),
+        })
+    }
+}
+
+fn no_param(i: usize) -> GprError {
+    GprError::IndexOutOfRange {
+        reason: format!("UnitRbf has no parameter {i}"),
+    }
+}
+
+impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
+    fn num_params(&self) -> usize {
+        0
+    }
+
+    fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> {
+        no_params(out.len())
+    }
+
+    fn set_params(&mut self, params: &[f64]) -> Result<(), GprError> {
+        no_params(params.len())
+    }
+
+    fn bounds_into(&self, out: &mut [Interval]) -> Result<(), GprError> {
+        no_params(out.len())
+    }
+
+    fn apply(&self, dist: MatRef<'_, T>, mut out: MatMut<'_, T>, uplo: Triangle) -> Result<(), GprError> {
+        for col in 0..dist.ncols() {
+            let rows = match uplo {
+                Triangle::Lower => col..dist.nrows(),
+                Triangle::Upper => 0..col + 1,
+                Triangle::Full => 0..dist.nrows(),
+            };
+            for row in rows {
+                out[(row, col)] = (T::from_f64(-0.5) * dist[(row, col)]).exp();
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_cross(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError> {
+        self.apply(dist, out, Triangle::Full)
+    }
+
+    fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> {
+        out.fill(T::from_f64(1.0));
+        Ok(())
+    }
+
+    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> {
+        Err(no_param(i))
+    }
+
+    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
+        Box::new(self.clone())
+    }
+
+    fn persist_id(&self) -> &'static str {
+        "mine.unit_rbf"
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// Moves every input by `−1`. Fitting learns nothing, so one type is both forms.
+#[derive(Clone, Debug)]
+struct Shift;
+
+impl UnfittedTransform for Shift {
+    fn fit(self: Box<Self>, _x: &[f64], _n_rows: usize, _n_cols: usize) -> Result<Box<dyn Transform>, GprError> {
+        Ok(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn UnfittedTransform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.shift")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+impl Transform for Shift {
+    fn apply(&self, x: &mut [f64], _n_rows: usize, _n_cols: usize) -> Result<(), GprError> {
+        x.iter_mut().for_each(|v| *v -= 1.0);
+        Ok(())
+    }
+
+    fn inverse_apply(&self, x: &mut [f64], _n_rows: usize, _n_cols: usize) -> Result<(), GprError> {
+        x.iter_mut().for_each(|v| *v += 1.0);
+        Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.shift")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+/// Halves `y` for the model and doubles the predictions back.
+#[derive(Clone, Debug)]
+struct Half;
+
+impl UnfittedTarget for Half {
+    fn fit(self: Box<Self>, _y: &[f64]) -> Result<Box<dyn TargetTransform>, GprError> {
+        Ok(self)
+    }
+
+    fn clone_box(&self) -> Box<dyn UnfittedTarget> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.half")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+impl TargetTransform for Half {
+    fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
+        y.iter_mut().for_each(|v| *v *= 0.5);
+        Ok(())
+    }
+
+    fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
+        mean.iter_mut().for_each(|v| *v *= 2.0);
+        Ok(())
+    }
+
+    fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
+        var.iter_mut().for_each(|v| *v *= 4.0);
+        Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn TargetTransform> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn persist_id(&self) -> Option<&'static str> {
+        Some("mine.half")
+    }
+
+    fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
+fn main() -> Result<(), GprError> {
+    // Two copies of the custom leaf, summed, times a built-in leaf.
+    let kernel = KernelSpec::from(CustomKernel::new(UnitRbf)) + KernelSpec::custom(UnitRbf);
+    let kernel = kernel * KernelSpec::from(RbfKernel::new(2.0)?);
+    let fitted = Gpr::new(kernel, GaussianLikelihood::new(0.1)?)
+        .with_optimizer(Fixed)
+        .with_input_transform(Shift)
+        .with_target_transform(Half)
+        .factor(&[0.0, 1.0, 2.0], 3, 1, &[0.0, 1.0, 0.5])?;
+    let dir = std::env::temp_dir().join(format!("gprx-readme-custom-en-{}", std::process::id()));
+    fitted.save(&dir)?;
+
+    // One restore function per persist id.
+    let kernel: KernelRestore = Arc::new(|_state| Ok(CustomKernel::new(UnitRbf)));
+    let unfitted_input: UnfittedInputRestore = Arc::new(|_state| Ok(Box::new(Shift)));
+    let fitted_input: FittedInputRestore = Arc::new(|_state| Ok(Box::new(Shift)));
+    let unfitted_target: UnfittedTargetRestore = Arc::new(|_state| Ok(Box::new(Half)));
+    let fitted_target: FittedTargetRestore = Arc::new(|_state| Ok(Box::new(Half)));
+    let mut registry = PersistRegistry::new();
+    registry.register_kernel("mine.unit_rbf", move |state| kernel(state))?;
+    registry.register_unfitted_input("mine.shift", move |state| unfitted_input(state))?;
+    registry.register_fitted_input("mine.shift", move |state| fitted_input(state))?;
+    registry.register_unfitted_target("mine.half", move |state| unfitted_target(state))?;
+    registry.register_fitted_target("mine.half", move |state| fitted_target(state))?;
+
+    let loaded = LoadedGpr::load(&dir, &registry)?;
+    let query = [0.5];
+    assert_eq!(loaded.predict(&query, 1, 1)?, fitted.predict(&query, 1, 1)?);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+```
+
 A model on supplied distances saves with the same `save` / `save_with_factor`. The file also holds the training `d²` the model owns (an Exact model's lower triangles, a sparse model's `n × m` blocks and its inducing indices) and the kernel's slot table. The loader is typed by the kernel's marker (`DistanceOnly` or `WithPoints`); a coordinate file, or one of the other marker, is `WrongModel`. A loaded kernel has new slots: a `ScalarDistance` or `ArdDistance` from before the save names none of them, so take them from `slots()` (in the saved kernel's order) and bind the queries to those. The format: [persist-format.md §10](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md#10-models-on-supplied-distances).
 
 ```rust
@@ -979,7 +1450,7 @@ fn main() -> Result<(), GprError> {
 }
 ```
 
-`predict` and `predict_with` on a loaded model return `f64`, including when the file was `f32`. `n`, `d`, and (sparse) `m`. `is_online` is true for an `ldlt` exact or SGPR file. Match the variant for the typed model:
+`predict` and `predict_with` on a loaded model return `f64`, including when the file was `f32`. `n`, `d`, and (sparse) `m`. `is_online` is true for a file an `OnlineGpr` or `OnlineSgpr` wrote. Match the variant for the typed model:
 
 | Enum | Variants |
 | --- | --- |
@@ -990,7 +1461,7 @@ fn main() -> Result<(), GprError> {
 | `LoadedDistanceSgpr<C>` | the eight names of `LoadedSgpr`, over the models of `DistanceKernel<C>` |
 | `LoadedDistanceSvgp<C>` | the four names of `LoadedSvgp`, over `FittedSvgp<_, DistanceKernel<C>>` |
 
-A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not store a solver. Call `with_optimizer` on the matched model, then `refit`, to search again. A file written with `save` and no factor is factored on load. `save_with_factor` keeps `L` memory-mapped.
+A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not store a solver. Call `with_optimizer` on the matched model, then `refit`, to search again. A file written with `save` and no factor is factored on load. A file from `save_with_factor` is not: an `f64` model keeps `L` memory-mapped, and an `f32` model copies it.
 
 ### Errors
 
@@ -1015,7 +1486,7 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 | `IndexOutOfRange { reason }` | a parameter, leaf, or dimension index |
 | `InvalidConfig { reason }` | an optimizer, jitter, or transform setting |
 | `SizeOverflow` | `n_rows * n_cols` does not fit in `usize` |
-| `InvalidInterval` | `Interval` or `BoundedParam` could not be built |
+| `InvalidInterval` | an `Interval` could not be built, or a value is outside its interval (a noise variance outside `(1e-5, 1e5)` by default) |
 | `InvalidNoiseVariance { reason }` | observation noise is outside its domain |
 | `UnsupportedKernelOperation { reason }` | that leaf does not implement the operation |
 | `WorkspaceTooSmall` | a buffer is shorter than the problem |
@@ -1027,9 +1498,14 @@ A loaded exact model is `Fixed` and `CholeskyBuffer::Retain`. The file does not 
 `CholeskyStage` is `Fit`, `Predict`, `OnlineInsert`, `OnlineDelete`. `PersistErrorKind` is `Io`, `Config`, `Tensor`, `InvalidPersistId`, `NotPersistable`, `UnregisteredId`, `WrongModel`. Branch on `kind`. `reason` is for a person to read.
 
 ```rust
-use gprx::{CholeskyStage, GprError, PersistErrorKind};
+use gprx::{CholeskyStage, GprError, PersistErrorKind, SlotErrorKind};
 
 fn main() -> Result<(), GprError> {
+    let missing = GprError::DistanceSlot {
+        kind: SlotErrorKind::Missing,
+        slot: Some(0),
+    };
+    assert!(matches!(missing, GprError::DistanceSlot { kind: SlotErrorKind::Missing, .. }));
     let err = GprError::DimensionMismatch {
         x_dim: 2,
         expected_dim: 1,

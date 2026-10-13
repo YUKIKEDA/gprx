@@ -39,6 +39,27 @@ crate can name); `gprx::internals` is outside that contract.
 
   A `KernelSpec` passed as a value, as in the 0.1.0 README and examples,
   builds unchanged.
+- **A method called by its type's path without the type's parameters**
+  (`FittedGpr::predict(&model, ..)`) can fail with `E0034` (multiple
+  applicable items). The models now have the same method for coordinate
+  and distance kernels, and the bare path does not say which. Calls that
+  built in 0.1.0 and fail now include `Gpr::fit`,
+  `FittedSgpr::into_online`, and `predict` on `FittedGpr`, `OnlineGpr`,
+  `FittedSgpr`, `OnlineSgpr`, and `FittedSvgp`. Call the method on the value, or name the type in
+  angle brackets so its defaults apply:
+
+  ```rust
+  # use gprx::kernel::{KernelSpec, RbfKernel};
+  # use gprx::{FittedGpr, GaussianLikelihood, Gpr};
+  # fn main() -> Result<(), gprx::GprError> {
+  # let model = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+  #     .fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0])?;
+  let a = model.predict(&[0.5], 1, 1)?;
+  let b = <FittedGpr>::predict(&model, &[0.5], 1, 1)?;
+  # assert_eq!(a, b);
+  # Ok(())
+  # }
+  ```
 
 ### Added
 
