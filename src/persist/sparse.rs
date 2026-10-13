@@ -421,7 +421,7 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 /// use gprx::persist::{LoadedSgpr, PersistRegistry};
-/// use gprx::{Fixed, GaussianLikelihood, Sgpr};
+/// use gprx::{Fixed, GaussianLikelihood, PredictOptions, Sgpr, VarianceKind};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Sgpr::new(
@@ -435,8 +435,15 @@ fn read_q(tensors: &SafeTensors<'_>, m: usize) -> Result<(Vec<f64>, Mat<f64>), G
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedSgpr::load(&dir, &PersistRegistry::new())?;
-/// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// // Three training points, two inducing points, one feature.
+/// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
 /// assert!(!loaded.is_online());
+/// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// assert_eq!(
+///     loaded.predict_with(&[0.5], 1, 1, latent)?,
+///     fitted.predict_with(&[0.5], 1, 1, latent)?,
+/// );
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -512,28 +519,28 @@ impl LoadedSgpr {
         })
     }
 
-    /// Holds the number of training points.
+    /// Returns the number of training points.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn n(&self) -> usize {
         self.view().core().n
     }
 
-    /// Holds the number of inducing points.
+    /// Returns the number of inducing points.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn m(&self) -> usize {
         self.view().core().m
     }
 
-    /// Holds the number of input features.
+    /// Returns the number of input features.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn d(&self) -> usize {
         self.view().core().d
     }
 
-    /// Returns the `true` for an [`OnlineSgpr`] variant.
+    /// Returns `true` for an [`OnlineSgpr`] variant.
     ///
     /// See the example on [`LoadedSgpr`].
     pub fn is_online(&self) -> bool {
@@ -562,7 +569,7 @@ impl LoadedSgpr {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Returns the [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///
@@ -604,7 +611,7 @@ impl LoadedSgpr {
 /// ```rust
 /// use gprx::kernel::{KernelSpec, RbfKernel};
 /// use gprx::persist::{LoadedSvgp, PersistRegistry};
-/// use gprx::{GaussianLikelihood, Svgp};
+/// use gprx::{GaussianLikelihood, PredictOptions, Svgp, VarianceKind};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let fitted = Svgp::new(
@@ -617,7 +624,14 @@ impl LoadedSgpr {
 /// let _ = std::fs::remove_dir_all(&dir);
 /// fitted.save(&dir)?;
 /// let loaded = LoadedSvgp::load(&dir, &PersistRegistry::new())?;
+/// // Three training points, two inducing points, one feature.
+/// assert_eq!((loaded.n(), loaded.m(), loaded.d()), (3, 2, 1));
 /// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// let latent = PredictOptions { variance_kind: VarianceKind::Latent };
+/// assert_eq!(
+///     loaded.predict_with(&[0.5], 1, 1, latent)?,
+///     fitted.predict_with(&[0.5], 1, 1, latent)?,
+/// );
 /// let _ = std::fs::remove_dir_all(&dir);
 /// # Ok(())
 /// # }
@@ -666,21 +680,21 @@ impl LoadedSvgp {
         })
     }
 
-    /// Holds the number of training points.
+    /// Returns the number of training points.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn n(&self) -> usize {
         self.view().core().n
     }
 
-    /// Holds the number of inducing points.
+    /// Returns the number of inducing points.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn m(&self) -> usize {
         self.view().core().m
     }
 
-    /// Holds the number of input features.
+    /// Returns the number of input features.
     ///
     /// See the example on [`LoadedSvgp`].
     pub fn d(&self) -> usize {
@@ -703,7 +717,7 @@ impl LoadedSvgp {
         self.predict_with(xs, n_rows, n_cols, PredictOptions::default())
     }
 
-    /// Returns the [`Self::predict`] with [`PredictOptions`].
+    /// Returns the predictive mean and variance at `xs`, with the variance kind of `options`.
     ///
     /// # Errors
     ///

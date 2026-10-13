@@ -7,16 +7,143 @@ use crate::error::GprError;
 
 /// Represents the unfitted target map.
 ///
-/// [`Self::fit`] consumes it and returns a [`TargetTransform`].
+/// [`Self::fit`] consumes it and returns a [`TargetTransform`]. The
+/// built-in maps are [`IdentityTarget`], [`StandardizeTarget`],
+/// [`MinMaxTarget`], and [`super::TargetPipeline`]. Implement this trait
+/// and [`TargetTransform`] for a map of your own, and pass it to
+/// [`crate::Gpr::with_target_transform`]. A model with a caller-defined map
+/// saves only when both traits implement `persist_id` and
+/// `persist_state`, and loads only with a [`crate::PersistRegistry`] that
+/// holds a restore for each `persist_id`.
 ///
-/// See the example on [`StandardizeTarget`].
+/// # Examples
+///
+/// A map that subtracts the training mean of `y`, used on a model that is
+/// then saved and loaded:
+///
+/// ```rust
+/// use std::any::Any;
+/// use std::sync::Arc;
+///
+/// use gprx::kernel::{KernelSpec, RbfKernel};
+/// use gprx::persist::{FittedTargetRestore, LoadedGpr, PersistRegistry, UnfittedTargetRestore};
+/// use gprx::transform::{TargetTransform, UnfittedTarget};
+/// use gprx::{GaussianLikelihood, Gpr, GprError, PersistErrorKind};
+///
+/// /// Unfitted: no state.
+/// #[derive(Clone, Debug)]
+/// struct CenterY;
+///
+/// /// Fitted: the training mean of `y`.
+/// #[derive(Clone, Debug)]
+/// struct FittedCenterY {
+///     mean: f64,
+/// }
+///
+/// fn finite(values: &[f64]) -> Result<(), GprError> {
+///     if values.iter().all(|v| v.is_finite()) { Ok(()) } else { Err(GprError::NonFiniteInput) }
+/// }
+///
+/// impl UnfittedTarget for CenterY {
+///     fn fit(self: Box<Self>, y: &[f64]) -> Result<Box<dyn TargetTransform>, GprError> {
+///         if y.is_empty() {
+///             return Err(GprError::EmptyInput);
+///         }
+///         finite(y)?;
+///         Ok(Box::new(FittedCenterY { mean: y.iter().sum::<f64>() / y.len() as f64 }))
+///     }
+///     fn clone_box(&self) -> Box<dyn UnfittedTarget> {
+///         Box::new(self.clone())
+///     }
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+///     fn persist_id(&self) -> Option<&'static str> {
+///         Some("example.center_y")
+///     }
+///     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+///         Ok(serde_json::Value::Null)
+///     }
+/// }
+///
+/// impl TargetTransform for FittedCenterY {
+///     fn transform(&self, y: &mut [f64]) -> Result<(), GprError> {
+///         finite(y)?;
+///         y.iter_mut().for_each(|v| *v -= self.mean);
+///         Ok(())
+///     }
+///     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError> {
+///         finite(mean)?;
+///         mean.iter_mut().for_each(|v| *v += self.mean);
+///         Ok(())
+///     }
+///     // A shift leaves variances as they are; the default covariance map
+///     // calls this one.
+///     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError> {
+///         finite(var)
+///     }
+///     fn clone_box(&self) -> Box<dyn TargetTransform> {
+///         Box::new(self.clone())
+///     }
+///     fn as_any(&self) -> &dyn Any {
+///         self
+///     }
+///     fn persist_id(&self) -> Option<&'static str> {
+///         Some("example.center_y")
+///     }
+///     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
+///         Ok(serde_json::json!({ "mean": self.mean }))
+///     }
+/// }
+///
+/// # fn main() -> Result<(), GprError> {
+/// // The map on its own: forward, then back to `y` scale.
+/// let close = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12);
+/// let map = Box::new(CenterY).fit(&[1.0, 3.0])?;
+/// let mut y = [1.0, 3.0];
+/// map.transform(&mut y)?;
+/// assert!(close(&y, &[-1.0, 1.0]));
+/// map.inverse_transform_mean(&mut y)?;
+/// assert!(close(&y, &[1.0, 3.0]));
+/// let mut var = [0.5, 0.25];
+/// map.inverse_transform_variance(&mut var)?;
+/// map.inverse_transform_covariance(&mut var)?;
+/// assert!(close(&var, &[0.5, 0.25]));
+///
+/// // The map on a model, saved and loaded.
+/// let fitted = Gpr::new(KernelSpec::from(RbfKernel::new(1.0)?), GaussianLikelihood::new(0.1)?)
+///     .with_target_transform(CenterY)
+///     .fit(&[0.0, 1.0, 2.0], 3, 1, &[10.0, 11.0, 10.5])
+///     .map_err(|(_, e)| e)?;
+/// let dir = std::env::temp_dir().join(format!("gprx-doctest-target-map-{}", std::process::id()));
+/// let _ = std::fs::remove_dir_all(&dir);
+/// fitted.save(&dir)?;
+/// let unfitted: UnfittedTargetRestore = Arc::new(|_| Ok(Box::new(CenterY)));
+/// let fitted_restore: FittedTargetRestore = Arc::new(|state| {
+///     let mean = state["mean"].as_f64().ok_or_else(|| GprError::PersistFailed {
+///         kind: PersistErrorKind::Config,
+///         reason: "center_y state needs a number mean".into(),
+///     })?;
+///     Ok(Box::new(FittedCenterY { mean }))
+/// });
+/// let mut registry = PersistRegistry::new();
+/// registry.register_unfitted_target("example.center_y", move |state| unfitted(state))?;
+/// registry.register_fitted_target("example.center_y", move |state| fitted_restore(state))?;
+/// let loaded = LoadedGpr::load(&dir, &registry)?;
+/// assert_eq!(loaded.predict(&[0.5], 1, 1)?, fitted.predict(&[0.5], 1, 1)?);
+/// let _ = std::fs::remove_dir_all(&dir);
+/// # Ok(())
+/// # }
+/// ```
 pub trait UnfittedTarget: Send + Sync {
     /// Estimates transform parameters from training targets.
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] when `y` is empty, non-finite, or otherwise invalid
-    /// for this transform.
+    /// [`StandardizeTarget`] and [`MinMaxTarget`] return
+    /// [`GprError::EmptyInput`] when `y` is empty; every built-in map
+    /// returns [`GprError::NonFiniteInput`] when `y` contains `NaN` or
+    /// `Inf`. A caller-defined map returns the error of its own checks.
     ///
     /// See the example on [`UnfittedTarget`].
     fn fit(self: Box<Self>, y: &[f64]) -> Result<Box<dyn TargetTransform>, GprError>;
@@ -63,7 +190,7 @@ pub trait UnfittedTarget: Send + Sync {
 /// is zero. Variance undoes `y' = (y - μ) / s` as `Var(y) = s² Var(y')`.
 /// Covariance uses the same `s²` on every entry.
 ///
-/// See the example on [`StandardizeTarget`].
+/// See the example on [`UnfittedTarget`], which implements both traits.
 pub trait TargetTransform: Send + Sync {
     /// Applies the forward map to targets in place.
     ///
@@ -71,7 +198,7 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Returns [`GprError::NonFiniteInput`] when `y` contains `NaN` or `Inf`.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn transform(&self, y: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps latent or observation means from transformed space to `y` scale.
@@ -80,7 +207,7 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Returns [`GprError::NonFiniteInput`] when `mean` contains `NaN` or `Inf`.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn inverse_transform_mean(&self, mean: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps predictive variances from transformed space to `y` scale.
@@ -91,7 +218,7 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Returns [`GprError::NonFiniteInput`] when `var` contains `NaN` or `Inf`.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn inverse_transform_variance(&self, var: &mut [f64]) -> Result<(), GprError>;
 
     /// Maps a packed query–query covariance from transformed space to `y` scale.
@@ -104,7 +231,7 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Same as [`Self::inverse_transform_variance`].
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn inverse_transform_covariance(&self, cov: &mut [f64]) -> Result<(), GprError> {
         self.inverse_transform_variance(cov)
     }
@@ -113,19 +240,19 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Used by [`crate::FittedGpr`] clone.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn clone_box(&self) -> Box<dyn TargetTransform>;
 
     /// Returns the downcast handle used when encoding a built-in map for persist.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn as_any(&self) -> &dyn Any;
 
     /// Returns the registry key for a caller-defined map.
     ///
     /// Built-ins return [`None`].
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn persist_id(&self) -> Option<&'static str> {
         None
     }
@@ -136,7 +263,7 @@ pub trait TargetTransform: Send + Sync {
     ///
     /// Returns [`GprError::PersistFailed`] when this map has no persist form.
     ///
-    /// See the example on [`TargetTransform`].
+    /// See the example on [`UnfittedTarget`].
     fn persist_state(&self) -> Result<serde_json::Value, GprError> {
         Err(GprError::PersistFailed {
             kind: crate::error::PersistErrorKind::NotPersistable,
@@ -227,10 +354,12 @@ impl TargetTransform for IdentityTarget {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let t = StandardizeTarget::new().fit(&[1.0, 3.0, 5.0])?;
+/// assert!((t.mean() - 3.0).abs() < 1e-12);
+/// assert!((t.std() - (8.0_f64 / 3.0).sqrt()).abs() < 1e-12);
 /// let mut y = [1.0, 3.0, 5.0];
 /// t.transform(&mut y)?;
 /// t.inverse_transform_mean(&mut y)?;
-/// # let _ = y;
+/// assert!((y[2] - 5.0).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -294,14 +423,14 @@ pub struct FittedStandardizeTarget {
 impl FittedStandardizeTarget {
     /// Returns the training mean.
     ///
-    /// See the example on [`FittedStandardizeTarget`].
+    /// See the example on [`StandardizeTarget`].
     pub fn mean(&self) -> f64 {
         self.mean
     }
 
-    /// Returns the training scale `s`.
+    /// Returns the training scale `s` (the population standard deviation, or `1` for a constant `y`).
     ///
-    /// See the example on [`FittedStandardizeTarget`].
+    /// See the example on [`StandardizeTarget`].
     pub fn std(&self) -> f64 {
         self.std
     }
@@ -368,10 +497,22 @@ impl TargetTransform for FittedStandardizeTarget {
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
 /// let t = MinMaxTarget::new().fit(&[1.0, 3.0, 5.0])?;
+/// assert_eq!((t.min(), t.max()), (1.0, 5.0));
 /// let mut y = [1.0, 3.0, 5.0];
 /// t.transform(&mut y)?;
+/// assert!((y[1] - 0.5).abs() < 1e-12);
 /// t.inverse_transform_mean(&mut y)?;
-/// # let _ = y;
+/// assert!((y[1] - 3.0).abs() < 1e-12);
+///
+/// // Another output interval.
+/// let spec = MinMaxTarget::with_feature_range(-1.0, 1.0)?;
+/// assert_eq!(spec.feature_range(), (-1.0, 1.0));
+/// let t = spec.fit(&[1.0, 3.0, 5.0])?;
+/// assert_eq!(t.feature_range(), (-1.0, 1.0));
+/// let mut y = [1.0, 3.0, 5.0];
+/// t.transform(&mut y)?;
+/// assert!((y[0] + 1.0).abs() < 1e-12);
+/// assert!(MinMaxTarget::with_feature_range(1.0, 0.0).is_err());
 /// # Ok(())
 /// # }
 /// ```
@@ -484,21 +625,21 @@ pub struct FittedMinMaxTarget {
 impl FittedMinMaxTarget {
     /// Returns the output interval `[lo, hi]`.
     ///
-    /// See the example on [`FittedMinMaxTarget`].
+    /// See the example on [`MinMaxTarget`].
     pub fn feature_range(&self) -> (f64, f64) {
         (self.range_lo, self.range_hi)
     }
 
     /// Returns the training minimum.
     ///
-    /// See the example on [`FittedMinMaxTarget`].
+    /// See the example on [`MinMaxTarget`].
     pub fn min(&self) -> f64 {
         self.data_min
     }
 
     /// Returns the training maximum.
     ///
-    /// See the example on [`FittedMinMaxTarget`].
+    /// See the example on [`MinMaxTarget`].
     pub fn max(&self) -> f64 {
         self.data_max
     }

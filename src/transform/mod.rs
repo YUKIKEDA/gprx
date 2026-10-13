@@ -4,6 +4,11 @@
 //! Target maps: [`IdentityTarget`], [`StandardizeTarget`], [`MinMaxTarget`].
 //! Stack several maps with [`Pipeline`] (`X`) or [`TargetPipeline`] (`y`).
 //! Assign a map per feature with [`ColumnwiseInput`].
+//!
+//! A map of your own implements [`UnfittedTransform`] and [`Transform`]
+//! (`X`), or [`UnfittedTarget`] and [`TargetTransform`] (`y`); the examples
+//! on [`UnfittedTransform`] and [`UnfittedTarget`] show one each, used on a
+//! model that is saved and loaded.
 
 mod columnwise;
 mod input;

@@ -38,13 +38,18 @@ fn require_column_count(n_cols: usize, expected: usize) -> Result<(), GprError> 
 /// use gprx::transform::{ColumnwiseInput, MinMaxInput, StandardizeInput, Transform};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let t = ColumnwiseInput::new()
+/// assert!(ColumnwiseInput::new().is_empty());
+/// // MinMax on feature 0, Standardize on feature 1.
+/// let columns = ColumnwiseInput::new()
 ///     .then(MinMaxInput::new())
-///     .then(StandardizeInput::new())
-///     .fit(&[0.0, 2.0, 4.0, 1.0, 3.0, 5.0], 3, 2)?;
+///     .then(StandardizeInput::new());
+/// assert_eq!(columns.len(), 2);
+/// let t = columns.fit(&[0.0, 2.0, 4.0, 1.0, 3.0, 5.0], 3, 2)?;
+/// assert_eq!(t.len(), 2);
+/// assert!(!t.is_empty());
 /// let mut x = [0.0, 2.0, 4.0, 1.0, 3.0, 5.0];
 /// t.apply(&mut x, 3, 2)?;
-/// # let _ = x;
+/// assert!((x[2] - 1.0).abs() < 1e-12 && x[4].abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -96,8 +101,13 @@ impl ColumnwiseInput {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError::DimensionMismatch`] when the number of maps is not
-    /// `n_cols`, or [`GprError`] from packing, finiteness, or a column map.
+    /// Returns [`GprError::EmptyInput`] when `n_rows` or `n_cols` is zero,
+    /// [`GprError::SizeOverflow`] when `n_rows × n_cols` overflows `usize`,
+    /// [`GprError::LengthMismatch`] when `x` does not hold
+    /// `n_rows × n_cols` values, [`GprError::NonFiniteInput`] when `x`
+    /// contains `NaN` or `Inf`, [`GprError::DimensionMismatch`] when the
+    /// number of maps is not `n_cols`, or the error of the first column map
+    /// that rejects its column.
     ///
     /// See the example on [`ColumnwiseInput`].
     pub fn fit(
@@ -172,14 +182,14 @@ pub struct FittedColumnwiseInput {
 impl FittedColumnwiseInput {
     /// Returns the number of column maps.
     ///
-    /// See the example on [`FittedColumnwiseInput`].
+    /// See the example on [`ColumnwiseInput`].
     pub fn len(&self) -> usize {
         self.maps.len()
     }
 
     /// Returns whether this list has no column maps.
     ///
-    /// See the example on [`FittedColumnwiseInput`].
+    /// See the example on [`ColumnwiseInput`].
     pub fn is_empty(&self) -> bool {
         self.maps.is_empty()
     }

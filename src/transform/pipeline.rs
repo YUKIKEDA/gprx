@@ -23,13 +23,18 @@ use crate::error::GprError;
 /// use gprx::transform::{MinMaxInput, Pipeline, StandardizeInput, Transform};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let t = Pipeline::new()
+/// assert!(Pipeline::new().is_empty());
+/// let pipeline = Pipeline::new()
 ///     .then(MinMaxInput::new())
-///     .then(StandardizeInput::new())
-///     .fit(&[0.0, 2.0, 4.0], 3, 1)?;
+///     .then(StandardizeInput::new());
+/// assert_eq!(pipeline.len(), 2);
+/// let t = pipeline.fit(&[0.0, 2.0, 4.0], 3, 1)?;
+/// assert_eq!(t.len(), 2);
+/// assert!(!t.is_empty());
 /// let mut x = [0.0, 2.0, 4.0];
 /// t.apply(&mut x, 3, 1)?;
-/// # let _ = x;
+/// // MinMax then Standardize: the middle point lands on 0.
+/// assert!(x[1].abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -79,9 +84,11 @@ impl Pipeline {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] from the first map that rejects `x`, or
-    /// [`GprError::EmptyInput`] / [`GprError::NonFiniteInput`] when this
-    /// pipeline is empty and `x` is empty, packed incorrectly, or non-finite.
+    /// Returns the [`GprError`] of the first map that rejects `x` (its fit,
+    /// or its apply on the way to the next map). An empty pipeline returns
+    /// the errors of [`IdentityInput::fit`]: [`GprError::EmptyInput`],
+    /// [`GprError::SizeOverflow`], [`GprError::LengthMismatch`], or
+    /// [`GprError::NonFiniteInput`].
     ///
     /// See the example on [`Pipeline`].
     pub fn fit(self, x: &[f64], n_rows: usize, n_cols: usize) -> Result<FittedPipeline, GprError> {
@@ -153,14 +160,14 @@ pub struct FittedPipeline {
 impl FittedPipeline {
     /// Returns the number of maps.
     ///
-    /// See the example on [`FittedPipeline`].
+    /// See the example on [`Pipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
     ///
-    /// See the example on [`FittedPipeline`].
+    /// See the example on [`Pipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -236,14 +243,20 @@ impl Transform for FittedPipeline {
 /// use gprx::transform::{MinMaxTarget, StandardizeTarget, TargetPipeline, TargetTransform};
 ///
 /// # fn main() -> Result<(), gprx::GprError> {
-/// let t = TargetPipeline::new()
+/// assert!(TargetPipeline::new().is_empty());
+/// let pipeline = TargetPipeline::new()
 ///     .then(MinMaxTarget::new())
-///     .then(StandardizeTarget::new())
-///     .fit(&[1.0, 3.0, 5.0])?;
+///     .then(StandardizeTarget::new());
+/// assert_eq!(pipeline.len(), 2);
+/// let t = pipeline.fit(&[1.0, 3.0, 5.0])?;
+/// assert_eq!(t.len(), 2);
+/// assert!(!t.is_empty());
 /// let mut y = [1.0, 3.0, 5.0];
 /// t.transform(&mut y)?;
+/// assert!(y[1].abs() < 1e-12);
+/// // The inverse undoes Standardize first, then MinMax.
 /// t.inverse_transform_mean(&mut y)?;
-/// # let _ = y;
+/// assert!((y[1] - 3.0).abs() < 1e-12);
 /// # Ok(())
 /// # }
 /// ```
@@ -293,7 +306,8 @@ impl TargetPipeline {
     ///
     /// # Errors
     ///
-    /// Returns [`GprError`] from the first map that rejects `y`, or
+    /// Returns the [`GprError`] of the first map that rejects `y` (its fit,
+    /// or its forward map on the way to the next map), or
     /// [`GprError::NonFiniteInput`] when this pipeline is empty and `y`
     /// contains `NaN` or `Inf`.
     ///
@@ -364,14 +378,14 @@ pub struct FittedTargetPipeline {
 impl FittedTargetPipeline {
     /// Returns the number of maps.
     ///
-    /// See the example on [`FittedTargetPipeline`].
+    /// See the example on [`TargetPipeline`].
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
     /// Returns whether this pipeline has no maps.
     ///
-    /// See the example on [`FittedTargetPipeline`].
+    /// See the example on [`TargetPipeline`].
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
