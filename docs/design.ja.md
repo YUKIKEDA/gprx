@@ -230,7 +230,6 @@ pub trait KernelTerm<T: KernelScalar = f64>: Send + Sync + Debug + 'static {
         { Err(GprError::CoordGradientUnsupported) }
     fn grad_wrt_sq_dist_theta(&self, dist: MatRef<'_, T>, out: MatMut<'_, T>, param_idx: usize)
         -> Result<(), GprError> { Err(GprError::CoordGradientUnsupported) }
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>>;
     fn persist_id(&self) -> &'static str { "" }                          // registry key for save / load
     fn persist_state(&self) -> Result<serde_json::Value, GprError>;      // default: PersistFailed
 }

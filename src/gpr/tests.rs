@@ -495,10 +495,6 @@ impl<T: crate::kernel::KernelScalar> KernelTerm<T> for IndefiniteLeaf {
             reason: format!("indefinite leaf has no parameter pair ({i}, {j})"),
         })
     }
-
-    fn clone_box(&self) -> Box<dyn KernelTerm<T>> {
-        Box::new(self.clone())
-    }
 }
 
 fn indefinite_gpr(noise: f64) -> Gpr {
