@@ -6,8 +6,8 @@ use crate::data::{pack_points, validate_inducing};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CrossViews, KernelScalar, KernelSpec, NoSupply};
 use crate::linalg::{
-    append_chol_border, cholesky_lower_owned, delete_chol_row, frobenius2, gram_aat_plus_noise,
-    mat_vec, mul_lower_left, solve_lower,
+    append_chol_border, chol_rank1_downdate, chol_rank1_update, cholesky_lower_owned,
+    delete_chol_row, frobenius2, gram_aat_plus_noise, mat_vec, mul_lower_left, solve_lower,
 };
 use crate::sparse::KernelScratch;
 use faer::{Mat, MatMut, MatRef};
@@ -125,23 +125,36 @@ pub(crate) fn solve_lmm<T: KernelScalar>(k_mm_l: MatRef<'_, T>, col: MatMut<'_, 
     solve_lower(k_mm_l, col);
 }
 
-/// Appends one inducing point at the end by a bordered LLT of `K_mm` and `B`.
+/// The kernel values a new inducing point `z_new` brings to the VFE system
+/// of `m` inducing points `Z` and `n` training points `X`.
+pub(crate) struct InducingBorder<T> {
+    /// `k(Z, z_new)` (`m × 1`).
+    pub(crate) k_z: Mat<T>,
+    /// `k(z_new, z_new)`.
+    pub(crate) k_self: T,
+    /// `k(z_new, X)` (`n` values, in the order of `X`).
+    pub(crate) k_x: Vec<T>,
+}
+
+/// [`InducingBorder`] of the coordinates `z_new` for a coordinate kernel,
+/// with `X` (`n × d`) and `Z` (`m × d`) column-major.
 ///
-/// `A` gains a row. `k_diag_sum` is unchanged. `w` is solved from the new `B`.
+/// # Errors
+///
+/// Returns the errors of [`validate_inducing`] for `Z` or `z_new`,
+/// [`GprError::EmptyInput`] when `n` is zero, and the errors of the kernel
+/// evaluation.
 #[allow(clippy::too_many_arguments)] // kernel, data, and new `Z` stay explicit
-pub(crate) fn inducing_insert<M: crate::math::KernelMath, T>(
-    state: &mut VfeState<T>,
+pub(crate) fn coordinate_border<M: crate::math::KernelMath, T>(
     kernel: &KernelSpec,
-    noise: f64,
     x: &[f64],
     n: usize,
     d: usize,
-    y: &[f64],
     z: &[f64],
     m: usize,
     z_new: &[f64],
     ks: &mut KernelScratch<T>,
-) -> Result<(), GprError>
+) -> Result<InducingBorder<T>, GprError>
 where
     T: KernelScalar,
 {
@@ -157,36 +170,85 @@ where
     let mut z_cast = T::empty_cols();
     let mut zn_cast = T::empty_cols();
     let mut x_cast = T::empty_cols();
-    let mut y_cast = T::empty_rows();
     let z_mat = T::storage_cols(z64.as_ref(), &mut z_cast);
     let z_new_mat = T::storage_cols(z_new64.as_ref(), &mut zn_cast);
     let x_mat = T::storage_cols(x64.as_ref(), &mut x_cast);
-    let y_s = T::storage_rows(y, &mut y_cast);
-    let mut k_zz = ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_mat, z_new_mat))?;
-    let k_nn = kernel_diag_at::<T, crate::kernel::NoSupply>(kernel, z_new, d)?;
+    let k_z = ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_mat, z_new_mat))?;
+    let k_self = kernel_diag_at::<T, NoSupply>(kernel, z_new, d)?;
     let k_zx = ks.cross::<M, NoSupply>(&compiled, CrossViews::points(z_new_mat, x_mat))?;
-    solve_lmm(state.k_mm_l.as_ref(), k_zz.as_mut());
-    let mut ell2 = k_nn;
+    let k_x = (0..n).map(|j| k_zx[(0, j)]).collect();
+    Ok(InducingBorder { k_z, k_self, k_x })
+}
+
+/// Appends one inducing point at the end of `state` from its kernel values
+/// `border` (ADR 0005): a bordered LLT of `K_mm + j I`, with the offset
+/// `j` the factor of `K_mm` already took, and of `B`.
+///
+/// With `l = L⁻¹ k(Z, z_new)` and `ℓ² = k(z_new, z_new) + j − ‖l‖²`, `A`
+/// gains the row `(k(z_new, X) − lᵀ A) / ℓ` (`O(n·m)`) and `B` the border
+/// that row makes (`O(m²)` past `A` times the row). `k_diag_sum` is
+/// unchanged, `‖A‖_F²` adds the norm of the row, and `w` is solved again
+/// from the new `B`.
+///
+/// `replace`, when it is `Some(col)`, names the training point that is
+/// `z_new` itself and whose `k(Z, x_col)` changed with this insert (a
+/// supplied distance repaired to the mean of its mirror pair): column `col`
+/// of `A` becomes `l` first, and `B` follows by a rank-1 update and
+/// downdate.
+///
+/// # Errors
+///
+/// Returns [`GprError::CholeskyFailed`] when the bordered pivot of
+/// `K_mm + j I` or of `B` is not positive, or the downdate of `B` for
+/// `replace` fails. `state` is then partly written: callers pass a copy.
+pub(crate) fn inducing_append<T: KernelScalar>(
+    state: &mut VfeState<T>,
+    border: InducingBorder<T>,
+    replace: Option<usize>,
+    noise: f64,
+    y: &[f64],
+) -> Result<(), GprError> {
+    let InducingBorder {
+        k_z: mut l,
+        k_self,
+        k_x,
+    } = border;
+    let (m, n) = (state.a.nrows(), state.a.ncols());
+    let failed = |jitter| GprError::CholeskyFailed {
+        jitter,
+        matrix_size: m + 1,
+        stage: CholeskyStage::OnlineInsert,
+    };
+    solve_lmm(state.k_mm_l.as_ref(), l.as_mut());
+    let mut ell2 = k_self + lit::<T>(state.k_mm_jitter);
     for i in 0..m {
-        let li = k_zz[(i, 0)];
-        ell2 -= li * li;
+        ell2 -= l[(i, 0)] * l[(i, 0)];
     }
     if ell2.to_f64() <= 0.0 || !ell2.to_f64().is_finite() {
-        return Err(GprError::CholeskyFailed {
-            jitter: 0.0,
-            matrix_size: m + 1,
-            stage: CholeskyStage::OnlineInsert,
-        });
+        return Err(failed(state.k_mm_jitter));
+    }
+    let l_col: Vec<T> = (0..m).map(|i| l[(i, 0)]).collect();
+    if let Some(col) = replace {
+        let mut old: Vec<T> = (0..m).map(|i| state.a[(i, col)]).collect();
+        let mut new = l_col.clone();
+        for (i, (&o, &v)) in old.iter().zip(&new).enumerate() {
+            state.a_frobenius2 += v * v - o * o;
+            state.a[(i, col)] = v;
+        }
+        chol_rank1_update(&mut state.b_l, &mut new);
+        if !chol_rank1_downdate(&mut state.b_l, &mut old) {
+            return Err(failed(0.0));
+        }
     }
     let ell = ell2.sqrt();
     let mut a_new = vec![lit::<T>(0.0); n];
     let mut a_new_norm2 = lit::<T>(0.0);
     for j in 0..n {
         let mut dot = lit::<T>(0.0);
-        for i in 0..m {
-            dot += k_zz[(i, 0)] * state.a[(i, j)];
+        for (i, &li) in l_col.iter().enumerate() {
+            dot += li * state.a[(i, j)];
         }
-        let value = (k_zx[(0, j)] - dot) / ell;
+        let value = (k_x[j] - dot) / ell;
         a_new[j] = value;
         a_new_norm2 += value * value;
     }
@@ -202,32 +264,30 @@ where
         beta2 -= bi * bi;
     }
     if beta2.to_f64() <= 0.0 || !beta2.to_f64().is_finite() {
-        return Err(GprError::CholeskyFailed {
-            jitter: 0.0,
-            matrix_size: m + 1,
-            stage: CholeskyStage::OnlineInsert,
-        });
+        return Err(failed(0.0));
     }
-    let mut l_col = vec![lit::<T>(0.0); m];
-    for i in 0..m {
-        l_col[i] = k_zz[(i, 0)];
-    }
-    let mut b_col = vec![lit::<T>(0.0); m];
-    for i in 0..m {
-        b_col[i] = b_border[(i, 0)];
-    }
+    let b_col: Vec<T> = (0..m).map(|i| b_border[(i, 0)]).collect();
     state.k_mm_l = append_chol_border(&state.k_mm_l, &l_col, ell);
     state.b_l = append_chol_border(&state.b_l, &b_col, beta2.sqrt());
     state.a = append_row(&state.a, &a_new);
     state.a_frobenius2 += a_new_norm2;
+    let mut y_cast = T::empty_rows();
+    let y_s = T::storage_rows(y, &mut y_cast);
     state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y_s);
     Ok(())
 }
 
-/// Drops inducing row `idx` by a trailing cholupdate of `L_mm`.
+/// Drops inducing row `idx` by a trailing cholupdate of `L_mm` (ADR 0005).
 ///
-/// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`.
-/// `B` is formed again from the new `A`. `k_diag_sum` is unchanged.
+/// Reuses `K(Z, X) = L A`, drops that row, and solves the reduced `A`
+/// (`O(n·m²)`, no kernel evaluation). `B` is formed again from the new
+/// `A`. `k_diag_sum` and the offset `j` of `K_mm + j I` are unchanged.
+///
+/// # Errors
+///
+/// Returns [`GprError::EmptyInput`] when `m ≤ 1`,
+/// [`GprError::IndexOutOfRange`] when `idx ≥ m`, and
+/// [`GprError::CholeskyFailed`] when the new `B` does not factor.
 pub(crate) fn inducing_delete<T: KernelScalar>(
     state: &mut VfeState<T>,
     noise: f64,

@@ -6,8 +6,8 @@ use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{KernelScalar, KernelSpec, Supply, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
-    cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise, llt_scratch,
-    matvec_columns, round_mat, solve_llt, solve_lower,
+    cholesky_lower_jitter, cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise,
+    llt_scratch, matvec_columns, round_mat, solve_llt, solve_lower,
 };
 use crate::param::Interval;
 use crate::policy::JitterPolicy;
@@ -58,7 +58,12 @@ pub(super) fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprErro
 }
 
 pub(crate) struct VfeState<T: KernelScalar> {
+    /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(crate) k_mm_l: Mat<T>,
+    /// The offset `j` the factor of `K_mm` took under the jitter policy
+    /// (`0.0` when `K_mm` factored as it is). An inducing insert borders
+    /// `L` with the same `j`, so `L` stays the factor of `K_mm + j I`.
+    pub(crate) k_mm_jitter: f64,
     pub(crate) a: Mat<T>,
     pub(crate) b_l: Mat<T>,
     pub(crate) w: Vec<T>,
@@ -119,6 +124,7 @@ where
         inducing: PhantomData,
         _kernel: PhantomData,
         k_mm_l: state.k_mm_l,
+        k_mm_jitter: state.k_mm_jitter,
         a: state.a,
         b_l: state.b_l,
         w: state.w,
@@ -170,7 +176,7 @@ where
     let mut k_mm = Mat::zeros(n_inducing, n_inducing);
     ks.gram::<M, U>(&compiled, sets.k_mm(), k_mm.as_mut(), Triangle::Lower)?;
     let mut chol_scratch = llt_scratch::<T>(n_inducing);
-    cholesky_lower_with_retries(
+    let applied_jitter = cholesky_lower_jitter(
         &mut k_mm,
         &mut chol_scratch,
         k_mm_jitter.retry_jitters(),
@@ -203,6 +209,7 @@ where
     }
     Ok(VfeState::<T> {
         k_mm_l: k_mm,
+        k_mm_jitter: applied_jitter,
         a,
         b_l: b,
         w,
@@ -215,6 +222,7 @@ where
 fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
     VfeState {
         k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
+        k_mm_jitter: state.k_mm_jitter,
         a: round_mat::<T>(state.a.as_ref()),
         b_l: round_mat::<T>(state.b_l.as_ref()),
         w: state.w.iter().map(|value| T::from_f64(*value)).collect(),

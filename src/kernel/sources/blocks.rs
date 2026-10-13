@@ -395,16 +395,32 @@ impl<T: KernelScalar> BlockStore<T> {
         }
     }
 
-    /// Sets the value of `block` at `(row, col)`.
-    pub(crate) fn set(&mut self, at: BlockAt, row: usize, col: usize, v: T) {
-        let (i, stride) = (row + col * self.ld, self.stride);
-        match at {
-            BlockAt::Scalar(slot) => self.scalar[slot][i] = v,
-            BlockAt::Ard(slot, k) => match &mut self.ard[slot] {
-                SlotBlocks::Flat(all) => all[k * stride + i] = v,
-                SlotBlocks::Tables(tables) => tables[k][i] = v,
-            },
-        }
+    /// Number of rows of each block.
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of blocks.
+    pub(crate) fn block_count(&self) -> usize {
+        self.block_at().count()
+    }
+
+    /// Writes row `row` of columns `0..cols` of every block, `value(b, col)`
+    /// in block `b` ([`Self::block_ids`] order), in place.
+    pub(crate) fn set_row(
+        &mut self,
+        row: usize,
+        cols: usize,
+        mut value: impl FnMut(usize, usize) -> T,
+    ) {
+        let ld = self.ld;
+        let mut b = 0;
+        self.each_block_mut(|_, block| {
+            for col in 0..cols {
+                block[row + col * ld] = value(b, col);
+            }
+            b += 1;
+        });
     }
 
     /// Every block, as [`Self::push_row`] and [`Self::push_col`] name them.
@@ -870,11 +886,11 @@ pub(crate) fn new_inducing_column(
 ) -> Result<(Vec<f64>, Vec<f64>), GprError> {
     let (n, m) = (xz.rows, inducing.len());
     let side = m + 1;
-    let blocks = xz.block_ids();
-    let mut column = Vec::with_capacity(n * blocks.len());
-    let mut mirror = Vec::with_capacity(m * blocks.len());
+    let count = xz.block_at().count();
+    let mut column = Vec::with_capacity(n * count);
+    let mut mirror = Vec::with_capacity(m * count);
     let mut square = vec![0.0; side * side];
-    for &at in &blocks {
+    for at in xz.block_at() {
         let start = column.len();
         column_into(cols, at, n, &mut column).map_err(|err| locate(at, err))?;
         let new = &mut column[start..];
