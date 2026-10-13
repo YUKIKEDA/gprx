@@ -172,7 +172,7 @@ impl<T: KernelScalar> CompiledKernel<T> {
     /// Returns [`GprError::CoordGradientUnsupported`] when a leaf has no
     /// coordinate derivative (a Matérn leaf with `ν = 1/2`, or a custom leaf
     /// that does not override [`super::super::KernelTerm::grad_wrt_sq_dist`])
-    /// or a product has no terms. Products use the product rule over their
+    /// or a sum or product has no terms. Products use the product rule over their
     /// terms. Otherwise the same errors as
     /// [`super::super::RbfKernel::grad_wrt_coord_dim`].
     ///

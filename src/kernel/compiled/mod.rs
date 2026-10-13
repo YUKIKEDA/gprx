@@ -154,11 +154,11 @@ impl<'a, T: KernelScalar> CrossViews<'a, T> {
 ///     * KernelSpec::from(MaternKernel::new(1.0, MaternNu::ThreeHalves)?)
 ///     + KernelSpec::from(WhiteKernel::new(0.01)?);
 /// let CompiledKernel::Sum(terms) = spec.compile() else {
-///     return Ok(());
+///     unreachable!("a sum compiles to a flattened Sum");
 /// };
 /// assert_eq!(terms.iter().map(name).collect::<Vec<_>>(), ["product", "white"]);
 /// let CompiledKernel::Product(factors) = &terms[0] else {
-///     return Ok(());
+///     unreachable!("the first term of the sum is a product");
 /// };
 /// assert_eq!(factors.iter().map(name).collect::<Vec<_>>(), ["constant", "rbf", "matern"]);
 /// # Ok(())
