@@ -1,5 +1,5 @@
-//! Which path an inducing change of [`OnlineSgpr`] takes: the incremental
-//! update of ADR 0005, or an assembly of the changed inducing set.
+//! Which path an inducing change or an `X` step of [`OnlineSgpr`] takes: the
+//! incremental update of ADR 0005 or 0004, or an assembly of the changed system.
 
 use super::*;
 use crate::kernel::{MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
@@ -173,4 +173,36 @@ fn a_factor_with_a_rounding_pivot_assembles_inducing_changes() {
     apply(&mut model, &delete_duplicate);
     assert!(factor_pivots_hold(model.state.k_mm_l.as_ref()));
     assert!(updates_in_place(&mut model, &Change::Delete(2)));
+}
+
+/// The pivot check an `X` step reads ([`OnlineSgpr::updates_x_in_place`])
+/// is kept with the factor of `K_mm`: every change that replaces the
+/// factor (an inducing change, new `θ`) checks it again, and an `X` step,
+/// which leaves the factor as it is, keeps it.
+#[test]
+fn x_steps_read_the_pivot_check_of_the_current_factor() {
+    let x: Vec<f64> = (0..12).map(|i| 0.3 * f64::from(i)).collect();
+    let y: Vec<f64> = x.iter().map(|&v| (1.3 * v).sin()).collect();
+    let rbf = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let mut model = online(rbf, &x, 1, &y, &[0.5, 1.7, 1.7]);
+    let kept_matches = |model: &OnlineSgpr<Fixed>| {
+        model.updates_x_in_place() == factor_pivots_hold(model.state.k_mm_l.as_ref())
+    };
+    assert!(!model.updates_x_in_place());
+    model.insert(&[0.9], 0.4).expect("insert");
+    assert!(!model.updates_x_in_place());
+    model.delete(model.point_ids()[0]).expect("delete");
+    assert!(!model.updates_x_in_place());
+    apply(&mut model, &Change::Delete(2));
+    assert!(model.updates_x_in_place() && kept_matches(&model));
+    model.insert(&[2.9], -0.2).expect("insert");
+    assert!(model.updates_x_in_place());
+    apply(&mut model, &Change::Insert(vec![1.7 + 1e-3]));
+    assert!(!model.updates_x_in_place() && kept_matches(&model));
+    let mut theta = vec![0.0; model.num_params()];
+    model.get_params(&mut theta).expect("θ");
+    // A lengthscale of `1e-2` takes the near duplicate apart.
+    theta[0] = 1e-2_f64.ln();
+    model.set_params(&theta).expect("set θ");
+    assert!(model.updates_x_in_place() && kept_matches(&model));
 }
