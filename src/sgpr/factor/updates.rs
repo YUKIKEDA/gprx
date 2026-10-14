@@ -12,15 +12,16 @@ use crate::linalg::{
 use crate::sparse::KernelScratch;
 use faer::{Mat, MatMut, MatRef};
 
-/// Appends `col` (`m × 1`) as a new last column of `a` in place.
+/// Appends `col` (`m` values) as a new last column of `a` in place,
+/// rounded to the storage scalar.
 ///
 /// The column capacity doubles when it runs out, so a run of appends costs
 /// `O(m)` each, amortized, instead of copying all of `a` every time.
-pub(crate) fn push_column<T: KernelScalar>(a: &mut Mat<T>, col: MatRef<'_, T>) {
+pub(crate) fn push_column<T: KernelScalar>(a: &mut Mat<T>, col: &[f64]) {
     let m = a.nrows();
     let n = a.ncols();
     a.reserve(m, (n + 1).next_power_of_two());
-    a.resize_with(m, n + 1, |row, _| col[(row, 0)]);
+    a.resize_with(m, n + 1, |row, _| T::from_f64(col[row]));
 }
 
 /// Removes column `idx` of `a` in place, shifting the later columns left.
@@ -296,8 +297,8 @@ pub(crate) fn inducing_append<T: KernelScalar>(
             state.a_frobenius2 += v * v - o * o;
             state.a[(i, col)] = v;
         }
-        chol_rank1_update(&mut state.b_l, &mut new);
-        if !chol_rank1_downdate(&mut state.b_l, &mut old) {
+        chol_rank1_update(state.b_l.as_mut(), &mut new);
+        if !chol_rank1_downdate(state.b_l.as_mut(), &mut old) {
             return Err(failed(0.0));
         }
     }
@@ -330,6 +331,7 @@ pub(crate) fn inducing_append<T: KernelScalar>(
     }
     let b_col: Vec<T> = (0..m).map(|i| b_border[(i, 0)]).collect();
     state.k_mm_l = append_chol_border(&state.k_mm_l, &l_col, ell);
+    state.k_mm_l_f64 = T::hold_f64_factor(state.k_mm_l.as_ref());
     state.b_l = append_chol_border(&state.b_l, &b_col, beta2.sqrt());
     state.a = append_row(&state.a, &a_new);
     state.a_frobenius2 += a_new_norm2;
@@ -406,6 +408,7 @@ pub(crate) fn inducing_delete<T: KernelScalar>(
     let k_zx = mul_lower_left(state.k_mm_l.as_ref(), state.a.as_ref());
     let k_zx = remove_row(&k_zx, idx);
     state.k_mm_l = delete_chol_row(&state.k_mm_l, idx);
+    state.k_mm_l_f64 = T::hold_f64_factor(state.k_mm_l.as_ref());
     let mut a = k_zx;
     solve_lower(state.k_mm_l.as_ref(), a.as_mut());
     let mut b = gram_aat_plus_noise(a.as_ref(), noise);

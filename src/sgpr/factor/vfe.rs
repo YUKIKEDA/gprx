@@ -3,7 +3,7 @@
 use super::lit;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{KernelScalar, KernelSpec, Supply, Triangle};
+use crate::kernel::{KernelScalar, KernelSpec, ScalarOps, Supply, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_jitter, cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise,
@@ -60,6 +60,10 @@ pub(super) fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprErro
 pub(crate) struct VfeState<T: KernelScalar> {
     /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(crate) k_mm_l: Mat<T>,
+    /// `L` in `f64` beside a rounded `k_mm_l` (`f32`): the factor the
+    /// assembly formed. A new column `L⁻¹ k(Z, x)` of an online `X` insert
+    /// is solved against it, as the assembly solved `A`.
+    pub(crate) k_mm_l_f64: <T as ScalarOps>::F64Factor,
     /// The offset `j` the factor of `K_mm` took under the jitter policy
     /// (`0.0` when `K_mm` factored as it is). An inducing insert borders
     /// `L` with the same `j`, so `L` stays the factor of `K_mm + j I`.
@@ -124,6 +128,7 @@ where
         inducing: PhantomData,
         _kernel: PhantomData,
         k_mm_l: state.k_mm_l,
+        k_mm_l_f64: state.k_mm_l_f64,
         k_mm_jitter: state.k_mm_jitter,
         a: state.a,
         b_l: state.b_l,
@@ -155,7 +160,7 @@ where
             ks64,
             &mut KernelScratch::new(),
         )?;
-        return Ok(round_vfe(&state));
+        return Ok(round_vfe(state).0);
     }
     let (n_rows, n_inducing) = (data.n, data.m);
     let compiled = kernel.compile_as::<T>();
@@ -208,6 +213,7 @@ where
         w[i] = ay[(i, 0)];
     }
     Ok(VfeState::<T> {
+        k_mm_l_f64: T::hold_f64_factor(k_mm.as_ref()),
         k_mm_l: k_mm,
         k_mm_jitter: applied_jitter,
         a,
@@ -218,17 +224,21 @@ where
     })
 }
 
-/// `state` rounded to a storage scalar that is evaluated in `f64`.
-fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
-    VfeState {
+/// `state` rounded to a storage scalar that is evaluated in `f64`, and the
+/// `f64` weights `w` of `state`. The `f64` factor of `K_mm` moves into the
+/// rounded state ([`VfeState::k_mm_l_f64`]).
+fn round_vfe<T: KernelScalar>(state: VfeState<f64>) -> (VfeState<T>, Vec<f64>) {
+    let rounded = VfeState {
         k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
+        k_mm_l_f64: T::f64_factor_from(state.k_mm_l),
         k_mm_jitter: state.k_mm_jitter,
         a: round_mat::<T>(state.a.as_ref()),
         b_l: round_mat::<T>(state.b_l.as_ref()),
         w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
         k_diag_sum: T::from_f64(state.k_diag_sum),
         a_frobenius2: T::from_f64(state.a_frobenius2),
-    }
+    };
+    (rounded, state.w)
 }
 
 /// [`assemble_vfe`] in the storage scalar `T`, plus the `f64` weights `w`
@@ -255,8 +265,8 @@ pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScala
             ks64,
             &mut KernelScratch::new(),
         )?;
-        let rounded = round_vfe(&state);
-        return Ok((rounded, Some(state.w)));
+        let (rounded, w64) = round_vfe(state);
+        return Ok((rounded, Some(w64)));
     }
     let state = assemble_vfe::<M, T, U>(kernel, k_mm_jitter, likelihood, data, ks, ks64)?;
     Ok((state, None))

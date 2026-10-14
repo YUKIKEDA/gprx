@@ -106,6 +106,9 @@ pub struct FittedSgpr<
     pub(super) _kernel: PhantomData<K>,
     /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
+    /// `L` in `f64` beside a rounded `k_mm_l` (`f32` storage): the factor
+    /// the assembly formed, which an online `X` insert solves against.
+    pub(super) k_mm_l_f64: <P::Storage as crate::kernel::ScalarOps>::F64Factor,
     /// The offset `j` the factor `k_mm_l` took under the jitter policy.
     pub(super) k_mm_jitter: f64,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -384,6 +387,7 @@ where
     pub(crate) fn apply_vfe(&mut self, state: VfeState<P::Storage>) {
         self.predict_w = promote_predict_w::<P>(&state.w);
         self.k_mm_l = state.k_mm_l;
+        self.k_mm_l_f64 = state.k_mm_l_f64;
         self.k_mm_jitter = state.k_mm_jitter;
         self.a = state.a;
         self.b_l = state.b_l;

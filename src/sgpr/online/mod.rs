@@ -13,7 +13,7 @@ use crate::kernel::{
     KernelSpec, ModelKernel, NoSupply, PointUse, QueryScratch, QuerySources, SuppliedSpec, Supply,
     SupplyViews, WithPoints, column_into, new_inducing_column,
 };
-use crate::linalg::{chol_rank1_downdate, chol_rank1_update, frobenius2, solve_llt};
+use crate::linalg::{chol_rank1_downdate, chol_rank1_update, solve_llt, solve_lower};
 use crate::optimizer::{Lbfgs, Optimizer};
 use crate::points::PointId;
 use crate::points::{IdRegistry, PointRegistry, RegistryId};
@@ -34,7 +34,7 @@ use super::factor::{
     assemble_vfe_with_f64_w, coordinate_border, factor_pivots_hold, inducing_append,
     inducing_delete, kernel_column, kernel_diag_at, point_at, predict_vfe_covariance,
     predict_vfe_into, publish_sgpr_weights, push_column, remove_column_in_place, remove_point,
-    solve_lmm, vfe_loo, vfe_neg_log_marginal_likelihood,
+    vfe_loo, vfe_neg_log_marginal_likelihood,
 };
 use super::fitted::FittedSgpr;
 
@@ -119,7 +119,17 @@ pub(super) enum InducingChange<T> {
 /// `insert` appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
 /// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put
-/// (ADR 0004). The VFE system is assembled again on the changed points
+/// (ADR 0004). Each step computes in `f64` whatever the storage scalar:
+/// the new column `L⁻¹ k(Z, x)` of `A` is evaluated in `f64` and solved
+/// against the `f64` factor of `K_mm` (for an `f32` storage scalar, the
+/// one the last assembly formed before it rounded), the factor of `B` is
+/// updated in `f64` and rounded once into the storage scalar, and
+/// `Σ k(x_i, x_i)` and `‖A‖_F²` are summed in `f64`. With an `f32` storage
+/// scalar, a model after any run of steps then differs from a fresh factor
+/// of the same precision by the rounding of the stored `A` and factor of
+/// `B` alone, which does not grow with the number of steps (predictions
+/// and NLML within relative `1e-6` to `3e-6` in measurements).
+/// The VFE system is assembled again on the changed points
 /// instead (`O(n·m²)`, the factor a batch model of those points takes)
 /// when any of these holds:
 ///
@@ -251,6 +261,10 @@ pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
     pub(super) core: SparseCore<U>,
     /// Lower `L` from `K_mm + j I = L Lᵀ`.
     k_mm_l: Mat<P::Storage>,
+    /// `L` in `f64` beside a rounded `k_mm_l` (`f32` storage): the factor
+    /// of the last assembly, which an `X` insert solves its new column of
+    /// `A` against.
+    k_mm_l_f64: <P::Storage as ScalarOps>::F64Factor,
     /// The offset `j` of `k_mm_l`: the one the last assembly of `K_mm`
     /// took under the jitter policy, which an inducing insert borders with.
     k_mm_jitter: f64,
@@ -259,11 +273,21 @@ pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
     /// [`OnlineSgpr::updates_x_in_place`]).
     k_mm_pivots_hold: bool,
     a: Mat<P::Storage>,
+    /// Lower factor of `B = σn² I + A Aᵀ`, in the storage scalar: the
+    /// rounding of `b_l_f64`.
     b_l: Mat<P::Storage>,
+    /// The `f64` factor of `B` the rank-1 steps of `X` update (none for an
+    /// `f64` storage scalar, whose `b_l` is that factor): `b_l` is its
+    /// rounding after every step, so `f32` rounding does not accumulate
+    /// over a run of steps.
+    b_l_f64: <P::Storage as ScalarOps>::F64Factor,
     w: Vec<P::Storage>,
     predict_w: Vec<P::Refine>,
-    k_diag_sum: P::Storage,
-    a_frobenius2: P::Storage,
+    /// `Σ k(x_i, x_i)` and `‖A‖_F²` in `f64`, whatever the storage scalar:
+    /// the running sums of the `X` steps, rounded where they are read, as
+    /// an assembly rounds the `f64` sums it forms.
+    k_diag_sum: f64,
+    a_frobenius2: f64,
     /// `A y` in `f64`, kept through rank-1 updates so `w = B⁻¹ A y` costs
     /// one `O(m²)` solve instead of a pass over all `n` columns.
     ay: Vec<f64>,
@@ -373,13 +397,15 @@ where
                 core: fitted.core,
                 k_mm_pivots_hold: factor_pivots_hold(fitted.k_mm_l.as_ref()),
                 k_mm_l: fitted.k_mm_l,
+                k_mm_l_f64: fitted.k_mm_l_f64,
                 k_mm_jitter: fitted.k_mm_jitter,
                 a: fitted.a,
+                b_l_f64: <P::Storage as ScalarOps>::hold_f64_factor(fitted.b_l.as_ref()),
                 b_l: fitted.b_l,
                 w: fitted.w,
                 predict_w: fitted.predict_w,
-                k_diag_sum: fitted.k_diag_sum,
-                a_frobenius2: fitted.a_frobenius2,
+                k_diag_sum: fitted.k_diag_sum.to_f64(),
+                a_frobenius2: fitted.a_frobenius2.to_f64(),
                 registry,
                 inducing,
                 inducing_points,
@@ -407,13 +433,14 @@ where
             inducing: PhantomData,
             _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l.clone(),
+            k_mm_l_f64: self.state.k_mm_l_f64.clone(),
             k_mm_jitter: self.state.k_mm_jitter,
             a: self.state.a.clone(),
             b_l: self.state.b_l.clone(),
             w: self.state.w.clone(),
             predict_w: self.state.predict_w.clone(),
-            k_diag_sum: self.state.k_diag_sum,
-            a_frobenius2: self.state.a_frobenius2,
+            k_diag_sum: P::Storage::from_f64(self.state.k_diag_sum),
+            a_frobenius2: P::Storage::from_f64(self.state.a_frobenius2),
         }
     }
 
@@ -447,13 +474,15 @@ where
         self.optimizer = fitted.optimizer;
         self.state.k_mm_pivots_hold = factor_pivots_hold(fitted.k_mm_l.as_ref());
         self.state.k_mm_l = fitted.k_mm_l;
+        self.state.k_mm_l_f64 = fitted.k_mm_l_f64;
         self.state.k_mm_jitter = fitted.k_mm_jitter;
         self.state.a = fitted.a;
+        self.state.b_l_f64 = <P::Storage as ScalarOps>::hold_f64_factor(fitted.b_l.as_ref());
         self.state.b_l = fitted.b_l;
         self.state.w = fitted.w;
         self.state.predict_w = fitted.predict_w;
-        self.state.k_diag_sum = fitted.k_diag_sum;
-        self.state.a_frobenius2 = fitted.a_frobenius2;
+        self.state.k_diag_sum = fitted.k_diag_sum.to_f64();
+        self.state.a_frobenius2 = fitted.a_frobenius2.to_f64();
         self.state.ay = a_times_y(self.state.a.as_ref(), &self.state.core.y_train);
     }
 
@@ -492,12 +521,13 @@ where
     fn vfe_state(&self) -> VfeState<P::Storage> {
         VfeState::<P::Storage> {
             k_mm_l: self.state.k_mm_l.clone(),
+            k_mm_l_f64: self.state.k_mm_l_f64.clone(),
             k_mm_jitter: self.state.k_mm_jitter,
             a: self.state.a.clone(),
             b_l: self.state.b_l.clone(),
             w: self.state.w.clone(),
-            k_diag_sum: self.state.k_diag_sum,
-            a_frobenius2: self.state.a_frobenius2,
+            k_diag_sum: P::Storage::from_f64(self.state.k_diag_sum),
+            a_frobenius2: P::Storage::from_f64(self.state.a_frobenius2),
         }
     }
 
@@ -510,12 +540,14 @@ where
     fn set_vfe(&mut self, state: VfeState<P::Storage>) {
         self.state.k_mm_pivots_hold = factor_pivots_hold(state.k_mm_l.as_ref());
         self.state.k_mm_l = state.k_mm_l;
+        self.state.k_mm_l_f64 = state.k_mm_l_f64;
         self.state.k_mm_jitter = state.k_mm_jitter;
         self.state.a = state.a;
+        self.state.b_l_f64 = <P::Storage as ScalarOps>::hold_f64_factor(state.b_l.as_ref());
         self.state.b_l = state.b_l;
         self.state.w = state.w;
-        self.state.k_diag_sum = state.k_diag_sum;
-        self.state.a_frobenius2 = state.a_frobenius2;
+        self.state.k_diag_sum = state.k_diag_sum.to_f64();
+        self.state.a_frobenius2 = state.a_frobenius2.to_f64();
         self.state.ay = a_times_y(self.state.a.as_ref(), &self.state.core.y_train);
     }
 
@@ -548,16 +580,21 @@ where
         Ok(())
     }
 
-    /// `w = B⁻¹ A y` from the kept `A y`: one `O(m²)` solve.
+    /// `w = B⁻¹ A y` from the kept `A y`: one `O(m²)` solve in `f64` with
+    /// the `f64` factor of `B`, rounded to the storage scalar.
     fn recompute_w(&mut self) -> Result<(), GprError> {
         let m = self.state.core.m;
-        let mut rhs = Mat::<P::Storage>::zeros(m, 1);
+        let mut rhs = Mat::<f64>::zeros(m, 1);
         for (row, value) in self.state.ay.iter().enumerate() {
-            rhs[(row, 0)] = P::Storage::from_f64(*value);
+            rhs[(row, 0)] = *value;
         }
-        solve_llt(self.state.b_l.as_ref(), rhs.as_mut());
+        let b_l =
+            <P::Storage as ScalarOps>::f64_factor(self.state.b_l.as_ref(), &self.state.b_l_f64);
+        solve_llt(b_l, rhs.as_mut());
         self.state.w.clear();
-        self.state.w.extend((0..m).map(|row| rhs[(row, 0)]));
+        self.state
+            .w
+            .extend((0..m).map(|row| P::Storage::from_f64(rhs[(row, 0)])));
         self.refresh_predict_w()
     }
 
@@ -663,8 +700,8 @@ where
             self.state.b_l.as_ref(),
             &self.state.w,
             &self.state.core.y_train,
-            self.state.k_diag_sum,
-            self.state.a_frobenius2,
+            P::Storage::from_f64(self.state.k_diag_sum),
+            P::Storage::from_f64(self.state.a_frobenius2),
             self.state.core.likelihood.noise_variance(),
             self.state.core.n,
             self.state.core.m,
@@ -735,13 +772,13 @@ where
 
     /// Removes the training point identified by `id` and packs every buffer.
     ///
-    /// Updates `B` with a rank-1 downdate. The remaining points are
-    /// factored again instead (`O(n·m²)`) when a pivot of the factor of
-    /// `K_mm` is at most `1e-5` times its diagonal (`1e-3` for an `f32`
-    /// storage scalar; an exact or near duplicate among the inducing
-    /// points, say) or the downdate loses positive definiteness: the
-    /// conditions on [`OnlineSgpr`]. The last remaining point cannot be
-    /// deleted.
+    /// Updates `B` with a rank-1 downdate, in `f64` (see [`OnlineSgpr`]).
+    /// The remaining points are factored again instead (`O(n·m²)`) when a
+    /// pivot of the factor of `K_mm` is at most `1e-5` times its diagonal
+    /// (`1e-3` for an `f32` storage scalar; an exact or near duplicate
+    /// among the inducing points, say) or the downdate loses positive
+    /// definiteness: the conditions on [`OnlineSgpr`]. The last remaining
+    /// point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -808,9 +845,9 @@ where
 
     /// [`Self::delete`] of the point at buffer index `idx`.
     fn delete_at(&mut self, idx: usize) -> Result<(), GprError> {
-        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
+        let mut v = vec![0.0; self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
-            *slot = self.state.a[(i, idx)];
+            *slot = self.state.a[(i, idx)].to_f64();
         }
         let x_pt = point_at(
             &self.state.core.x_train,
@@ -818,15 +855,9 @@ where
             self.state.core.d,
             idx,
         );
-        let diag = kernel_diag_at::<P::Storage, K::Supply>(
-            &self.state.core.kernel,
-            &x_pt,
-            self.state.core.d,
-        )?;
-        let mut col_norm = P::Storage::from_f64(0.0);
-        for value in &v {
-            col_norm += *value * *value;
-        }
+        let diag =
+            kernel_diag_at::<f64, K::Supply>(&self.state.core.kernel, &x_pt, self.state.core.d)?;
+        let col_norm: f64 = v.iter().map(|value| value * value).sum();
         let x_next = remove_point(
             &self.state.core.x_train,
             self.state.core.n,
@@ -843,9 +874,12 @@ where
         );
         let mut y_obs_next = self.state.core.y_obs.clone();
         y_obs_next.remove(idx);
-        let mut b_trial = self.state.b_l.clone();
+        let mut b_trial = <P::Storage as ScalarOps>::f64_factor_trial(
+            self.state.b_l.as_ref(),
+            &self.state.b_l_f64,
+        );
         let mut v_trial = v;
-        if self.updates_x_in_place() && chol_rank1_downdate(&mut b_trial, &mut v_trial) {
+        if self.updates_x_in_place() && chol_rank1_downdate(b_trial.as_mut(), &mut v_trial) {
             self.state.k_diag_sum -= diag;
             self.state.a_frobenius2 -= col_norm;
             let y_idx = self.state.core.y_train[idx];
@@ -853,7 +887,11 @@ where
                 *slot -= self.state.a[(row, idx)].to_f64() * y_idx;
             }
             remove_column_in_place(&mut self.state.a, idx);
-            self.state.b_l = b_trial;
+            <P::Storage as ScalarOps>::commit_f64_factor(
+                &mut self.state.b_l,
+                &mut self.state.b_l_f64,
+                b_trial,
+            );
             // Only a precision whose weights can still fail keeps the row.
             let mut saved = Vec::new();
             if let Some(supply) = self.state.core.supply_mut() {
@@ -1231,13 +1269,14 @@ where
             inducing: PhantomData,
             _kernel: PhantomData,
             k_mm_l: self.state.k_mm_l,
+            k_mm_l_f64: self.state.k_mm_l_f64,
             k_mm_jitter: self.state.k_mm_jitter,
             a: self.state.a,
             b_l: self.state.b_l,
             w: self.state.w,
             predict_w: self.state.predict_w,
-            k_diag_sum: self.state.k_diag_sum,
-            a_frobenius2: self.state.a_frobenius2,
+            k_diag_sum: P::Storage::from_f64(self.state.k_diag_sum),
+            a_frobenius2: P::Storage::from_f64(self.state.a_frobenius2),
         }
     }
 }
@@ -1493,7 +1532,9 @@ where
     ///
     /// Costs `O(m² + n·d)`, amortized: `A` grows in place, `A y` is updated
     /// with the new column, and `w = B⁻¹ A y` is one solve with the updated
-    /// factor of `B`. The `O(n·d)` part moves the column-major training `X`.
+    /// factor of `B`, all in `f64` whatever the storage scalar (see
+    /// [`OnlineSgpr`]). The `O(n·d)` part moves the column-major training
+    /// `X`.
     /// A precision that refines in `f64` ([`crate::MixedPrecision`]) also
     /// assembles its `f64` predict weights again from all `n` points,
     /// `O(n·m²)`: its weights are the exact `f64` solution, which no rank-1
@@ -1554,19 +1595,16 @@ where
         self.state.core.map_point(x_obs, mapped)?;
         let x_new = mapped.as_slice();
         let y_new = self.state.core.map_target(y_obs)?;
-        let a_col = with_kernel_exp!(self.state.core.math, M => kernel_column::<M, P::Storage>(
+        let a_col = with_kernel_exp!(self.state.core.math, M => kernel_column::<M, f64>(
             &self.state.core.kernel,
             &self.state.core.z_train,
             self.state.core.m,
             x_new,
             self.state.core.d,
-            &mut self.scratch.storage,
+            &mut self.scratch.f64,
         ))?;
-        let k_diag = kernel_diag_at::<P::Storage, NoSupply>(
-            &self.state.core.kernel,
-            x_new,
-            self.state.core.d,
-        )?;
+        let k_diag =
+            kernel_diag_at::<f64, NoSupply>(&self.state.core.kernel, x_new, self.state.core.d)?;
         let point = NewPoint {
             x: x_new,
             x_obs,
@@ -1582,13 +1620,17 @@ where
     P: crate::precision::GpScalar,
 {
     /// Appends a training point at the current `θ` from `K(Z, x)`
-    /// (`a_col`, `m × 1`) and `k(x, x)`, and `point` its coordinates and
-    /// target. `supply`
+    /// (`a_col`, `m × 1`) and `k(x, x)`, both evaluated in `f64`, and
+    /// `point` its coordinates and target. `supply`
     /// writes its training blocks once every step that can fail has run.
+    ///
+    /// The new column `L⁻¹ k(Z, x)` of `A`, the sums, and the update of the
+    /// factor of `B` run in `f64` and are rounded once into the storage
+    /// scalar, as an assembly computes in `f64` and rounds.
     pub(super) fn append_point(
         &mut self,
-        mut a_col: Mat<P::Storage>,
-        k_diag: P::Storage,
+        mut a_col: Mat<f64>,
+        k_diag: f64,
         point: NewPoint<'_>,
         supply: impl FnOnce(&mut SparseSupply),
     ) -> Result<PointId, GprError> {
@@ -1601,19 +1643,31 @@ where
             y: y_new,
             y_obs,
         } = point;
-        solve_lmm(self.state.k_mm_l.as_ref(), a_col.as_mut());
-        let mut v = vec![P::Storage::from_f64(0.0); self.state.core.m];
+        solve_lower(
+            <P::Storage as ScalarOps>::f64_factor(
+                self.state.k_mm_l.as_ref(),
+                &self.state.k_mm_l_f64,
+            ),
+            a_col.as_mut(),
+        );
+        // The column as `A` stores it: the sums and the update of `B` read
+        // what the stored `A` holds, as an assembly's do.
+        let mut v = vec![0.0; self.state.core.m];
         for (i, slot) in v.iter_mut().enumerate() {
-            *slot = a_col[(i, 0)];
+            *slot = P::Storage::from_f64(a_col[(i, 0)]).to_f64();
         }
         // No step below fails until the predict weights (see `atomically`).
-        self.state.a_frobenius2 += frobenius2(a_col.as_ref());
+        self.state.a_frobenius2 += v.iter().map(|value| value * value).sum::<f64>();
         self.state.k_diag_sum += k_diag;
-        for (row, slot) in self.state.ay.iter_mut().enumerate() {
-            *slot += a_col[(row, 0)].to_f64() * y_new;
+        for (slot, value) in self.state.ay.iter_mut().zip(&v) {
+            *slot += value * y_new;
         }
-        push_column(&mut self.state.a, a_col.as_ref());
-        chol_rank1_update(&mut self.state.b_l, &mut v);
+        push_column(&mut self.state.a, &v);
+        chol_rank1_update(
+            <P::Storage as ScalarOps>::f64_factor_mut(&mut self.state.b_l, &mut self.state.b_l_f64),
+            &mut v,
+        );
+        <P::Storage as ScalarOps>::store_f64_factor(&mut self.state.b_l, &self.state.b_l_f64);
         append_point(
             &mut self.state.core.x_train,
             self.state.core.n,

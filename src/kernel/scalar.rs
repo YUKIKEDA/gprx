@@ -23,6 +23,16 @@ pub(crate) mod sealed {
         type RowCast: Clone + Send + Sync + 'static;
         /// Scratch that holds `X` cast to this scalar. `f64` uses no buffer.
         type ColCast: Clone + Send + Sync + 'static;
+        /// The `f64` Cholesky factor a sparse model keeps beside a stored
+        /// factor of this scalar: the factor of `K_mm` its assembly formed
+        /// before rounding, and the factor of `B` the rank-1 `X` steps of
+        /// an online SGPR update (ADR 0004). `f64` keeps none: its stored
+        /// factor is that factor. `f32` keeps an `f64` matrix, so a new
+        /// column of `A` is solved against the factor an assembly solves
+        /// against, and a run of updates rounds the stored factor once per
+        /// step instead of carrying each step's `f32` rounding into the
+        /// next.
+        type F64Factor: Clone + std::fmt::Debug + Send + Sync + 'static;
 
         /// Sparse assembly and predict, the SVGP gradient, and Exact
         /// leave-one-out compute in `f64` and round into this storage, and
@@ -87,6 +97,37 @@ pub(crate) mod sealed {
 
         /// Views `x` as this scalar. `f64` returns `x`. `f32` fills `cast`.
         fn storage_cols<'a>(x: MatRef<'a, f64>, cast: &'a mut Self::ColCast) -> MatRef<'a, Self>;
+
+        /// The [`Self::F64Factor`] of the stored factor `l`: nothing for
+        /// `f64`, `l` promoted for `f32`.
+        fn hold_f64_factor(l: MatRef<'_, Self>) -> Self::F64Factor;
+
+        /// The [`Self::F64Factor`] of a stored factor that rounds `l`:
+        /// nothing for `f64` (`l` is the stored factor), `l` for `f32`.
+        fn f64_factor_from(l: Mat<f64>) -> Self::F64Factor;
+
+        /// The `f64` factor of the stored `l` and its `held` copy: `l`
+        /// itself for `f64`, `held` for `f32`.
+        fn f64_factor<'a>(l: MatRef<'a, Self>, held: &'a Self::F64Factor) -> MatRef<'a, f64>;
+
+        /// [`Self::f64_factor`] to update in place. Once it changes, call
+        /// [`Self::store_f64_factor`].
+        fn f64_factor_mut<'a>(
+            l: &'a mut Mat<Self>,
+            held: &'a mut Self::F64Factor,
+        ) -> MatMut<'a, f64>;
+
+        /// Writes the lower triangle of `held` into the stored `l`, rounded:
+        /// nothing for `f64`.
+        fn store_f64_factor(l: &mut Mat<Self>, held: &Self::F64Factor);
+
+        /// A copy of [`Self::f64_factor`] to update on the side, for an
+        /// update that can fail. [`Self::commit_f64_factor`] takes it.
+        fn f64_factor_trial(l: MatRef<'_, Self>, held: &Self::F64Factor) -> Mat<f64>;
+
+        /// Takes `trial` as the `f64` factor: as `l` for `f64`, as `held`
+        /// and its lower triangle rounded into `l` for `f32`.
+        fn commit_f64_factor(l: &mut Mat<Self>, held: &mut Self::F64Factor, trial: Mat<f64>);
 
         /// This view as `f64` when the scalar is `f64`, for the SIMD paths.
         fn as_f64_ref(m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>>;
@@ -333,6 +374,7 @@ impl_kernel_scalar!(f64);
 impl sealed::ScalarOps for f64 {
     type RowCast = ();
     type ColCast = ();
+    type F64Factor = ();
 
     const ROUNDS_FROM_F64: bool = false;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F64;
@@ -404,6 +446,31 @@ impl sealed::ScalarOps for f64 {
         _f32_term: &'a dyn crate::kernel::KernelTerm<f32>,
     ) -> &'a dyn crate::kernel::KernelTerm<Self> {
         f64_term
+    }
+
+    fn hold_f64_factor(_l: MatRef<'_, Self>) -> Self::F64Factor {}
+
+    fn f64_factor_from(_l: Mat<f64>) -> Self::F64Factor {}
+
+    fn f64_factor<'a>(l: MatRef<'a, Self>, _held: &'a Self::F64Factor) -> MatRef<'a, f64> {
+        l
+    }
+
+    fn f64_factor_mut<'a>(
+        l: &'a mut Mat<Self>,
+        _held: &'a mut Self::F64Factor,
+    ) -> faer::MatMut<'a, f64> {
+        l.as_mut()
+    }
+
+    fn store_f64_factor(_l: &mut Mat<Self>, _held: &Self::F64Factor) {}
+
+    fn f64_factor_trial(l: MatRef<'_, Self>, _held: &Self::F64Factor) -> Mat<f64> {
+        l.to_owned()
+    }
+
+    fn commit_f64_factor(l: &mut Mat<Self>, _held: &mut Self::F64Factor, trial: Mat<f64>) {
+        *l = trial;
     }
 
     #[inline(always)]
@@ -480,6 +547,7 @@ impl sealed::ScalarOps for f64 {
 impl sealed::ScalarOps for f32 {
     type RowCast = Vec<f32>;
     type ColCast = Mat<f32>;
+    type F64Factor = Mat<f64>;
 
     const ROUNDS_FROM_F64: bool = true;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F32;
@@ -573,6 +641,43 @@ impl sealed::ScalarOps for f32 {
         f32_term: &'a dyn crate::kernel::KernelTerm<f32>,
     ) -> &'a dyn crate::kernel::KernelTerm<Self> {
         f32_term
+    }
+
+    fn hold_f64_factor(l: MatRef<'_, Self>) -> Self::F64Factor {
+        Mat::from_fn(l.nrows(), l.ncols(), |row, col| f64::from(l[(row, col)]))
+    }
+
+    fn f64_factor_from(l: Mat<f64>) -> Self::F64Factor {
+        l
+    }
+
+    fn f64_factor<'a>(_l: MatRef<'a, Self>, held: &'a Self::F64Factor) -> MatRef<'a, f64> {
+        held.as_ref()
+    }
+
+    fn f64_factor_mut<'a>(
+        _l: &'a mut Mat<Self>,
+        held: &'a mut Self::F64Factor,
+    ) -> faer::MatMut<'a, f64> {
+        held.as_mut()
+    }
+
+    fn store_f64_factor(l: &mut Mat<Self>, held: &Self::F64Factor) {
+        for col in 0..l.ncols() {
+            let from = &held.col_as_slice(col)[col..];
+            for (slot, &value) in l.col_as_slice_mut(col)[col..].iter_mut().zip(from) {
+                *slot = value as f32;
+            }
+        }
+    }
+
+    fn f64_factor_trial(_l: MatRef<'_, Self>, held: &Self::F64Factor) -> Mat<f64> {
+        held.clone()
+    }
+
+    fn commit_f64_factor(l: &mut Mat<Self>, held: &mut Self::F64Factor, trial: Mat<f64>) {
+        *held = trial;
+        Self::store_f64_factor(l, held);
     }
 
     #[inline(always)]

@@ -8,9 +8,11 @@
 //! storage scalar, a jittered `K_mm`, a pivot below the threshold), the
 //! reassembly an `X` step takes from a factor with a pivot below the
 //! threshold of its storage scalar (coordinate and supplied-distance
-//! models, `f64` and `f32`), and mixed sequences of inducing and `X` steps
-//! with duplicate and near duplicate inducing points. This file uses only
-//! the public API.
+//! models, `f64` and `f32`), mixed sequences of inducing and `X` steps
+//! with duplicate and near duplicate inducing points, and, at an `f32`
+//! storage scalar, mixed sequences and long runs of `X` steps whose
+//! inducing points stay apart (every `X` step a rank-1 update). This file
+//! uses only the public API.
 
 use std::collections::HashSet;
 
@@ -1363,7 +1365,8 @@ fn mixed_ops_rbf_ard_2d_with_near_duplicates_match_factor() {
 /// `1e-3` times its diagonal. Updated by rank-1 there, an `X` step after an
 /// exact duplicate was `2.3e10` off on 1-D RBF data (seed 5, step 8, both
 /// precisions) and `30` on 2-D ARD data (seed 5, step 48). The largest
-/// difference is now `1.0e-6`.
+/// difference is now `4.0e-7` (`1.0e-6` before an `X` step computed in
+/// `f64`, [`f32_storage_mixed_ops_with_separated_inducing_points_match_factor`]).
 #[test]
 fn f32_storage_mixed_ops_with_near_duplicates_match_factor() {
     run_mixed_seeds::<SinglePrecision>(&mixed_rbf(), 1, F32_FACTOR_TOL, "single rbf");
@@ -1516,4 +1519,170 @@ fn distance_x_steps_next_to_a_duplicate_match_factor() {
         run_distance_x_steps::<SinglePrecision>(gap, F32_FACTOR_TOL);
         run_distance_x_steps::<MixedPrecision>(gap, F32_FACTOR_TOL);
     }
+}
+
+/// Steps of each sequence of [`f32_storage_long_x_runs_match_factor`].
+const LONG_X_OPS: usize = 600;
+/// Seeds of those sequences.
+const LONG_X_SEEDS: std::ops::Range<u64> = 0..3;
+
+/// One sequence of `steps` steps from `seed` at precision `P`, with the
+/// `kernel` of `d` features and the noise variance `noise`, whose inducing
+/// points stay at least [`MIN_GAP`] apart: [`MIXED_N0`] training points
+/// and [`MIXED_M0`] inducing points drawn by [`draw_inducing`], then `X`
+/// inserts and deletes and, unless `x_only`, inducing inserts (at the gap)
+/// and deletes. Returns the largest difference ([`mixed_err_vs_factor`])
+/// from a factor of the same precision after any step, with the step it
+/// was found at.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_separated_sequence<P: GpScalar>(
+    kernel: &KernelSpec,
+    d: usize,
+    noise: f64,
+    seed: u64,
+    steps: usize,
+    x_only: bool,
+) -> (f64, String) {
+    let likelihood = GaussianLikelihood::new(noise).expect("noise");
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut x: Vec<f64> = (0..MIXED_N0 * d).map(|_| sample_coord(&mut rng)).collect();
+    let mut y: Vec<f64> = (0..MIXED_N0).map(|_| sample_coord(&mut rng)).collect();
+    let mut z = Vec::new();
+    for m in 0..MIXED_M0 {
+        let z_new = draw_inducing(&mut rng, &z, m, d).expect("room for the first points");
+        append_colmajor(&mut z, m, d, &z_new);
+    }
+    let xs: Vec<f64> = (0..4 * d).map(|i| 0.3 + 0.9 * (i % 4) as f64).collect();
+    let mut online = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, MIXED_N0, d, &y, &z, MIXED_M0)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    let mut worst = (0.0, String::new());
+    for step in 0..steps {
+        let (n, m) = (online.n(), online.m());
+        let mut op = if x_only {
+            match rng.random_range(0..2) {
+                0 if n < MIXED_N_RANGE.1 => MixedOp::Insert,
+                _ if n > MIXED_N_RANGE.0 => MixedOp::Delete(rng.random_range(0..n)),
+                _ => MixedOp::Insert,
+            }
+        } else {
+            mixed_op(&mut rng, n, m)
+        };
+        if let MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom =
+            op
+        {
+            match draw_inducing(&mut rng, &z, m, d) {
+                Some(z_new) => {
+                    online.insert_inducing(&z_new).expect("insert inducing");
+                    append_colmajor(&mut z, m, d, &z_new);
+                }
+                None => op = MixedOp::InducingDelete(rng.random_range(0..m)),
+            }
+        }
+        match op {
+            MixedOp::InducingDelete(index) => {
+                online
+                    .delete_inducing(online.inducing_ids()[index])
+                    .expect("delete inducing");
+                remove_colmajor(&mut z, m, d, index);
+            }
+            MixedOp::Insert => {
+                let x_new: Vec<f64> = (0..d).map(|_| sample_coord(&mut rng)).collect();
+                let y_new = sample_coord(&mut rng);
+                online.insert(&x_new, y_new).expect("insert");
+                append_colmajor(&mut x, n, d, &x_new);
+                y.push(y_new);
+            }
+            MixedOp::Delete(index) => {
+                online.delete(online.point_ids()[index]).expect("delete");
+                remove_colmajor(&mut x, n, d, index);
+                y.remove(index);
+            }
+            MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom => {}
+        }
+        let err = mixed_err_vs_factor(&online, kernel.clone(), likelihood, &x, &y, &z, &xs, d);
+        assert!(err.is_finite(), "seed={seed} step={step} {op:?}: {err}");
+        if err > worst.0 {
+            worst = (err, format!("seed={seed} step={step} m={m} {op:?}"));
+        }
+    }
+    worst
+}
+
+/// The steps [`run_separated_seeds`] runs for each seed.
+#[derive(Clone, Copy)]
+enum Steps {
+    /// [`MIXED_OPS`] `X` and inducing steps per seed of [`MIXED_SEEDS`].
+    Mixed,
+    /// [`LONG_X_OPS`] `X` steps per seed of [`LONG_X_SEEDS`].
+    LongX,
+}
+
+/// Runs [`run_separated_sequence`] for each seed of `steps` and checks
+/// every step against [`F32_FACTOR_TOL`].
+fn run_separated_seeds<P: GpScalar>(
+    kernel: &KernelSpec,
+    d: usize,
+    noise: f64,
+    steps: Steps,
+    label: &str,
+) {
+    let (seeds, count, x_only) = match steps {
+        Steps::Mixed => (MIXED_SEEDS, MIXED_OPS, false),
+        Steps::LongX => (LONG_X_SEEDS, LONG_X_OPS, true),
+    };
+    let (err, at) = seeds
+        .map(|seed| run_separated_sequence::<P>(kernel, d, noise, seed, count, x_only))
+        .fold((0.0, String::new()), |a, b| if b.0 > a.0 { b } else { a });
+    assert!(err <= F32_FACTOR_TOL, "{label}: rel_err={err:e} at {at}");
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn wide_rbf() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(2.0).expect("ℓ"))
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn wide_rbf_ard() -> KernelSpec {
+    KernelSpec::from(RbfArdKernel::new(&[2.0, 3.0]).expect("ℓ"))
+}
+
+/// Mixed sequences of `X` inserts and deletes and inducing changes whose
+/// inducing points stay at least [`MIN_GAP`] apart (every pivot of the
+/// factor of `K_mm` above the threshold, so every `X` step updates by
+/// rank-1), at an `f32` storage scalar with `σn² = 1e-3` and wide
+/// lengthscales, on 1-D RBF and 2-D ARD RBF data: each step matches a
+/// factor of the same precision to [`F32_FACTOR_TOL`]. When an `X` insert
+/// evaluated its column of `A` in `f32` and solved it against the rounded
+/// factor of `K_mm`, and the factor of `B` was updated in `f32`, a step was
+/// up to `3.1e-5` (single, 1-D) and `1.3e-5` (single, 2-D) off. The largest
+/// difference is now `1.9e-6`.
+#[test]
+fn f32_storage_mixed_ops_with_separated_inducing_points_match_factor() {
+    run_separated_seeds::<SinglePrecision>(&wide_rbf(), 1, 1e-3, Steps::Mixed, "single rbf");
+    run_separated_seeds::<MixedPrecision>(&wide_rbf(), 1, 1e-3, Steps::Mixed, "mixed rbf");
+    run_separated_seeds::<SinglePrecision>(&wide_rbf_ard(), 2, 1e-3, Steps::Mixed, "single ard");
+    run_separated_seeds::<MixedPrecision>(&wide_rbf_ard(), 2, 1e-3, Steps::Mixed, "mixed ard");
+}
+
+/// [`LONG_X_OPS`] `X` inserts and deletes in a row from a factor whose
+/// inducing points are at least [`MIN_GAP`] apart, at an `f32` storage
+/// scalar, with the kernels and noise of the mixed sequences
+/// ([`mixed_rbf`], [`mixed_rbf_ard`], `σn² = 0.1`): no inducing change
+/// assembles the system in between, so an error one step leaves in the
+/// factor of `B` or in `‖A‖_F²` reaches every later step. Each step
+/// matches a factor of the same precision to [`F32_FACTOR_TOL`]. When the
+/// factor of `B` and the running sums were updated in `f32`, the steps
+/// drifted up to `2.3e-5` (single, 1-D, after 187 steps) and `7.7e-6`
+/// (mixed) off. The largest difference is now `2.5e-6`.
+#[test]
+fn f32_storage_long_x_runs_match_factor() {
+    run_separated_seeds::<SinglePrecision>(&mixed_rbf(), 1, 0.1, Steps::LongX, "single rbf");
+    run_separated_seeds::<MixedPrecision>(&mixed_rbf(), 1, 0.1, Steps::LongX, "mixed rbf");
+    run_separated_seeds::<SinglePrecision>(&mixed_rbf_ard(), 2, 0.1, Steps::LongX, "single ard");
+    run_separated_seeds::<MixedPrecision>(&mixed_rbf_ard(), 2, 0.1, Steps::LongX, "mixed ard");
 }

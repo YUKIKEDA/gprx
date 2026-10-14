@@ -1528,6 +1528,7 @@ fn rank1_rbf_plus_white_n4_m2_matches_factor() {
 fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState<f64> {
     VfeState::<f64> {
         k_mm_l: fitted.k_mm_l.clone(),
+        k_mm_l_f64: (),
         k_mm_jitter: fitted.k_mm_jitter,
         a: fitted.a.clone(),
         b_l: fitted.b_l.clone(),
