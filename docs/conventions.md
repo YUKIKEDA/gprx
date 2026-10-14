@@ -54,7 +54,7 @@ src/persist/               config.rs kernel.rs registry.rs tensors.rs transform.
 src/sparse/                crate-private, what Sgpr and Svgp share: mod.rs (the accessor macros), core.rs (SparseSpec, SparseCore),
                            scratch.rs (the operation buffers), supply.rs (SparseSupply), tests.rs. Sgpr and Svgp do not import each other
 src/sgpr/                  model.rs fitted.rs objective.rs distance.rs tests.rs
-  online/                  mod.rs (OnlineSgpr), distance.rs (OnlineSgpr of a DistanceKernel)
+  online/                  mod.rs (OnlineSgpr), distance.rs (OnlineSgpr of a DistanceKernel), tests.rs
   factor/                  vfe.rs (assembly, weights, bound) derivatives.rs predict.rs loo.rs updates.rs (rank-1, inducing)
 src/svgp/                  model.rs fitted.rs distance.rs tests.rs
   factor/                  assemble.rs (K_mm, A, q, ELBO) gradient.rs predict.rs adam.rs

@@ -52,7 +52,19 @@ pub(crate) fn cholesky_lower_with_retries<T: KernelScalar>(
     retries: impl IntoIterator<Item = f64>,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
-    cholesky_lower_with_backup(a, &mut Mat::new(), scratch, retries, stage)
+    cholesky_lower_jitter(a, scratch, retries, stage).map(|_| ())
+}
+
+/// [`cholesky_lower_with_retries`] that returns the offset `j` the factor
+/// took: `a` holds the lower factor of `A + j I` (`j = 0.0` when the first
+/// attempt factored).
+pub(crate) fn cholesky_lower_jitter<T: KernelScalar>(
+    a: &mut Mat<T>,
+    scratch: &mut MemBuffer,
+    retries: impl IntoIterator<Item = f64>,
+    stage: CholeskyStage,
+) -> Result<f64, GprError> {
+    factor_from_backup(a, &mut Mat::new(), scratch, retries, stage)
 }
 
 /// [`cholesky_lower_with_retries`] keeping the copy of `a` a retry starts
@@ -64,6 +76,17 @@ pub(crate) fn cholesky_lower_with_backup<T: KernelScalar>(
     retries: impl IntoIterator<Item = f64>,
     stage: CholeskyStage,
 ) -> Result<(), GprError> {
+    factor_from_backup(a, backup, scratch, retries, stage).map(|_| ())
+}
+
+/// [`cholesky_lower_with_backup`] that returns the offset the factor took.
+fn factor_from_backup<T: KernelScalar>(
+    a: &mut Mat<T>,
+    backup: &mut Mat<T>,
+    scratch: &mut MemBuffer,
+    retries: impl IntoIterator<Item = f64>,
+    stage: CholeskyStage,
+) -> Result<f64, GprError> {
     if backup.nrows() == a.nrows() && backup.ncols() == a.ncols() {
         backup.copy_from(&*a);
     } else {
@@ -77,7 +100,6 @@ pub(crate) fn cholesky_lower_with_backup<T: KernelScalar>(
         }
         cholesky_lower(a, scratch, 0.0, stage)
     })
-    .map(|_| ())
 }
 
 /// [`cholesky_lower_with_retries`] with a scratch buffer sized for this call.

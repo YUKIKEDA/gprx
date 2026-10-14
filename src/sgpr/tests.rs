@@ -1528,6 +1528,7 @@ fn rank1_rbf_plus_white_n4_m2_matches_factor() {
 fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState<f64> {
     VfeState::<f64> {
         k_mm_l: fitted.k_mm_l.clone(),
+        k_mm_jitter: fitted.k_mm_jitter,
         a: fitted.a.clone(),
         b_l: fitted.b_l.clone(),
         w: fitted.w.clone(),
@@ -1597,20 +1598,18 @@ fn assert_inducing_insert_delete(case: InducingCase<'_>) {
     let fitted = factor_sparse(kernel.clone(), x, n, d, y, z, m);
     let noise = fitted.likelihood().noise_variance();
     let mut inserted = vfe_from_fitted(&fitted);
-    inducing_insert::<crate::math::Accurate, _>(
-        &mut inserted,
+    let border = coordinate_border::<crate::math::Accurate, _>(
         &kernel,
-        noise,
         x,
         n,
         d,
-        y,
         z,
         m,
         z_new,
         &mut crate::sparse::KernelScratch::new(),
     )
-    .expect("insert inducing");
+    .expect("border");
+    inducing_append(&mut inserted, border, None, noise, y).expect("insert inducing");
     let z_ins = append_point(z, m, d, z_new);
     let oracle_ins = factor_sparse(kernel.clone(), x, n, d, y, &z_ins, m + 1);
     assert_inducing_matches_factor(&inserted, &oracle_ins);

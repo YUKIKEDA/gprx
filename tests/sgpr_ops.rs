@@ -3,18 +3,31 @@
 //! Each `X` step compares public [`OnlineSgpr`] numerics and point
 //! identity to a batch factor at the same `θ` and `Z`. Each inducing step
 //! compares the same public numerics at the same `θ` and `X` after `m`
-//! changes. This file uses only the public API.
+//! changes (incremental, ADR 0005), for coordinate and supplied-distance
+//! models, and the reassembly an inducing change takes instead (an `f32`
+//! storage scalar, a jittered `K_mm`, a pivot below the threshold), and
+//! mixed sequences of inducing and `X` steps with duplicate and near
+//! duplicate inducing points. This file uses only the public API.
 
 use std::collections::HashSet;
 
-use gprx::kernel::{KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, WhiteKernel};
+use gprx::kernel::KernelScalar;
+use gprx::kernel::{
+    DistanceKernel, KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, ScalarDistance,
+    WhiteKernel,
+};
 use gprx::{
-    Fixed, FreeInducing, GaussianLikelihood, GprError, InducingId, OnlineSgpr, PointId, Sgpr,
+    DoublePrecision, Fixed, FreeInducing, GaussianLikelihood, GpScalar, GprError, InducingId,
+    MixedPrecision, OnlineSgpr, PointId, Sgpr, SinglePrecision,
 };
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
 const TOL: f64 = 1e-12;
+/// Relative tolerance of the inducing sequences: an inducing insert or
+/// delete updates the factors incrementally (ADR 0005), in another order
+/// of operations than the factor it is compared with.
+const INDUCING_TOL: f64 = 1e-10;
 const OPS: usize = 32;
 const N_MAX: usize = 16;
 const M_MAX: usize = 16;
@@ -30,6 +43,41 @@ use common::{assert_close, assert_close_named, assert_mean_var_close, assert_sli
 
 fn sample_coord(rng: &mut SmallRng) -> f64 {
     4.0 * rng.random::<f64>()
+}
+
+/// Smallest Euclidean distance a new inducing point of the inducing
+/// sequences keeps from every inducing point.
+//
+// Without it, seed 1 of the RBF sequence (ℓ = 1) drew 2.5036 next to
+// 2.4448, 2.3742, and 2.2798: the bordered pivot of `K_mm` was 3.0e-9, and
+// the batch factor itself was 6e-10 (mean) and 7e-9 (variance) off the
+// exact value, so no update in another order of operations can agree with
+// it to 1e-10. With this gap the smallest bordered pivot over the four
+// kernels and three seeds is 3.4e-3 (RBF), and the largest relative
+// difference from the factor is 4e-15. The near-duplicate case is
+// `insert_inducing_next_to_an_inducing_point_reassembles`.
+const MIN_GAP: f64 = 0.25;
+/// Draws a candidate inducing point this many times before the step deletes
+/// instead (the gap leaves no room).
+const DRAWS: usize = 64;
+
+/// A new inducing point at least [`MIN_GAP`] from each of the `m` points of
+/// `z` (column-major `m × d`), or `None` when [`DRAWS`] candidates were all
+/// too close.
+fn draw_inducing(rng: &mut SmallRng, z: &[f64], m: usize, d: usize) -> Option<Vec<f64>> {
+    for _ in 0..DRAWS {
+        let candidate: Vec<f64> = (0..d).map(|_| sample_coord(rng)).collect();
+        let clear = (0..m).all(|i| {
+            let dist2: f64 = (0..d)
+                .map(|feature| (z[feature * m + i] - candidate[feature]).powi(2))
+                .sum();
+            dist2 >= MIN_GAP * MIN_GAP
+        });
+        if clear {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn append_colmajor(x: &mut Vec<f64>, n: usize, d: usize, x_new: &[f64]) {
@@ -381,6 +429,7 @@ fn assert_matches_factor_inducing(
     d: usize,
     deleted: &HashSet<InducingId>,
     ctx: &str,
+    tol: f64,
 ) {
     let n = online.n();
     let m = online.m();
@@ -408,15 +457,15 @@ fn assert_matches_factor_inducing(
     let want = full.predict(xs, n_query, d).expect("factor predict");
     assert_eq!(got.mean.len(), want.mean.len());
     for (i, (a, b)) in got.mean.iter().zip(want.mean.iter()).enumerate() {
-        assert_close_named(&format!("{ctx} mean[{i}] m={m}"), *a, *b, TOL);
+        assert_close_named(&format!("{ctx} mean[{i}] m={m}"), *a, *b, tol);
     }
     for (i, (a, b)) in got.variance.iter().zip(want.variance.iter()).enumerate() {
-        assert_close_named(&format!("{ctx} var[{i}] m={m}"), *a, *b, TOL);
+        assert_close_named(&format!("{ctx} var[{i}] m={m}"), *a, *b, tol);
     }
 
     let nlml_online = online.neg_log_marginal_likelihood().expect("online nlml");
     let nlml_full = full.neg_log_marginal_likelihood().expect("factor nlml");
-    assert_close_named(&format!("{ctx} nlml m={m}"), nlml_online, nlml_full, TOL);
+    assert_close_named(&format!("{ctx} nlml m={m}"), nlml_online, nlml_full, tol);
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
@@ -449,16 +498,18 @@ fn run_inducing_sequence(
         d,
         &deleted,
         &format!("seed={seed} start"),
+        INDUCING_TOL,
     );
 
     for step in 0..OPS {
         let m = online.m();
-        let insert = m == 1 || (m < M_MAX && rng.random::<bool>());
-        if insert {
-            let mut z_new = vec![0.0; d];
-            for value in &mut z_new {
-                *value = sample_coord(&mut rng);
-            }
+        let wants_insert = m == 1 || (m < M_MAX && rng.random::<bool>());
+        let drawn = if wants_insert {
+            draw_inducing(&mut rng, &z, m, d)
+        } else {
+            None
+        };
+        if let Some(z_new) = drawn {
             let id = online.insert_inducing(&z_new).expect("insert inducing");
             assert!(!deleted.contains(&id), "insert reused a deleted InducingId");
             assert_eq!(online.inducing_ids().last().copied(), Some(id));
@@ -482,6 +533,7 @@ fn run_inducing_sequence(
             d,
             &deleted,
             &format!("seed={seed} step={step}"),
+            INDUCING_TOL,
         );
     }
 }
@@ -584,4 +636,794 @@ fn delete_last_inducing_is_insufficient_data() {
         Err(GprError::InsufficientData { n: 1, min: 2 })
     ));
     assert_eq!(online.m(), 1);
+}
+
+/// An inducing point equal to one the model holds makes the bordered pivot
+/// of `K_mm` zero, so the insert assembles the VFE system again (with the
+/// jitter the policy gives the singular `K_mm`). The next insert finds the
+/// factor jittered and assembles again too, so `j` is chosen as the factor
+/// of those inducing points chooses it.
+#[test]
+fn insert_inducing_next_to_an_inducing_point_reassembles() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let fitted = factor_oracle(kernel.clone(), likelihood, &X1, 4, 1, &Y0, &Z1, 2);
+    let mut online = fitted.into_online();
+    let deleted = HashSet::new();
+    // `l = L⁻¹ k(Z, z_new)` is row 0 of `L` exactly, so `ℓ² = 1 − 1 = 0`.
+    online.insert_inducing(&[0.5]).expect("insert duplicate");
+    let pred = online.predict(&[0.5], 1, 1).expect("predict");
+    assert!(pred.mean[0].is_finite() && pred.variance[0].is_finite());
+    // The reassembly is the factor's own assembly: equal to its rounding.
+    assert_matches_factor_inducing(
+        &online,
+        kernel.clone(),
+        likelihood,
+        &X1,
+        &Y0,
+        &[0.5, 2.5, 0.5],
+        &[0.5],
+        1,
+        &deleted,
+        "duplicate",
+        TOL,
+    );
+    online
+        .insert_inducing(&[1.5])
+        .expect("insert after duplicate");
+    assert_matches_factor_inducing(
+        &online,
+        kernel,
+        likelihood,
+        &X1,
+        &Y0,
+        &[0.5, 2.5, 0.5, 1.5],
+        &[0.5],
+        1,
+        &deleted,
+        "after duplicate",
+        TOL,
+    );
+}
+
+/// Training points of the supplied-distance inducing sequences, `0.5`
+/// apart on `[0, 6]`.
+const DIST_N: usize = 13;
+/// Largest inducing set of the supplied-distance sequences.
+const DIST_M_MAX: usize = 8;
+const DIST_QUERY: [f64; 2] = [0.75, 3.1];
+
+fn dist_x(i: usize) -> f64 {
+    0.5 * i as f64
+}
+
+fn dist_y() -> Vec<f64> {
+    (0..DIST_N).map(|i| (0.9 * dist_x(i)).sin()).collect()
+}
+
+/// Column-major `rows × cols` squared distances.
+fn sq_block(rows: &[f64], cols: &[f64]) -> Vec<f64> {
+    cols.iter()
+        .flat_map(|&c| rows.iter().map(move |&r| (r - c).powi(2)))
+        .collect()
+}
+
+fn dist_points() -> Vec<f64> {
+    (0..DIST_N).map(dist_x).collect()
+}
+
+fn coords_of(rows: &[usize]) -> Vec<f64> {
+    rows.iter().map(|&i| dist_x(i)).collect()
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn assert_distance_matches_factor(
+    online: &OnlineSgpr<Fixed, gprx::DoublePrecision, DistanceKernel>,
+    kernel: &DistanceKernel,
+    image: &ScalarDistance,
+    inducing: &[usize],
+    ctx: &str,
+) {
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let points = dist_points();
+    let z = coords_of(inducing);
+    let full = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq_block(&points, &z))],
+            DIST_N,
+            &dist_y(),
+            inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let ids = online.point_ids();
+    let want_points: Vec<_> = inducing.iter().map(|&i| ids[i]).collect();
+    assert_eq!(online.inducing_points().collect::<Vec<_>>(), want_points);
+    let q = DIST_QUERY.len();
+    let got = online
+        .predict([image.from_vec(sq_block(&z, &DIST_QUERY))], q)
+        .expect("online predict");
+    let want = full
+        .predict([image.from_vec(sq_block(&z, &DIST_QUERY))], q)
+        .expect("factor predict");
+    let m = inducing.len();
+    for (i, (a, b)) in got.mean.iter().zip(&want.mean).enumerate() {
+        assert_close_named(&format!("{ctx} mean[{i}] m={m}"), *a, *b, INDUCING_TOL);
+    }
+    for (i, (a, b)) in got.variance.iter().zip(&want.variance).enumerate() {
+        assert_close_named(&format!("{ctx} var[{i}] m={m}"), *a, *b, INDUCING_TOL);
+    }
+    assert_close_named(
+        &format!("{ctx} nlml m={m}"),
+        online.neg_log_marginal_likelihood().expect("online nlml"),
+        full.neg_log_marginal_likelihood().expect("factor nlml"),
+        INDUCING_TOL,
+    );
+}
+
+/// The inducing sequence of [`run_inducing_sequence`] on a model of
+/// supplied squared distances: each insert makes a training point that is
+/// not inducing an inducing point, each delete drops a random one, and
+/// every step matches a factor of the same blocks.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_distance_inducing_sequence(kernel_of: fn(&ScalarDistance) -> DistanceKernel, seed: u64) {
+    let image = ScalarDistance::new();
+    let kernel = kernel_of(&image);
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let points = dist_points();
+    let mut inducing = vec![0, 6];
+    let mut online = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq_block(&points, &coords_of(&inducing)))],
+            DIST_N,
+            &dist_y(),
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let start = format!("seed={seed} start");
+    assert_distance_matches_factor(&online, &kernel, &image, &inducing, &start);
+    for step in 0..OPS {
+        let m = inducing.len();
+        let insert = m == 1 || (m < DIST_M_MAX && rng.random::<bool>());
+        if insert {
+            let free: Vec<usize> = (0..DIST_N).filter(|i| !inducing.contains(i)).collect();
+            let row = free[rng.random_range(0..free.len())];
+            let point = online.point_ids()[row];
+            let column = sq_block(&points, &[dist_x(row)]);
+            online
+                .insert_inducing(point, [image.from_vec(column)])
+                .expect("insert inducing");
+            inducing.push(row);
+        } else {
+            let index = rng.random_range(0..m);
+            online
+                .delete_inducing(online.inducing_ids()[index])
+                .expect("delete inducing");
+            inducing.remove(index);
+        }
+        let ctx = format!("seed={seed} step={step}");
+        assert_distance_matches_factor(&online, &kernel, &image, &inducing, &ctx);
+    }
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn distance_rbf(image: &ScalarDistance) -> DistanceKernel {
+    image.kernel(RbfKernel::new(0.7).expect("ℓ"))
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn distance_matern(image: &ScalarDistance) -> DistanceKernel {
+    image.kernel(MaternKernel::new(0.7, MaternNu::ThreeHalves).expect("ℓ"))
+}
+
+#[test]
+fn distance_inducing_ops_rbf_matches_factor() {
+    for seed in SEEDS {
+        run_distance_inducing_sequence(distance_rbf, seed);
+    }
+}
+
+#[test]
+fn distance_inducing_ops_matern_three_halves_matches_factor() {
+    for seed in SEEDS {
+        run_distance_inducing_sequence(distance_matern, seed);
+    }
+}
+
+/// A tidy column whose values at the inducing points differ from the ones
+/// the training blocks hold (by `1e-7` relative) is repaired to the mean of
+/// each pair, which moves `k(Z, x)` of the new inducing point's own column:
+/// the insert updates that column of `A` too, and the model matches one
+/// assembled again from the stored blocks at the same `θ`.
+#[test]
+fn distance_insert_inducing_with_a_repaired_column_matches_a_reassembly() {
+    let image = ScalarDistance::new();
+    let kernel = distance_rbf(&image);
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let points = dist_points();
+    let inducing = [0, 6, 9];
+    let mut online = Sgpr::new(kernel, likelihood)
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq_block(&points, &coords_of(&inducing)))],
+            DIST_N,
+            &dist_y(),
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    let row = 3;
+    let mut column = sq_block(&points, &[dist_x(row)]);
+    for &i in &inducing {
+        column[i] *= 1.0 + 1e-7;
+    }
+    let point = online.point_ids()[row];
+    online
+        .insert_inducing(point, [image.from_vec(column).tidy(1e-6).expect("tol")])
+        .expect("insert inducing");
+    let mut reassembled = online.clone();
+    let mut theta = vec![0.0; online.num_params()];
+    online.get_params(&mut theta).expect("theta");
+    // `set_params` at the stored `θ` changes nothing, so it moves away first.
+    let away: Vec<f64> = theta.iter().map(|t| t + 0.1).collect();
+    reassembled.set_params(&away).expect("move θ");
+    reassembled.set_params(&theta).expect("reassemble");
+    let z = coords_of(&[0, 6, 9, row]);
+    let q = DIST_QUERY.len();
+    let got = online
+        .predict([image.from_vec(sq_block(&z, &DIST_QUERY))], q)
+        .expect("predict");
+    let want = reassembled
+        .predict([image.from_vec(sq_block(&z, &DIST_QUERY))], q)
+        .expect("predict");
+    assert_slice_close(&got.mean, &want.mean, INDUCING_TOL);
+    assert_slice_close(&got.variance, &want.variance, INDUCING_TOL);
+    assert_close(
+        online.neg_log_marginal_likelihood().expect("nlml"),
+        reassembled.neg_log_marginal_likelihood().expect("nlml"),
+        INDUCING_TOL,
+    );
+}
+
+/// Training points of the reassembly cases: `x = 0.3 i`, `i = 0..12`.
+const LINE_N: usize = 12;
+/// Queries of the reassembly cases.
+const LINE_QUERY: [f64; 4] = [0.4, 1.3, 2.45, 3.0];
+
+fn line_x() -> Vec<f64> {
+    (0..LINE_N).map(|i| 0.3 * i as f64).collect()
+}
+
+fn line_y() -> Vec<f64> {
+    line_x()
+        .iter()
+        .map(|&x| (1.3 * x).sin() + 0.1 * x)
+        .collect()
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_rbf() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"))
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_likelihood() -> GaussianLikelihood {
+    GaussianLikelihood::new(0.1).expect("noise")
+}
+
+/// [`OnlineSgpr`] at precision `P` from a factor of the line data at the
+/// 1-D inducing points `z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_online<P: GpScalar>(z: &[f64]) -> OnlineSgpr<Fixed, P> {
+    Sgpr::new(line_rbf(), line_likelihood())
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&line_x(), LINE_N, 1, &line_y(), z, z.len())
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online()
+}
+
+/// The largest relative difference ([`common::rel_err`]) of the mean and
+/// the variance at [`LINE_QUERY`] and of the NLML between `online` and a
+/// factor of the line data at the same precision and the inducing points
+/// `z`, after checking that `online` holds `z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn line_err_vs_factor<P: GpScalar>(online: &OnlineSgpr<Fixed, P>, z: &[f64]) -> f64 {
+    assert_slice_close(online.z(), z, TOL);
+    let full = line_online::<P>(z);
+    let q = LINE_QUERY.len();
+    let got = online.predict(&LINE_QUERY, q, 1).expect("online predict");
+    let want = full.predict(&LINE_QUERY, q, 1).expect("factor predict");
+    let nlml = common::rel_err(
+        online.neg_log_marginal_likelihood().expect("online nlml"),
+        full.neg_log_marginal_likelihood().expect("factor nlml"),
+    );
+    got.mean
+        .iter()
+        .zip(&want.mean)
+        .chain(got.variance.iter().zip(&want.variance))
+        .map(|(a, b)| common::rel_err(a.to_f64(), b.to_f64()))
+        .fold(nlml, f64::max)
+}
+
+/// Relative tolerance of an `f32`-storage model against a factor of the
+/// same precision: what `tests/distance_persist.rs` allows an online
+/// `SinglePrecision` / `MixedPrecision` model factored again on load.
+const F32_FACTOR_TOL: f64 = 1e-5;
+
+/// One inducing step of [`f32_storage_inducing_ops_match_factor`]: an
+/// insert at these coordinates, or a delete at this index.
+enum Step {
+    Insert(f64),
+    Delete(usize),
+}
+
+const F32_STEPS: [Step; 18] = [
+    Step::Insert(1.5),
+    Step::Insert(3.2),
+    Step::Insert(0.1),
+    Step::Insert(1.0),
+    Step::Insert(2.0),
+    Step::Delete(0),
+    Step::Insert(2.9),
+    Step::Insert(0.6),
+    Step::Delete(3),
+    Step::Insert(1.8),
+    Step::Insert(2.4),
+    Step::Delete(6),
+    Step::Insert(0.3),
+    Step::Insert(3.0),
+    Step::Insert(1.25),
+    Step::Delete(1),
+    Step::Insert(2.15),
+    Step::Delete(0),
+];
+
+/// Runs [`F32_STEPS`] from the inducing points `[0.5, 2.5]`, checking
+/// [`line_err_vs_factor`] against [`F32_FACTOR_TOL`] after each step.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_f32_inducing_steps<P: GpScalar>(label: &str) {
+    let mut z = vec![0.5, 2.5];
+    let mut online = line_online::<P>(&z);
+    for (step, op) in F32_STEPS.iter().enumerate() {
+        match *op {
+            Step::Insert(at) => {
+                online.insert_inducing(&[at]).expect("insert inducing");
+                z.push(at);
+            }
+            Step::Delete(index) => {
+                online
+                    .delete_inducing(online.inducing_ids()[index])
+                    .expect("delete inducing");
+                z.remove(index);
+            }
+        }
+        let err = line_err_vs_factor(&online, &z);
+        assert!(
+            err <= F32_FACTOR_TOL,
+            "{label} step={step}: rel_err={err} > {F32_FACTOR_TOL}"
+        );
+    }
+}
+
+/// An `f32` storage scalar assembles the VFE system again on every
+/// inducing change, so a sequence of inserts and deletes keeps the
+/// accuracy of a fresh factor of the same precision. Updated in `f32`, the
+/// same steps were up to `5.8e-5` (single) and `4.8e-5` (mixed) off.
+#[test]
+fn f32_storage_inducing_ops_match_factor() {
+    run_f32_inducing_steps::<SinglePrecision>("single");
+    run_f32_inducing_steps::<MixedPrecision>("mixed");
+}
+
+/// A duplicate inducing point makes the factor take a jitter offset
+/// `j = 1e-8`. Deleting the duplicate again assembles the system, which
+/// finds `j = 0` as the factor of the remaining points does, instead of
+/// keeping the stale `j` (which was `2e-8` off). A delete of another point
+/// while `j > 0` takes the offset the factor of the points that stay takes
+/// as well.
+#[test]
+fn delete_inducing_with_a_jittered_factor_matches_factor() {
+    let mut online = line_online::<DoublePrecision>(&[0.5, 2.5]);
+    let duplicate = online.insert_inducing(&[0.5]).expect("insert duplicate");
+    let err = line_err_vs_factor(&online, &[0.5, 2.5, 0.5]);
+    assert!(err <= TOL, "duplicate: rel_err={err}");
+    let mut other = online.clone();
+    online.delete_inducing(duplicate).expect("delete duplicate");
+    let err_dup = line_err_vs_factor(&online, &[0.5, 2.5]);
+    assert!(err_dup <= TOL, "delete duplicate: rel_err={err_dup}");
+    other
+        .delete_inducing(other.inducing_ids()[1])
+        .expect("delete 2.5");
+    let err_other = line_err_vs_factor(&other, &[0.5, 0.5]);
+    assert!(err_other <= TOL, "delete 2.5: rel_err={err_other}");
+}
+
+/// A near duplicate leaves `K_mm` with a pivot `ℓ² ≈ 1e-10` that the factor
+/// takes without jitter; an exact duplicate of another point then leaves
+/// `ℓ²` a rounding residue. Both pivots are below the relative threshold
+/// (the first in the factor the insert starts from, the second in the
+/// border), so the insert assembles the system again. Dividing by that
+/// residue was `0.56` off.
+#[test]
+fn insert_inducing_at_a_rounding_pivot_matches_factor() {
+    let z = [0.5, 0.5 + 1e-5, 2.5];
+    let mut online = line_online::<DoublePrecision>(&z);
+    online.insert_inducing(&[2.5]).expect("insert duplicate");
+    let err = line_err_vs_factor(&online, &[0.5, 0.5 + 1e-5, 2.5, 2.5]);
+    assert!(err <= TOL, "rel_err={err}");
+}
+
+/// A new inducing point `1e-4` from one the model holds has a positive
+/// `ℓ² ≈ 1e-8` that the factor takes without jitter, below the relative
+/// threshold of `1e-5`: the insert assembles the system again instead of
+/// dividing by a pivot with a relative rounding error near `ε / ℓ²` (the
+/// update was `8.7e-11` off).
+#[test]
+fn insert_inducing_below_the_pivot_threshold_matches_factor() {
+    let mut online = line_online::<DoublePrecision>(&[0.5, 2.5]);
+    online.insert_inducing(&[2.5 + 1e-4]).expect("insert");
+    let err = line_err_vs_factor(&online, &[0.5, 2.5, 2.5 + 1e-4]);
+    assert!(err <= TOL, "rel_err={err}");
+}
+
+/// Deletes down to one inducing point, each by the incremental update.
+#[test]
+fn delete_inducing_down_to_one_matches_factor() {
+    let mut z = vec![0.5, 1.5, 2.5];
+    let mut online = line_online::<DoublePrecision>(&z);
+    while z.len() > 1 {
+        online
+            .delete_inducing(online.inducing_ids()[0])
+            .expect("delete inducing");
+        z.remove(0);
+        let err = line_err_vs_factor(&online, &z);
+        assert!(err <= INDUCING_TOL, "m={}: rel_err={err}", z.len());
+    }
+    assert_eq!(online.m(), 1);
+}
+
+/// A delete at the first, a middle, and the last index of four inducing
+/// points, each from the same model.
+#[test]
+fn delete_inducing_at_first_middle_last_matches_factor() {
+    let z = [0.25, 1.25, 2.25, 3.25];
+    let start = line_online::<DoublePrecision>(&z);
+    for index in [0, 2, 3] {
+        let mut online = start.clone();
+        online
+            .delete_inducing(online.inducing_ids()[index])
+            .expect("delete inducing");
+        let mut kept = z.to_vec();
+        kept.remove(index);
+        let err = line_err_vs_factor(&online, &kept);
+        assert!(err <= INDUCING_TOL, "index={index}: rel_err={err}");
+    }
+}
+
+/// [`delete_inducing_at_first_middle_last_matches_factor`] on supplied
+/// distances.
+#[test]
+fn distance_delete_inducing_at_first_middle_last_matches_factor() {
+    let image = ScalarDistance::new();
+    let kernel = distance_rbf(&image);
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let points = dist_points();
+    let inducing = [0, 4, 8, 12];
+    let start = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .factor(
+            [image.from_vec(sq_block(&points, &coords_of(&inducing)))],
+            DIST_N,
+            &dist_y(),
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    for index in [0, 2, 3] {
+        let mut online = start.clone();
+        online
+            .delete_inducing(online.inducing_ids()[index])
+            .expect("delete inducing");
+        let mut kept = inducing.to_vec();
+        kept.remove(index);
+        let ctx = format!("index={index}");
+        assert_distance_matches_factor(&online, &kernel, &image, &kept, &ctx);
+    }
+}
+
+/// Steps of each mixed sequence.
+const MIXED_OPS: usize = 60;
+/// Seeds of the mixed sequences.
+const MIXED_SEEDS: std::ops::Range<u64> = 0..12;
+/// Training points and inducing points a mixed sequence starts from.
+const MIXED_N0: usize = 30;
+const MIXED_M0: usize = 4;
+/// Bounds the mixed sequences keep `n` and `m` within.
+const MIXED_N_RANGE: (usize, usize) = (20, 40);
+const MIXED_M_MAX: usize = 12;
+
+/// One step of a mixed sequence, named in a failure message.
+#[derive(Clone, Copy, Debug)]
+enum MixedOp {
+    /// Insert of a copy of the inducing point at this index.
+    InducingDuplicate(usize),
+    /// Insert of a point between `1e-5` and `1e-2` per coordinate from the
+    /// inducing point at this index.
+    InducingNear(usize),
+    InducingRandom,
+    InducingDelete(usize),
+    Insert,
+    Delete(usize),
+}
+
+/// A new inducing point of `op` next to the `m` inducing points `z`
+/// (column-major `m × d`).
+fn mixed_inducing(rng: &mut SmallRng, op: MixedOp, z: &[f64], m: usize, d: usize) -> Vec<f64> {
+    match op {
+        MixedOp::InducingDuplicate(i) => (0..d).map(|f| z[f * m + i]).collect(),
+        MixedOp::InducingNear(i) => (0..d)
+            .map(|f| {
+                let size = 10f64.powf(-5.0 + 3.0 * rng.random::<f64>());
+                let sign = if rng.random::<bool>() { 1.0 } else { -1.0 };
+                z[f * m + i] + sign * size
+            })
+            .collect(),
+        _ => (0..d).map(|_| sample_coord(rng)).collect(),
+    }
+}
+
+/// The step a mixed sequence takes at `n` training and `m` inducing points:
+/// an inducing insert (a duplicate, a near duplicate, or a random point), an
+/// inducing delete (first, middle, last, or random), or an `X` insert or
+/// delete.
+fn mixed_op(rng: &mut SmallRng, n: usize, m: usize) -> MixedOp {
+    loop {
+        match rng.random_range(0..4) {
+            0 if m < MIXED_M_MAX => {
+                let i = rng.random_range(0..m);
+                return match rng.random_range(0..3) {
+                    0 => MixedOp::InducingDuplicate(i),
+                    1 => MixedOp::InducingNear(i),
+                    _ => MixedOp::InducingRandom,
+                };
+            }
+            1 if m > 1 => {
+                let index = match rng.random_range(0..4) {
+                    0 => 0,
+                    1 => m / 2,
+                    2 => m - 1,
+                    _ => rng.random_range(0..m),
+                };
+                return MixedOp::InducingDelete(index);
+            }
+            2 if n < MIXED_N_RANGE.1 => return MixedOp::Insert,
+            3 if n > MIXED_N_RANGE.0 => return MixedOp::Delete(rng.random_range(0..n)),
+            _ => {}
+        }
+    }
+}
+
+/// The largest relative difference of the mean and the variance at `xs`
+/// and of the NLML between `online` and a factor of the same `X`, `y`, and
+/// `Z`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+#[allow(clippy::too_many_arguments)]
+fn mixed_err_vs_factor(
+    online: &OnlineSgpr<Fixed>,
+    kernel: KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    xs: &[f64],
+    d: usize,
+) -> f64 {
+    let (n, m) = (y.len(), z.len() / d);
+    assert_eq!((online.n(), online.m()), (n, m));
+    assert_slice_close(online.x(), x, TOL);
+    assert_slice_close(online.z(), z, TOL);
+    let full = factor_oracle(kernel, likelihood, x, n, d, y, z, m);
+    let q = xs.len() / d;
+    let got = online.predict(xs, q, d).expect("online predict");
+    let want = full.predict(xs, q, d).expect("factor predict");
+    let nlml = common::rel_err(
+        online.neg_log_marginal_likelihood().expect("online nlml"),
+        full.neg_log_marginal_likelihood().expect("factor nlml"),
+    );
+    got.mean
+        .iter()
+        .zip(&want.mean)
+        .chain(got.variance.iter().zip(&want.variance))
+        .map(|(a, b)| common::rel_err(*a, *b))
+        .fold(nlml, f64::max)
+}
+
+/// The relative pivot threshold of an inducing update (`PIVOT_RTOL` in
+/// `src/sgpr/factor/updates.rs`): an inducing change from a factor of
+/// `K_mm` with a pivot `L_ii² ≤ τ (K_ii + j)` assembles the system again.
+const MIXED_PIVOT_RTOL: f64 = 1e-5;
+
+/// The smallest pivot `L_ii² / K_ii` of the LLT of `K_mm` of an RBF kernel
+/// of unit variance and the lengthscales `lengthscales` (one per feature)
+/// at the `m` inducing points `z` (column-major `m × d`); `0` for a pivot
+/// that is not positive.
+fn min_pivot_ratio(z: &[f64], m: usize, lengthscales: &[f64]) -> f64 {
+    let k = |i: usize, j: usize| {
+        let r2: f64 = lengthscales
+            .iter()
+            .enumerate()
+            .map(|(f, ell)| ((z[f * m + i] - z[f * m + j]) / ell).powi(2))
+            .sum();
+        (-0.5 * r2).exp()
+    };
+    let mut l = vec![0.0_f64; m * m];
+    let mut min_ratio = f64::INFINITY;
+    for j in 0..m {
+        let pivot = k(j, j) - (0..j).map(|p| l[j * m + p].powi(2)).sum::<f64>();
+        min_ratio = min_ratio.min(pivot.max(0.0) / k(j, j));
+        if pivot <= 0.0 {
+            return 0.0;
+        }
+        let ljj = pivot.sqrt();
+        l[j * m + j] = ljj;
+        for i in (j + 1)..m {
+            let dot: f64 = (0..j).map(|p| l[i * m + p] * l[j * m + p]).sum();
+            l[i * m + j] = (k(i, j) - dot) / ljj;
+        }
+    }
+    min_ratio
+}
+
+/// The largest difference from the factor over the steps of mixed
+/// sequences, each with the step it was found at.
+#[derive(Default)]
+struct MixedWorst {
+    /// Inducing steps, and `X` steps at an inducing set whose `K_mm` has
+    /// every pivot above [`MIXED_PIVOT_RTOL`].
+    checked: (f64, String),
+    /// `X` steps at an inducing set with a pivot of `K_mm` at or below
+    /// [`MIXED_PIVOT_RTOL`].
+    x_below_threshold: (f64, String),
+}
+
+impl MixedWorst {
+    fn max(self, other: Self) -> Self {
+        let pick = |a: (f64, String), b: (f64, String)| if b.0 > a.0 { b } else { a };
+        Self {
+            checked: pick(self.checked, other.checked),
+            x_below_threshold: pick(self.x_below_threshold, other.x_below_threshold),
+        }
+    }
+}
+
+/// Runs one mixed sequence of [`MIXED_OPS`] steps from `seed` with the RBF
+/// `kernel` of the lengthscales `lengthscales` (`d` features) and returns
+/// the largest difference from the factor after any step.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_mixed_sequence(kernel: &KernelSpec, lengthscales: &[f64], seed: u64) -> MixedWorst {
+    let d = lengthscales.len();
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut x: Vec<f64> = (0..MIXED_N0 * d).map(|_| sample_coord(&mut rng)).collect();
+    let mut y: Vec<f64> = (0..MIXED_N0).map(|_| sample_coord(&mut rng)).collect();
+    let mut z: Vec<f64> = (0..MIXED_M0 * d).map(|_| sample_coord(&mut rng)).collect();
+    let xs: Vec<f64> = (0..4 * d).map(|i| 0.3 + 0.9 * (i % 4) as f64).collect();
+    let fitted = factor_oracle(
+        kernel.clone(),
+        likelihood,
+        &x,
+        MIXED_N0,
+        d,
+        &y,
+        &z,
+        MIXED_M0,
+    );
+    let mut online = fitted.into_online();
+    let mut worst = MixedWorst::default();
+    for step in 0..MIXED_OPS {
+        let (n, m) = (online.n(), online.m());
+        let op = mixed_op(&mut rng, n, m);
+        match op {
+            MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom => {
+                let z_new = mixed_inducing(&mut rng, op, &z, m, d);
+                online.insert_inducing(&z_new).expect("insert inducing");
+                append_colmajor(&mut z, m, d, &z_new);
+            }
+            MixedOp::InducingDelete(index) => {
+                online
+                    .delete_inducing(online.inducing_ids()[index])
+                    .expect("delete inducing");
+                remove_colmajor(&mut z, m, d, index);
+            }
+            MixedOp::Insert => {
+                let x_new: Vec<f64> = (0..d).map(|_| sample_coord(&mut rng)).collect();
+                let y_new = sample_coord(&mut rng);
+                online.insert(&x_new, y_new).expect("insert");
+                append_colmajor(&mut x, n, d, &x_new);
+                y.push(y_new);
+            }
+            MixedOp::Delete(index) => {
+                online.delete(online.point_ids()[index]).expect("delete");
+                remove_colmajor(&mut x, n, d, index);
+                y.remove(index);
+            }
+        }
+        let err = mixed_err_vs_factor(&online, kernel.clone(), likelihood, &x, &y, &z, &xs, d);
+        let inducing_step = !matches!(op, MixedOp::Insert | MixedOp::Delete(_));
+        let pivot = min_pivot_ratio(&z, online.m(), lengthscales);
+        let slot = if inducing_step || pivot > MIXED_PIVOT_RTOL {
+            &mut worst.checked
+        } else {
+            assert!(err.is_finite(), "seed={seed} step={step} {op:?}: {err}");
+            &mut worst.x_below_threshold
+        };
+        if err > slot.0 {
+            *slot = (err, format!("seed={seed} step={step} m={m} {op:?}"));
+        }
+    }
+    worst
+}
+
+/// Runs [`run_mixed_sequence`] over [`MIXED_SEEDS`] and checks the steps
+/// [`MixedWorst::checked`] holds against [`INDUCING_TOL`].
+//
+// `X` steps at an inducing set with a pivot of `K_mm` at or below the
+// threshold are not compared at that tolerance. The factor takes any
+// positive pivot without jitter, down to the rounding residue an exact
+// duplicate leaves (`L_ii² ≈ 1e-22`), and then a row of its `A` is a
+// rounding residue divided by another: entries far above `1`, so `B`
+// carries `ε ‖A‖² / σ²` and the rank-1 update of `B` an `X` step makes
+// (ADR 0004, the same code as before the inducing update) and the product
+// the factor forms differ by that much. Measured over 40 seeds of both
+// kernels, those steps were up to `0.18` off at an exact duplicate and
+// `1.3e-9` at a near duplicate `3e-5` away; the step before this change
+// was the same (`2.9e-4` at RBF seed 5, step 8, on both). Every inducing
+// step is compared: from such a factor it assembles the system again, so
+// what an `X` step left behind does not reach a later inducing step.
+// Over the same 40 seeds the largest checked difference was `6e-12`.
+// Comparing these steps too is R8-2 (#525).
+fn run_mixed_seeds(kernel: &KernelSpec, lengthscales: &[f64], label: &str) {
+    let worst = MIXED_SEEDS
+        .map(|seed| run_mixed_sequence(kernel, lengthscales, seed))
+        .fold(MixedWorst::default(), MixedWorst::max);
+    let (err, at) = worst.checked;
+    assert!(err <= INDUCING_TOL, "{label}: rel_err={err:e} at {at}");
+}
+
+/// Inducing inserts on, next to (`1e-5` to `1e-2` per coordinate), and
+/// away from the inducing points, and inducing deletes at the first, the
+/// middle, the last, and a random index, mixed with `X` inserts and
+/// deletes, on 1-D RBF data: each step matches a factor of the same `X`,
+/// `y`, and `Z`. Before an inducing change from a factor with a pivot
+/// below the threshold assembled the system again, a delete there was
+/// `0.20` off (seed 2, step 46).
+#[test]
+fn mixed_ops_rbf_with_near_duplicates_match_factor() {
+    run_mixed_seeds(
+        &KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        &[1.0],
+        "rbf",
+    );
+}
+
+/// [`mixed_ops_rbf_with_near_duplicates_match_factor`] on 2-D ARD RBF
+/// data. Before the same change a delete of the first inducing point was
+/// `0.28` off (seed 7, step 48).
+#[test]
+fn mixed_ops_rbf_ard_2d_with_near_duplicates_match_factor() {
+    let lengthscales = [1.0, 1.5];
+    run_mixed_seeds(
+        &KernelSpec::from(RbfArdKernel::new(&lengthscales).expect("ℓ")),
+        &lengthscales,
+        "ard",
+    );
 }

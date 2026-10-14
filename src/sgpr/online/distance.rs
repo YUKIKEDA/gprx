@@ -184,11 +184,77 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
                 |b, col| mirror[b * m + col],
                 &mut saved,
             );
-            model.commit_inducing(z_train, z_obs, m + 1, |supply| {
-                supply.undo_add_inducing(row, &saved);
-            })?;
+            // A tidy source that repaired a pair moved `k(Z, x_row)`, so
+            // column `row` of `A` follows the repaired values.
+            let repaired = saved
+                .iter()
+                .zip(&mirror)
+                .any(|(old, new)| old.to_bits() != new.to_bits());
+            model.commit_inducing(
+                |model| {
+                    Ok(InducingChange::Insert {
+                        border: model.supplied_border(row, m)?,
+                        replace: repaired.then_some(row),
+                    })
+                },
+                z_train,
+                z_obs,
+                m + 1,
+                |supply| {
+                    supply.undo_add_inducing(row, &saved);
+                },
+            )?;
             model.state.inducing_points.push(point);
             Ok(model.state.inducing.insert())
+        })
+    }
+
+    /// The kernel values of training point `row` as the new inducing point
+    /// `m` (the training blocks hold it as their last column): `k(X, z)`
+    /// from that column, `k(Z, z)` from its rows of the `m` inducing points
+    /// before it (the values the squares among the inducing points hold),
+    /// and `k(z, z)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of the kernel evaluation.
+    fn supplied_border(
+        &mut self,
+        row: usize,
+        m: usize,
+    ) -> Result<InducingBorder<P::Storage>, GprError> {
+        let core = &self.state.core;
+        let (n, d) = (core.n, core.d);
+        let compiled = core.kernel.compile_as::<P::Storage>();
+        let z_point = point_at(&core.x_train, n, d, row);
+        let x64 = pack_points(&core.x_train, n, d);
+        let z64 = pack_points(&z_point, 1, d);
+        let (mut x_cast, mut z_cast) = (P::Storage::empty_cols(), P::Storage::empty_cols());
+        let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
+        let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
+        let at = core.supplied.supply.at::<P::Storage>()?;
+        let ks = &mut self.scratch.storage;
+        let k_xz = <SuppliedSpec as SupplyViews>::with_cols(&at.xz, m, 1, |cols| {
+            let views = CrossViews {
+                x1: x,
+                x2: z,
+                dist: None,
+                slots: <SuppliedSpec as SupplyViews>::rects(cols),
+            };
+            with_kernel_exp!(core.math, M => ks.cross::<M, SuppliedSpec>(&compiled, views))
+        })?;
+        // Invariant: the caller has just added the new inducing point, so
+        // `supply.inducing` holds `m + 1` training rows (the first `m` are
+        // the inducing points before it), each `< n`, and `k_xz` is `n × 1`.
+        // The slice and the `(point, 0)` index stay in range.
+        let mut k_z = Mat::zeros(m, 1);
+        for (i, &point) in core.supplied.supply.inducing[..m].iter().enumerate() {
+            k_z[(i, 0)] = k_xz[(point, 0)];
+        }
+        Ok(InducingBorder {
+            k_z,
+            k_self: kernel_diag_at::<P::Storage, SuppliedSpec>(&core.kernel, &z_point, d)?,
+            k_x: (0..n).map(|i| k_xz[(i, 0)]).collect(),
         })
     }
 
@@ -400,8 +466,16 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// each inducing point equals the one the training blocks hold for that
     /// pair (a [`DistanceSource::tidy`] source repairs both to their mean).
     /// The column is kept as a new column of the training blocks, and the
-    /// VFE system is assembled again on the enlarged inducing set, as the
-    /// coordinate `insert_inducing` does. The returned
+    /// VFE factors grow by the bordered update of the coordinate
+    /// `insert_inducing`, with `k(X, point)` read from that column and
+    /// `k(Z, point)` from its rows of the inducing points. When the repair
+    /// of a tidy source moved a value of `point`'s own row, its column of
+    /// `A` is replaced first (a rank-1 update and downdate of `B`). The VFE
+    /// system is assembled again instead under the conditions on
+    /// [`OnlineSgpr`] (an `f32` storage scalar, a jitter offset `j > 0` of
+    /// the factor of `K_mm` or a pivot of it at most `1e-5` times its
+    /// diagonal, or a bordered pivot at most `1e-5` times its diagonal).
+    /// The returned
     /// [`InducingId`] is never reused after a later
     /// [`Self::delete_inducing`].
     ///
@@ -415,8 +489,8 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// source names a slot the kernel does not read, two name one slot, or a
     /// slot has none, [`GprError::IndexOutOfRange`] if no new [`InducingId`] is left,
     /// [`GprError::SizeOverflow`] if the training blocks cannot grow, or
-    /// [`GprError::CholeskyFailed`] if the enlarged system does not factor.
-    /// On an error the model holds the same inducing points.
+    /// [`GprError::CholeskyFailed`] if the reassembled enlarged system does
+    /// not factor. On an error the model holds the same inducing points.
     ///
     /// # Examples
     ///

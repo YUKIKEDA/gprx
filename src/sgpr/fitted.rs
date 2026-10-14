@@ -104,8 +104,10 @@ pub struct FittedSgpr<
     pub(super) optimizer: O,
     pub(super) inducing: PhantomData<I>,
     pub(super) _kernel: PhantomData<K>,
-    /// Lower `L` from `K_mm = L Lᵀ`.
+    /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
+    /// The offset `j` the factor `k_mm_l` took under the jitter policy.
+    pub(super) k_mm_jitter: f64,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
     pub(super) a: Mat<P::Storage>,
     /// Lower `L_B` from `B = σn² I + A Aᵀ`.
@@ -382,6 +384,7 @@ where
     pub(crate) fn apply_vfe(&mut self, state: VfeState<P::Storage>) {
         self.predict_w = promote_predict_w::<P>(&state.w);
         self.k_mm_l = state.k_mm_l;
+        self.k_mm_jitter = state.k_mm_jitter;
         self.a = state.a;
         self.b_l = state.b_l;
         self.w = state.w;

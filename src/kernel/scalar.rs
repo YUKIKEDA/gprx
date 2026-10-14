@@ -25,8 +25,10 @@ pub(crate) mod sealed {
         type ColCast: Clone + Send + Sync + 'static;
 
         /// Sparse assembly and predict, the SVGP gradient, and Exact
-        /// leave-one-out compute in `f64` and round into this storage.
-        /// `true` only for `f32`.
+        /// leave-one-out compute in `f64` and round into this storage, and
+        /// an online SGPR inducing change assembles again instead of
+        /// updating the stored factors in this scalar. `true` only for
+        /// `f32`.
         const ROUNDS_FROM_F64: bool;
 
         /// safetensors dtype of this scalar.

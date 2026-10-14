@@ -233,20 +233,14 @@ impl SparseSupply {
         saved: &mut Vec<f64>,
     ) {
         let m = self.inducing.len();
+        saved.reserve(m * self.f64.xz.block_count());
         self.f64.xz.row_into(point, saved);
         let (f64, f32) = self.copies_mut();
-        for (b, at) in f64.xz.block_ids().into_iter().enumerate() {
-            for col in 0..m {
-                f64.xz.set(at, point, col, mirror(b, col));
-            }
-        }
+        f64.xz.set_row(point, m, &mirror);
         f64.xz.push_col(&value);
         if let Some(f32) = f32 {
-            for (b, at) in f32.xz.block_ids().into_iter().enumerate() {
-                for col in 0..m {
-                    f32.xz.set(at, point, col, f32::from_f64(mirror(b, col)));
-                }
-            }
+            f32.xz
+                .set_row(point, m, |b, col| f32::from_f64(mirror(b, col)));
             f32.xz.push_col(|b, row| f32::from_f64(value(b, row)));
         }
         self.inducing.push(point);
@@ -261,19 +255,11 @@ impl SparseSupply {
         let m = self.inducing.len();
         let (f64, f32) = self.copies_mut();
         f64.xz.pop_col();
-        for (b, at) in f64.xz.block_ids().into_iter().enumerate() {
-            for col in 0..m {
-                f64.xz.set(at, point, col, saved[b * m + col]);
-            }
-        }
+        f64.xz.set_row(point, m, |b, col| saved[b * m + col]);
         if let Some(f32) = f32 {
             f32.xz.pop_col();
-            for (b, at) in f32.xz.block_ids().into_iter().enumerate() {
-                for col in 0..m {
-                    f32.xz
-                        .set(at, point, col, f32::from_f64(saved[b * m + col]));
-                }
-            }
+            f32.xz
+                .set_row(point, m, |b, col| f32::from_f64(saved[b * m + col]));
         }
         self.rebuild_squares();
     }
@@ -281,6 +267,7 @@ impl SparseSupply {
     /// Removes inducing point `at` (its column of the blocks) in place; the
     /// column is appended to `saved` for [`Self::undo_remove_inducing`].
     pub(crate) fn remove_inducing(&mut self, at: usize, saved: &mut Vec<f64>) {
+        saved.reserve(self.f64.xz.rows() * self.f64.xz.block_count());
         let (f64, f32) = self.copies_mut();
         f64.xz.remove_col(at, Some(saved));
         if let Some(f32) = f32 {

@@ -12,8 +12,9 @@ pub(crate) use derivatives::{analytic_gradient, analytic_hessian};
 pub(crate) use loo::vfe_loo;
 pub(crate) use predict::{VfeSystem, predict_vfe_covariance, predict_vfe_into};
 pub(crate) use updates::{
-    a_times_y, append_point, inducing_delete, inducing_insert, kernel_column, kernel_diag_at,
-    point_at, push_column, remove_column_in_place, remove_point, solve_lmm,
+    InducingBorder, a_times_y, append_point, coordinate_border, factor_pivots_hold,
+    inducing_append, inducing_delete, kernel_column, kernel_diag_at, point_at, push_column,
+    remove_column_in_place, remove_point, solve_lmm,
 };
 pub(crate) use vfe::{
     VfeState, assemble_fitted, assemble_vfe, assemble_vfe_with_f64_w, fill_z_intervals,
