@@ -148,8 +148,8 @@ libgp には、比較のプログラムが避けている仕様が 2 つある�
 | カーネルの和・積 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | 誘導点つきの疎 GP | ✓ `Sgpr` | — | ✓ `InducingPointKernel` | ✓ `SparseGPRegression` | — | — |
 | ミニバッチの SVGP | ✓ `Svgp`（Adam） | — | ✓ | クラスのみ。ミニバッチのループは無い | — | — |
-| 全部を学習し直さずに学習点を足す | ✓ `OnlineGpr` | — | ✓ `get_fantasy_model` | — | ✓ `add_pattern` | ✓ `add_samples` |
-| 学習点を消す | ✓ `OnlineGpr` | — | — | — | — | — |
+| 全部を学習し直さずに学習点を足す | ✓ `OnlineGpr` / `OnlineSgpr` | — | ✓ `get_fantasy_model` | — | ✓ `add_pattern` | ✓ `add_samples` |
+| 学習点を消す | ✓ `OnlineGpr` / `OnlineSgpr` | — | — | — | — | — |
 | 事後サンプル | ✓ `sample` | ✓ `sample_y` | ✓ | ✓ `posterior_samples` | — | ✓ `sample_at` |
 | f32 / 混合精度 | ✓ | — | ✓ | — | — | — |
 | 学習済みモデルの保存と読み込み | ✓ | ✓ pickle / joblib | ✓ `state_dict` | ✓ `save_model` | ✓ `write` | ✓ serde |

@@ -69,7 +69,7 @@ stats_alloc = "0.1.10"
 
 [[test]]
 # Counts the allocations of the whole process: runs its checks one after
-# another without the libtest harness's threads (#494).
+# another without the libtest harness's threads.
 name = "alloc"
 harness = false
 # Counted in release, as its own CI job (`just alloc`): in debug its O(n³)
