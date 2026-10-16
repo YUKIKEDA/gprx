@@ -21,8 +21,8 @@ use crate::sgpr::SgprObjective;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{
-    VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, vfe_loo,
+    VfeExact, VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe,
+    fill_z_intervals, predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, vfe_loo,
     vfe_neg_log_marginal_likelihood,
 };
 use super::model::Sgpr;
@@ -106,6 +106,9 @@ pub struct FittedSgpr<
     pub(super) _kernel: PhantomData<K>,
     /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(super) k_mm_l: Mat<P::Storage>,
+    /// `L` in `f64` beside a rounded `k_mm_l` (`f32` storage): the factor
+    /// the assembly formed, which an online `X` insert solves against.
+    pub(super) k_mm_l_f64: <P::Storage as crate::kernel::ScalarOps>::F64Factor,
     /// The offset `j` the factor `k_mm_l` took under the jitter policy.
     pub(super) k_mm_jitter: f64,
     /// `A = L_mm⁻¹ K(Z, X)` (`m × n`).
@@ -119,6 +122,10 @@ pub struct FittedSgpr<
     pub(super) predict_w: Vec<P::Refine>,
     pub(super) k_diag_sum: P::Storage,
     pub(super) a_frobenius2: P::Storage,
+    /// The `f64` factor of `B`, `w`, and the sums the assembly rounded
+    /// (`f32` storage): where [`Self::into_online`] starts the `f64`
+    /// system its `X` steps update.
+    pub(super) exact: <P::Storage as crate::kernel::ScalarOps>::F64Held<VfeExact>,
 }
 
 impl<O, I: InducingLayout<K::Supply>, P, K> FittedSgpr<O, I, P, K>
@@ -384,12 +391,14 @@ where
     pub(crate) fn apply_vfe(&mut self, state: VfeState<P::Storage>) {
         self.predict_w = promote_predict_w::<P>(&state.w);
         self.k_mm_l = state.k_mm_l;
+        self.k_mm_l_f64 = state.k_mm_l_f64;
         self.k_mm_jitter = state.k_mm_jitter;
         self.a = state.a;
         self.b_l = state.b_l;
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
+        self.exact = state.exact;
     }
 
     /// `w` and the lower `L_B` of `B`, for the SVGP-at-Titsias checks.

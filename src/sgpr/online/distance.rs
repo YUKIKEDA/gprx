@@ -57,18 +57,21 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         }
         self.state.registry.require_room()?;
         // The model's buffers, taken for the call as a predict takes them.
-        let mut scratch = std::mem::take(&mut self.scratch.predict.query_storage);
+        let mut scratch = std::mem::take(&mut self.scratch.predict.query64);
         let result = self.insert_bound(sources, x_obs, y_obs, &mut scratch);
-        self.scratch.predict.query_storage = scratch;
+        self.scratch.predict.query64 = scratch;
         result
     }
 
+    /// [`Self::insert_sources`] with the columns bound in `f64`: the new
+    /// column of `A` is evaluated in `f64` whatever the storage scalar
+    /// ([`OnlineSgpr::append_point`]).
     fn insert_bound<'s>(
         &mut self,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
         x_obs: &[f64],
         y_obs: f64,
-        scratch: &mut QueryScratch<P::Storage>,
+        scratch: &mut QueryScratch<f64>,
     ) -> Result<PointId, GprError> {
         let (m, d) = (self.state.core.m, self.state.core.d);
         let cols = QuerySources::bind_column(&self.state.core.supplied.slots, sources, m, scratch)?;
@@ -76,24 +79,20 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         let result = (|| {
             self.state.core.map_point(x_obs, &mut mapped)?;
             let y_new = self.state.core.map_target(y_obs)?;
-            let compiled = self.state.core.kernel.compile_as::<P::Storage>();
+            let compiled = self.state.core.kernel.compile_as::<f64>();
             let z64 = pack_points(&self.state.core.z_train, m, d);
             let x64 = pack_points(&mapped, 1, d);
-            let (mut z_cast, mut x_cast) = (P::Storage::empty_cols(), P::Storage::empty_cols());
-            let z = P::Storage::storage_cols(z64.as_ref(), &mut z_cast);
-            let x = P::Storage::storage_cols(x64.as_ref(), &mut x_cast);
             let views = CrossViews {
-                x1: z,
-                x2: x,
+                x1: z64.as_ref(),
+                x2: x64.as_ref(),
                 dist: None,
                 slots: <SuppliedSpec as SupplyViews>::rects(&cols),
             };
             let a_col = with_kernel_exp!(self.state.core.math, M => self
                 .scratch
-                .storage
+                .f64
                 .cross::<M, SuppliedSpec>(&compiled, views))?;
-            let k_diag =
-                kernel_diag_at::<P::Storage, SuppliedSpec>(&self.state.core.kernel, &mapped, d)?;
+            let k_diag = kernel_diag_at::<f64, SuppliedSpec>(&self.state.core.kernel, &mapped, d)?;
             // The new row of every training block, read before anything
             // changes: the columns are checked, so nothing below fails.
             let exact = cols.f64_view();
@@ -134,9 +133,11 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
             });
         }
         self.state.inducing.require_room()?;
-        let mut scratch = std::mem::take(&mut self.scratch.predict.query_storage);
+        // Bound in `f64`, as an `X` insert binds its row: only the exact
+        // values are read.
+        let mut scratch = std::mem::take(&mut self.scratch.predict.query64);
         let result = self.insert_inducing_bound(point, row, sources, &mut scratch);
-        self.scratch.predict.query_storage = scratch;
+        self.scratch.predict.query64 = scratch;
         result
     }
 
@@ -145,7 +146,7 @@ impl<O, P: crate::precision::GpScalar, C: PointUse> OnlineSgpr<O, P, DistanceKer
         point: PointId,
         row: usize,
         sources: impl IntoIterator<Item = DistanceSource<'s>>,
-        scratch: &mut QueryScratch<P::Storage>,
+        scratch: &mut QueryScratch<f64>,
     ) -> Result<InducingId, GprError> {
         let (n, m, d) = (self.state.core.n, self.state.core.m, self.state.core.d);
         let cols = QuerySources::bind_column(&self.state.core.supplied.slots, sources, n, scratch)?;

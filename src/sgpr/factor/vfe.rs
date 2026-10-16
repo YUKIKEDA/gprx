@@ -3,7 +3,7 @@
 use super::lit;
 use crate::data::pack_points;
 use crate::error::{CholeskyStage, GprError};
-use crate::kernel::{KernelScalar, KernelSpec, Supply, Triangle};
+use crate::kernel::{KernelScalar, KernelSpec, ScalarOps, Supply, Triangle};
 use crate::likelihood::GaussianLikelihood;
 use crate::linalg::{
     cholesky_lower_jitter, cholesky_lower_with_retries, dot_ay, frobenius2, gram_aat_plus_noise,
@@ -60,6 +60,10 @@ pub(super) fn noise_likelihood(noise: f64) -> Result<GaussianLikelihood, GprErro
 pub(crate) struct VfeState<T: KernelScalar> {
     /// Lower `L` from `K_mm + j I = L Lᵀ`.
     pub(crate) k_mm_l: Mat<T>,
+    /// `L` in `f64` beside a rounded `k_mm_l` (`f32`): the factor the
+    /// assembly formed. A new column `L⁻¹ k(Z, x)` of an online `X` insert
+    /// is solved against it, as the assembly solved `A`.
+    pub(crate) k_mm_l_f64: <T as ScalarOps>::F64Factor,
     /// The offset `j` the factor of `K_mm` took under the jitter policy
     /// (`0.0` when `K_mm` factored as it is). An inducing insert borders
     /// `L` with the same `j`, so `L` stays the factor of `K_mm + j I`.
@@ -69,6 +73,54 @@ pub(crate) struct VfeState<T: KernelScalar> {
     pub(crate) w: Vec<T>,
     pub(crate) k_diag_sum: T,
     pub(crate) a_frobenius2: T,
+    /// The `f64` system `b_l`, `w`, and the sums round, for a storage
+    /// scalar the assembly computes in `f64` and rounds (`f32`); nothing
+    /// for `f64`.
+    pub(crate) exact: <T as ScalarOps>::F64Held<VfeExact>,
+}
+
+/// The `f64` values of the VFE system that an `f32` storage rounds into
+/// [`VfeState::b_l`], [`VfeState::w`], and the sums: the starting point
+/// of the `f64` system an online model's `X` steps update (ADR 0004,
+/// R8-3), so that each step's stored values are the rounding of the `f64`
+/// system of the points the model holds, as an assembly's are.
+#[derive(Clone, Debug)]
+pub(crate) struct VfeExact {
+    /// Lower factor of `B = σn² I + A Aᵀ`.
+    pub(crate) b_l: Mat<f64>,
+    /// `w = B⁻¹ A y`.
+    pub(crate) w: Vec<f64>,
+    /// `Σ k(x_i, x_i)`.
+    pub(crate) k_diag_sum: f64,
+    /// `‖A‖_F²`.
+    pub(crate) a_frobenius2: f64,
+}
+
+impl VfeExact {
+    /// The stored values `b_l`, `w`, and the sums promoted to `f64`: what
+    /// a system formed in its own scalar holds (the inducing updates of
+    /// ADR 0005, which an `f32` storage does not take).
+    pub(crate) fn promoted<T: KernelScalar>(
+        b_l: MatRef<'_, T>,
+        w: &[T],
+        k_diag_sum: T,
+        a_frobenius2: T,
+    ) -> Self {
+        Self {
+            b_l: Mat::from_fn(b_l.nrows(), b_l.ncols(), |i, j| b_l[(i, j)].to_f64()),
+            w: w.iter().map(|value| value.to_f64()).collect(),
+            k_diag_sum: k_diag_sum.to_f64(),
+            a_frobenius2: a_frobenius2.to_f64(),
+        }
+    }
+}
+
+/// The `f64` weights of the assembly `state` was rounded from, when its
+/// storage scalar rounds (`f32`): a refining precision publishes them as
+/// its predict weights, which saves assembling the whole system a second
+/// time. `None` for `f64`.
+pub(crate) fn f64_weights<T: KernelScalar>(state: &VfeState<T>) -> Option<&[f64]> {
+    T::held_f64_ref(&state.exact).map(|exact| exact.w.as_slice())
 }
 
 pub(crate) fn assemble_fitted<O, I: InducingLayout<K::Supply>, M: crate::math::KernelMath, P, K>(
@@ -81,7 +133,7 @@ where
 {
     let mut scratch = SparseScratch::<P::Storage, K::Supply>::default();
     let data = core.data();
-    let (state, w64) = assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
+    let state = assemble_vfe::<M, P::Storage, K::Supply>(
         &core.kernel,
         core.jitter,
         core.likelihood,
@@ -90,9 +142,9 @@ where
         &mut scratch.f64,
     )?;
     // `data` borrows `core` until here, whichever branch reads it.
-    let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, w64) {
+    let predict_w = if let (true, Some(w64)) = (P::REFINES_IN_F64, f64_weights(&state)) {
         drop(data);
-        w64.into_iter().map(P::Refine::from_f64).collect()
+        w64.iter().copied().map(P::Refine::from_f64).collect()
     } else if P::REFINES_IN_F64 {
         assemble_vfe::<M, f64, K::Supply>(
             &core.kernel,
@@ -124,6 +176,7 @@ where
         inducing: PhantomData,
         _kernel: PhantomData,
         k_mm_l: state.k_mm_l,
+        k_mm_l_f64: state.k_mm_l_f64,
         k_mm_jitter: state.k_mm_jitter,
         a: state.a,
         b_l: state.b_l,
@@ -131,6 +184,7 @@ where
         predict_w,
         k_diag_sum: state.k_diag_sum,
         a_frobenius2: state.a_frobenius2,
+        exact: state.exact,
     })
 }
 
@@ -155,7 +209,7 @@ where
             ks64,
             &mut KernelScratch::new(),
         )?;
-        return Ok(round_vfe(&state));
+        return Ok(round_vfe(state));
     }
     let (n_rows, n_inducing) = (data.n, data.m);
     let compiled = kernel.compile_as::<T>();
@@ -207,7 +261,10 @@ where
     for i in 0..n_inducing {
         w[i] = ay[(i, 0)];
     }
+    // A rounding scalar returned above: `T` holds nothing beside its values.
+    let exact = T::hold_f64(|| VfeExact::promoted(b.as_ref(), &w, k_diag_sum, a_frobenius2));
     Ok(VfeState::<T> {
+        k_mm_l_f64: T::hold_f64_factor(k_mm.as_ref()),
         k_mm_l: k_mm,
         k_mm_jitter: applied_jitter,
         a,
@@ -215,51 +272,31 @@ where
         w,
         k_diag_sum,
         a_frobenius2,
+        exact,
     })
 }
 
-/// `state` rounded to a storage scalar that is evaluated in `f64`.
-fn round_vfe<T: KernelScalar>(state: &VfeState<f64>) -> VfeState<T> {
+/// `state` rounded to a storage scalar that is evaluated in `f64`. The
+/// `f64` factor of `K_mm` moves into the rounded state
+/// ([`VfeState::k_mm_l_f64`]), and the `f64` factor of `B`, `w`, and the
+/// sums into [`VfeState::exact`].
+fn round_vfe<T: KernelScalar>(state: VfeState<f64>) -> VfeState<T> {
     VfeState {
         k_mm_l: round_mat::<T>(state.k_mm_l.as_ref()),
+        k_mm_l_f64: T::f64_factor_from(state.k_mm_l),
         k_mm_jitter: state.k_mm_jitter,
         a: round_mat::<T>(state.a.as_ref()),
         b_l: round_mat::<T>(state.b_l.as_ref()),
         w: state.w.iter().map(|value| T::from_f64(*value)).collect(),
         k_diag_sum: T::from_f64(state.k_diag_sum),
         a_frobenius2: T::from_f64(state.a_frobenius2),
+        exact: T::hold_f64(|| VfeExact {
+            b_l: state.b_l,
+            w: state.w,
+            k_diag_sum: state.k_diag_sum,
+            a_frobenius2: state.a_frobenius2,
+        }),
     }
-}
-
-/// [`assemble_vfe`] in the storage scalar `T`, plus the `f64` weights `w`
-/// when `T` is evaluated in `f64` and rounded (`ROUNDS_FROM_F64`).
-///
-/// A refining precision publishes those `f64` weights as its predict
-/// weights. Taking them from the same `f64` assembly saves assembling the
-/// whole system a second time. A scalar that is not rounded returns `None`.
-pub(crate) fn assemble_vfe_with_f64_w<M: crate::math::KernelMath, T: KernelScalar, U: Supply>(
-    kernel: &KernelSpec<U>,
-    k_mm_jitter: JitterPolicy,
-    likelihood: GaussianLikelihood,
-    data: SparseData<'_, U>,
-    ks: &mut KernelScratch<T>,
-    ks64: &mut KernelScratch<f64>,
-) -> Result<(VfeState<T>, Option<Vec<f64>>), GprError> {
-    if T::ROUNDS_FROM_F64 {
-        data.validate()?;
-        let state = assemble_vfe::<M, f64, U>(
-            kernel,
-            k_mm_jitter,
-            likelihood,
-            data,
-            ks64,
-            &mut KernelScratch::new(),
-        )?;
-        let rounded = round_vfe(&state);
-        return Ok((rounded, Some(state.w)));
-    }
-    let state = assemble_vfe::<M, T, U>(kernel, k_mm_jitter, likelihood, data, ks, ks64)?;
-    Ok((state, None))
 }
 
 pub(crate) fn fill_z_intervals(

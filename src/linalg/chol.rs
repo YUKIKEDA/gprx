@@ -400,7 +400,7 @@ pub(crate) fn delete_chol_row<T: KernelScalar>(l: &Mat<T>, idx: usize) -> Mat<T>
             }
             v[j] = work[(idx + 1 + j, idx)];
         }
-        chol_rank1_update(&mut l22, &mut v);
+        chol_rank1_update(l22.as_mut(), &mut v);
         for j in 0..trail {
             for i in j..trail {
                 work[(idx + 1 + i, idx + 1 + j)] = l22[(i, j)];
@@ -432,7 +432,7 @@ pub(crate) fn solve_llt<T: KernelScalar>(l: MatRef<'_, T>, rhs: MatMut<'_, T>) {
     T::solve_llt_owned_scratch(l, rhs);
 }
 
-pub(crate) fn chol_rank1_update<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) {
+pub(crate) fn chol_rank1_update<T: KernelScalar>(mut l: MatMut<'_, T>, v: &mut [T]) {
     let n = l.nrows();
     for k in 0..n {
         let lkk = l[(k, k)];
@@ -450,7 +450,7 @@ pub(crate) fn chol_rank1_update<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) {
     }
 }
 
-pub(crate) fn chol_rank1_downdate<T: KernelScalar>(l: &mut Mat<T>, v: &mut [T]) -> bool {
+pub(crate) fn chol_rank1_downdate<T: KernelScalar>(mut l: MatMut<'_, T>, v: &mut [T]) -> bool {
     let n = l.nrows();
     for k in 0..n {
         let lkk = l[(k, k)];

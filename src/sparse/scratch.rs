@@ -677,6 +677,10 @@ pub(crate) struct SparseScratch<S: KernelScalar, U: Supply = NoSupply> {
     pub(crate) f64: KernelScratch<f64>,
     /// One point through the input transform (online inserts).
     pub(crate) point: Vec<f64>,
+    /// One training row of the supplied blocks in `f64` (online deletes of
+    /// an `f32` model), kept to reuse its buffers; a coordinate model has
+    /// none.
+    pub(crate) row: <U as SupplyViews>::Held<SupplyAt<f64>>,
     /// Buffers of `predict_into`.
     pub(crate) predict: PredictScratch<S, U>,
 }
@@ -687,6 +691,7 @@ impl<S: KernelScalar, U: Supply> Default for SparseScratch<S, U> {
             storage: KernelScratch::new(),
             f64: KernelScratch::new(),
             point: Vec::new(),
+            row: U::hold(SupplyAt::default),
             predict: PredictScratch::default(),
         }
     }
