@@ -200,6 +200,42 @@ where
 // that ill-conditioned; assembling again there costs one `O(n·m²)` factor.
 const PIVOT_RTOL: f64 = 1e-5;
 
+/// [`PIVOT_RTOL`] for an `f32` storage scalar ([`crate::SinglePrecision`],
+/// [`crate::MixedPrecision`]), whose factor of `K_mm` an `X` insert or
+/// delete starts from ([`factor_pivots_hold`]); their inducing changes
+/// always assemble again, so no bordered pivot is checked against it.
+//
+// The assembly of an `f32` model computes in `f64` and rounds, so the
+// stored factor of `K_mm` keeps the relative accuracy of `f32` in every
+// entry, small pivots included, and the ratio [`factor_pivots_hold`] reads
+// from it is that of the `f64` factor to about `1e-7`. An `X` step then
+// solves `L⁻¹ k(Z, x)` and updates `B` in `f32`: a pivot `r = L_ii² /
+// (K_ii + j)` divides row `i` of the new column, so the rounding error of
+// the step grows like `ε / r` with the `ε = 1.2e-7` of `f32`, where `f64`
+// has `2.2e-16`. Measured on 1-D RBF data (two near duplicate pairs among
+// five inducing points, `σ² = 0.1`), five `X` inserts and deletes were
+// within `1.3e-6` to `2.7e-6` of a fresh `f32` factor for `r ≥ 7e-5` (the
+// difference an `f32` update has from the factor anyway), `1.6e-5` at
+// `r = 2.3e-5`, `3.8e-5` at `7e-6`, `1.5e-3` at `7e-9`, and `0.25` at
+// `7e-15`; in `f64` the same steps were within `1e-14` down to
+// `r = 2.3e-5`. `1e-3` keeps the part the pivot adds (`≈ 4e-10 / r`)
+// below that floor, so the `1e-5` a model factored again on load is held
+// to keeps a margin of about `4`; the `f64` value `1e-5` would let
+// `1.6e-5` through. A pivot that small is an inducing point within about
+// `0.03` lengthscales of the inducing set.
+const F32_PIVOT_RTOL: f64 = 1e-3;
+
+/// The relative pivot threshold of storage scalar `T`: [`PIVOT_RTOL`] for
+/// `f64`, [`F32_PIVOT_RTOL`] for `f32` (the scalar the assembly computes
+/// in `f64` and rounds into).
+fn pivot_rtol<T: KernelScalar>() -> f64 {
+    if T::ROUNDS_FROM_F64 {
+        F32_PIVOT_RTOL
+    } else {
+        PIVOT_RTOL
+    }
+}
+
 /// Appends one inducing point at the end of `state` from its kernel values
 /// `border` (ADR 0005): a bordered LLT of `K_mm + j I`, with the offset
 /// `j` the factor of `K_mm` already took, and of `B`.
@@ -304,33 +340,38 @@ pub(crate) fn inducing_append<T: KernelScalar>(
 }
 
 /// Whether the bordered pivot `pivot`, cancelled from `diag`, is finite and
-/// above [`PIVOT_RTOL`] times `diag`.
+/// above the threshold of `T` ([`pivot_rtol`]) times `diag`.
 fn pivot_holds<T: KernelScalar>(pivot: T, diag: T) -> bool {
     let (pivot, diag) = (pivot.to_f64(), diag.to_f64());
-    pivot.is_finite() && pivot > PIVOT_RTOL * diag
+    pivot.is_finite() && pivot > pivot_rtol::<T>() * diag
 }
 
 /// Whether every pivot of `l`, the lower factor of `K_mm + j I`, holds
 /// the threshold an inserted pivot is held to: `L_ii² > τ (K_ii + j)`
-/// with `τ =` [`PIVOT_RTOL`], where `K_ii + j = Σ_k L_ik²` is the squared
-/// norm of row `i` (`O(m²)`).
+/// with `τ` the threshold of `T` ([`pivot_rtol`]: [`PIVOT_RTOL`] for
+/// `f64`, [`F32_PIVOT_RTOL`] for `f32`), where `K_ii + j = Σ_k L_ik²` is
+/// the squared norm of row `i` (`O(m²)`, summed in `f64`).
 ///
 /// [`inducing_append`] and [`inducing_delete`] start from `l`, so a pivot
 /// below the threshold anywhere in it (one an assembly took: the factor
 /// accepts any positive pivot, down to the rounding residue of an exact
 /// duplicate) puts its relative rounding error into every row the update
-/// computes after it, as the inserted pivot would. The caller assembles
-/// the changed inducing set again instead, as the factor does. In exact
-/// arithmetic an append leaves the pivots of `l` as they are and a delete
-/// only raises those after the row it drops, so a factor whose pivots hold
-/// keeps them through updates; only an assembly brings in a smaller one.
+/// computes after it, as the inserted pivot would. The rank-1 update of
+/// `B` an `X` insert or delete makes (ADR 0004) solves `L⁻¹ k(Z, x)` the
+/// same way. The caller assembles the system again instead, as the factor
+/// does. In exact arithmetic an append leaves the pivots of `l` as they
+/// are and a delete only raises those after the row it drops, so a factor
+/// whose pivots hold keeps them through updates; only an assembly brings
+/// in a smaller one, and an `X` step does not change `l`.
 pub(crate) fn factor_pivots_hold<T: KernelScalar>(l: MatRef<'_, T>) -> bool {
     (0..l.nrows()).all(|i| {
-        let mut row2 = lit::<T>(0.0);
+        let mut row2 = 0.0;
         for k in 0..=i {
-            row2 += l[(i, k)] * l[(i, k)];
+            let value = l[(i, k)].to_f64();
+            row2 += value * value;
         }
-        pivot_holds(l[(i, i)] * l[(i, i)], row2)
+        let pivot = l[(i, i)].to_f64();
+        pivot.is_finite() && pivot * pivot > pivot_rtol::<T>() * row2
     })
 }
 

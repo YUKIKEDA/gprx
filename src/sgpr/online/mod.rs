@@ -118,7 +118,21 @@ pub(super) enum InducingChange<T> {
 ///
 /// `insert` appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
-/// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
+/// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put
+/// (ADR 0004). The VFE system is assembled again on the changed points
+/// instead (`O(n·m²)`, the factor a batch model of those points takes)
+/// when any of these holds:
+///
+/// - a pivot of the factor of `K_mm` is at most `τ` times its diagonal
+///   (`L_ii² ≤ τ (K_ii + j)` in `K_mm + j I = L Lᵀ`), with `τ = 1e-5` for
+///   [`crate::DoublePrecision`] and `τ = 1e-3` for an `f32` storage scalar
+///   ([`crate::SinglePrecision`], [`crate::MixedPrecision`]): the new
+///   column `L⁻¹ k(Z, x)` divides by that pivot, down to the rounding
+///   residue an exact duplicate inducing point leaves, so a rank-1 update
+///   would carry the rounding of the pivot into `B`. This holds until an
+///   inducing change or new `θ` leaves a factor whose pivots hold;
+/// - the downdate of `B` for a delete fails.
+///
 /// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
 /// by that identifier. Inducing points change the factors in place (ADR
@@ -240,6 +254,10 @@ pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
     /// The offset `j` of `k_mm_l`: the one the last assembly of `K_mm`
     /// took under the jitter policy, which an inducing insert borders with.
     k_mm_jitter: f64,
+    /// [`factor_pivots_hold`] of `k_mm_l`, kept with it so an `X` step
+    /// does not pay the `O(m²)` check (see
+    /// [`OnlineSgpr::updates_x_in_place`]).
+    k_mm_pivots_hold: bool,
     a: Mat<P::Storage>,
     b_l: Mat<P::Storage>,
     w: Vec<P::Storage>,
@@ -353,6 +371,7 @@ where
             state: OnlineState {
                 ay,
                 core: fitted.core,
+                k_mm_pivots_hold: factor_pivots_hold(fitted.k_mm_l.as_ref()),
                 k_mm_l: fitted.k_mm_l,
                 k_mm_jitter: fitted.k_mm_jitter,
                 a: fitted.a,
@@ -426,6 +445,7 @@ where
         self.state.core = fitted.core;
         self.scratch = fitted.scratch;
         self.optimizer = fitted.optimizer;
+        self.state.k_mm_pivots_hold = factor_pivots_hold(fitted.k_mm_l.as_ref());
         self.state.k_mm_l = fitted.k_mm_l;
         self.state.k_mm_jitter = fitted.k_mm_jitter;
         self.state.a = fitted.a;
@@ -488,6 +508,7 @@ where
 
     /// Takes `state` as the VFE system. The predict weights are the caller's.
     fn set_vfe(&mut self, state: VfeState<P::Storage>) {
+        self.state.k_mm_pivots_hold = factor_pivots_hold(state.k_mm_l.as_ref());
         self.state.k_mm_l = state.k_mm_l;
         self.state.k_mm_jitter = state.k_mm_jitter;
         self.state.a = state.a;
@@ -714,9 +735,13 @@ where
 
     /// Removes the training point identified by `id` and packs every buffer.
     ///
-    /// Updates `B` with a rank-1 downdate. If that loses positive
-    /// definiteness, the remaining points are factored again. The last
-    /// remaining point cannot be deleted.
+    /// Updates `B` with a rank-1 downdate. The remaining points are
+    /// factored again instead (`O(n·m²)`) when a pivot of the factor of
+    /// `K_mm` is at most `1e-5` times its diagonal (`1e-3` for an `f32`
+    /// storage scalar; an exact or near duplicate among the inducing
+    /// points, say) or the downdate loses positive definiteness: the
+    /// conditions on [`OnlineSgpr`]. The last remaining point cannot be
+    /// deleted.
     ///
     /// # Errors
     ///
@@ -725,9 +750,9 @@ where
     /// [`GprError::InvalidConfig`] when the point is an inducing point of a
     /// model on supplied distances (remove it with [`Self::delete_inducing`]
     /// first), or [`GprError::CholeskyFailed`] when the system of the
-    /// remaining points does not factor (a downdate that failed falls back
-    /// to factoring it again, and a precision that refines in `f64` factors
-    /// its predict weights again). On an error the model holds the same
+    /// remaining points does not factor (when it is factored again, as
+    /// above, and when a precision that refines in `f64` factors its
+    /// predict weights again). On an error the model holds the same
     /// points.
     ///
     /// # Examples
@@ -820,7 +845,7 @@ where
         y_obs_next.remove(idx);
         let mut b_trial = self.state.b_l.clone();
         let mut v_trial = v;
-        if chol_rank1_downdate(&mut b_trial, &mut v_trial) {
+        if self.updates_x_in_place() && chol_rank1_downdate(&mut b_trial, &mut v_trial) {
             self.state.k_diag_sum -= diag;
             self.state.a_frobenius2 -= col_norm;
             let y_idx = self.state.core.y_train[idx];
@@ -852,9 +877,10 @@ where
         Ok(())
     }
 
-    /// The [`Self::delete`] path when the downdate of `B` fails: assembles
-    /// the VFE system again from the remaining points (one fewer than now)
-    /// and publishes its predict weights with it.
+    /// The [`Self::delete`] path when the factor of `K_mm` has a pivot below
+    /// the threshold ([`Self::updates_x_in_place`]) or the downdate of `B`
+    /// fails: assembles the VFE system again from the remaining points (one
+    /// fewer than now) and publishes its predict weights with it.
     pub(super) fn delete_by_reassembly(
         &mut self,
         x_next: Vec<f64>,
@@ -885,7 +911,7 @@ where
         x_obs_next: Vec<f64>,
         y_obs_next: Vec<f64>,
     ) -> Result<(), GprError> {
-        let state = with_kernel_exp!(self.state.core.math, M => assemble_vfe::<M, P::Storage, K::Supply>(
+        let (state, w64) = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
             &self.state.core.kernel,
             self.state.core.jitter,
             self.state.core.likelihood,
@@ -903,7 +929,45 @@ where
         self.state.core.x_obs = x_obs_next;
         self.state.core.y_obs = y_obs_next;
         self.state.core.n -= 1;
-        self.apply_vfe(state)
+        self.commit_assembly(state, w64)
+    }
+
+    /// Whether an `X` insert or delete may update the factor of `B` by a
+    /// rank-1 update or downdate (ADR 0004) rather than assemble the VFE
+    /// system again: when every pivot of the factor of `K_mm` holds the
+    /// relative threshold of the storage scalar ([`factor_pivots_hold`]).
+    ///
+    /// An assembly takes any positive pivot of `K_mm` without jitter, down
+    /// to the rounding residue an exact duplicate inducing point leaves.
+    /// The new column `L⁻¹ k(Z, x)` of `A` divides by that pivot, so its
+    /// row there carries the relative rounding error of the pivot, and the
+    /// rank-1 update of `B` and the product `A Aᵀ` an assembly forms differ
+    /// by up to `ε ‖A‖² / σ²`; an assembly of the changed points has the
+    /// factor a batch model of them takes. An `X` step leaves `L` as it is,
+    /// so the answer is kept with `L` and changes only with the inducing
+    /// set or `θ`.
+    fn updates_x_in_place(&self) -> bool {
+        self.state.k_mm_pivots_hold
+    }
+
+    /// Takes the assembled `state` as the VFE system and publishes its
+    /// predict weights: the `f64` weights `w64` of the same assembly for a
+    /// precision that refines in `f64`, else those of
+    /// [`Self::apply_vfe`].
+    fn commit_assembly(
+        &mut self,
+        state: VfeState<P::Storage>,
+        w64: Option<Vec<f64>>,
+    ) -> Result<(), GprError> {
+        match w64 {
+            // The `f64` weights of this assembly are the refined predict weights.
+            Some(w64) if P::REFINES_IN_F64 => {
+                self.state.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
+                self.set_vfe(state);
+                Ok(())
+            }
+            _ => self.apply_vfe(state),
+        }
     }
 
     /// Whether an inducing change may update the factors in place (ADR
@@ -925,7 +989,7 @@ where
     fn updates_inducing_in_place(&self) -> bool {
         !<P::Storage as ScalarOps>::ROUNDS_FROM_F64
             && self.state.k_mm_jitter <= 0.0
-            && factor_pivots_hold(self.state.k_mm_l.as_ref())
+            && self.state.k_mm_pivots_hold
     }
 
     /// Commits one change of the inducing set: `change` gives it from the
@@ -1016,15 +1080,7 @@ where
         self.state.core.z_train = z_train;
         self.state.core.z_obs = z_obs;
         self.state.core.m = m;
-        match w64 {
-            // The `f64` weights of this assembly are the refined predict weights.
-            Some(w64) if P::REFINES_IN_F64 => {
-                self.state.predict_w = w64.into_iter().map(P::Refine::from_f64).collect();
-                self.set_vfe(state);
-                Ok(())
-            }
-            _ => self.apply_vfe(state),
-        }
+        self.commit_assembly(state, w64)
     }
 
     /// Removes the inducing point identified by `id` and packs every buffer.
@@ -1443,6 +1499,12 @@ where
     /// `O(n·m²)`: its weights are the exact `f64` solution, which no rank-1
     /// update of the stored `f32` factor reproduces.
     ///
+    /// The VFE system of all `n` points is assembled again instead
+    /// (`O(n·m²)`) when a pivot of the factor of `K_mm` is at most `1e-5`
+    /// times its diagonal (`1e-3` for an `f32` storage scalar; an exact or
+    /// near duplicate among the inducing points, say): the conditions on
+    /// [`OnlineSgpr`].
+    ///
     /// `x_new` has length [`Self::d`]. `x_new` and `y_new` are in the
     /// original units and go through the transforms fitted at training.
     /// Inducing coordinates are not moved.
@@ -1454,8 +1516,11 @@ where
     /// Returns [`GprError::DimensionMismatch`] if `x_new` is the wrong length,
     /// [`GprError::NonFiniteInput`] if a value is `NaN` or `Inf`,
     /// [`GprError::IndexOutOfRange`] if no new [`PointId`] is left (only a
-    /// loaded `next_point_id` near `u64::MAX` reaches this), or
-    /// [`GprError::EmptyInput`] if `d` is zero.
+    /// loaded `next_point_id` near `u64::MAX` reaches this),
+    /// [`GprError::EmptyInput`] if `d` is zero, or
+    /// [`GprError::CholeskyFailed`] if the system assembled again does not
+    /// factor (or, for a precision that refines in `f64`, its `f64`
+    /// weights do not). On an error the model holds the same points.
     ///
     /// See the example on [`OnlineSgpr`].
     pub fn insert(&mut self, x_new: &[f64], y_new: f64) -> Result<PointId, GprError> {
@@ -1527,6 +1592,9 @@ where
         point: NewPoint<'_>,
         supply: impl FnOnce(&mut SparseSupply),
     ) -> Result<PointId, GprError> {
+        if !self.updates_x_in_place() {
+            return self.append_point_by_reassembly(point, supply);
+        }
         let NewPoint {
             x: x_new,
             x_obs,
@@ -1570,6 +1638,61 @@ where
             }
             return Err(err);
         }
+        Ok(self.state.registry.insert())
+    }
+
+    /// The [`Self::append_point`] path when the factor of `K_mm` has a pivot
+    /// below the threshold ([`Self::updates_x_in_place`]): assembles the
+    /// VFE system again with `point` (`O(n·m²)`) and publishes its predict
+    /// weights with it. `supply` writes the training blocks first, and an
+    /// assembly that fails takes that row back out.
+    fn append_point_by_reassembly(
+        &mut self,
+        point: NewPoint<'_>,
+        supply: impl FnOnce(&mut SparseSupply),
+    ) -> Result<PointId, GprError> {
+        let NewPoint {
+            x: x_new,
+            x_obs,
+            y: y_new,
+            y_obs,
+        } = point;
+        let (n, d) = (self.state.core.n, self.state.core.d);
+        let mut x_next = self.state.core.x_train.clone();
+        append_point(&mut x_next, n, d, x_new);
+        let mut y_next = self.state.core.y_train.clone();
+        y_next.push(y_new);
+        if let Some(store) = self.state.core.supply_mut() {
+            supply(store);
+        }
+        let assembled = with_kernel_exp!(self.state.core.math, M => assemble_vfe_with_f64_w::<M, P::Storage, K::Supply>(
+            &self.state.core.kernel,
+            self.state.core.jitter,
+            self.state.core.likelihood,
+            crate::sparse::SparseData {
+                x: &x_next,
+                n: n + 1,
+                y: &y_next,
+                ..self.state.core.data()
+            },
+            &mut self.scratch.storage,
+            &mut self.scratch.f64,
+        ));
+        let (state, w64) = match assembled {
+            Ok(assembled) => assembled,
+            Err(err) => {
+                if let Some(store) = self.state.core.supply_mut() {
+                    store.pop_point();
+                }
+                return Err(err);
+            }
+        };
+        self.state.core.x_train = x_next;
+        self.state.core.y_train = y_next;
+        append_point(&mut self.state.core.x_obs, n, d, x_obs);
+        self.state.core.y_obs.push(y_obs);
+        self.state.core.n += 1;
+        self.commit_assembly(state, w64)?;
         Ok(self.state.registry.insert())
     }
 }
