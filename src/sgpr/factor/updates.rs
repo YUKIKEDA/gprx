@@ -1,7 +1,7 @@
 //! Rank-1 training-point updates and inducing-point insert / delete.
 
 use super::lit;
-use super::vfe::{VfeState, refresh_w};
+use super::vfe::{VfeExact, VfeState, refresh_w};
 use crate::data::{pack_points, validate_inducing};
 use crate::error::{CholeskyStage, GprError};
 use crate::kernel::{CrossViews, KernelScalar, KernelSpec, NoSupply};
@@ -338,6 +338,7 @@ pub(crate) fn inducing_append<T: KernelScalar>(
     let mut y_cast = T::empty_rows();
     let y_s = T::storage_rows(y, &mut y_cast);
     state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y_s);
+    state.exact = hold_promoted(state);
     Ok(())
 }
 
@@ -419,7 +420,22 @@ pub(crate) fn inducing_delete<T: KernelScalar>(
     let mut y_cast = T::empty_rows();
     let y_s = T::storage_rows(y, &mut y_cast);
     state.w = refresh_w(state.a.as_ref(), state.b_l.as_ref(), y_s);
+    state.exact = hold_promoted(state);
     Ok(())
+}
+
+/// [`VfeState::exact`] of a system an inducing update formed in its own
+/// scalar: its values promoted (nothing for `f64`; an `f32` storage
+/// assembles its inducing changes instead).
+fn hold_promoted<T: KernelScalar>(state: &VfeState<T>) -> T::F64Held<VfeExact> {
+    T::hold_f64(|| {
+        VfeExact::promoted(
+            state.b_l.as_ref(),
+            &state.w,
+            state.k_diag_sum,
+            state.a_frobenius2,
+        )
+    })
 }
 
 pub(super) fn append_row<T: KernelScalar>(a: &Mat<T>, row: &[T]) -> Mat<T> {

@@ -33,6 +33,14 @@ pub(crate) mod sealed {
         /// step instead of carrying each step's `f32` rounding into the
         /// next.
         type F64Factor: Clone + std::fmt::Debug + Send + Sync + 'static;
+        /// What a model of this storage keeps in `f64` beside the values it
+        /// rounds: `V` for `f32`, nothing (`()`) for `f64`, whose stored
+        /// values are those values.
+        type F64Held<V: Clone + std::fmt::Debug + Send + Sync + 'static>: Clone
+            + std::fmt::Debug
+            + Send
+            + Sync
+            + 'static;
 
         /// Sparse assembly and predict, the SVGP gradient, and Exact
         /// leave-one-out compute in `f64` and round into this storage, and
@@ -128,6 +136,21 @@ pub(crate) mod sealed {
         /// Takes `trial` as the `f64` factor: as `l` for `f64`, as `held`
         /// and its lower triangle rounded into `l` for `f32`.
         fn commit_f64_factor(l: &mut Mat<Self>, held: &mut Self::F64Factor, trial: Mat<f64>);
+
+        /// `make()` for `f32`; nothing (and `make` is not called) for `f64`.
+        fn hold_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>(
+            make: impl FnOnce() -> V,
+        ) -> Self::F64Held<V>;
+
+        /// The held value; `None` for `f64`.
+        fn held_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>(
+            held: Self::F64Held<V>,
+        ) -> Option<V>;
+
+        /// The held value, borrowed; `None` for `f64`.
+        fn held_f64_ref<V: Clone + std::fmt::Debug + Send + Sync + 'static>(
+            held: &Self::F64Held<V>,
+        ) -> Option<&V>;
 
         /// This view as `f64` when the scalar is `f64`, for the SIMD paths.
         fn as_f64_ref(m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>>;
@@ -375,6 +398,7 @@ impl sealed::ScalarOps for f64 {
     type RowCast = ();
     type ColCast = ();
     type F64Factor = ();
+    type F64Held<V: Clone + std::fmt::Debug + Send + Sync + 'static> = ();
 
     const ROUNDS_FROM_F64: bool = false;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F64;
@@ -473,6 +497,16 @@ impl sealed::ScalarOps for f64 {
         *l = trial;
     }
 
+    fn hold_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>(_make: impl FnOnce() -> V) {}
+
+    fn held_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>((): ()) -> Option<V> {
+        None
+    }
+
+    fn held_f64_ref<V: Clone + std::fmt::Debug + Send + Sync + 'static>((): &()) -> Option<&V> {
+        None
+    }
+
     #[inline(always)]
     fn as_f64_ref(m: MatRef<'_, Self>) -> Option<MatRef<'_, f64>> {
         Some(m)
@@ -548,6 +582,7 @@ impl sealed::ScalarOps for f32 {
     type RowCast = Vec<f32>;
     type ColCast = Mat<f32>;
     type F64Factor = Mat<f64>;
+    type F64Held<V: Clone + std::fmt::Debug + Send + Sync + 'static> = V;
 
     const ROUNDS_FROM_F64: bool = true;
     const DTYPE: safetensors::Dtype = safetensors::Dtype::F32;
@@ -678,6 +713,18 @@ impl sealed::ScalarOps for f32 {
     fn commit_f64_factor(l: &mut Mat<Self>, held: &mut Self::F64Factor, trial: Mat<f64>) {
         *held = trial;
         Self::store_f64_factor(l, held);
+    }
+
+    fn hold_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>(make: impl FnOnce() -> V) -> V {
+        make()
+    }
+
+    fn held_f64<V: Clone + std::fmt::Debug + Send + Sync + 'static>(held: V) -> Option<V> {
+        Some(held)
+    }
+
+    fn held_f64_ref<V: Clone + std::fmt::Debug + Send + Sync + 'static>(held: &V) -> Option<&V> {
+        Some(held)
     }
 
     #[inline(always)]

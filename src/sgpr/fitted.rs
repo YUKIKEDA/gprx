@@ -21,8 +21,8 @@ use crate::sgpr::SgprObjective;
 use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::factor::{
-    VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe, fill_z_intervals,
-    predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, vfe_loo,
+    VfeExact, VfeState, VfeSystem, analytic_gradient, analytic_hessian, assemble_vfe,
+    fill_z_intervals, predict_vfe_covariance, predict_vfe_into, publish_sgpr_weights, vfe_loo,
     vfe_neg_log_marginal_likelihood,
 };
 use super::model::Sgpr;
@@ -122,6 +122,10 @@ pub struct FittedSgpr<
     pub(super) predict_w: Vec<P::Refine>,
     pub(super) k_diag_sum: P::Storage,
     pub(super) a_frobenius2: P::Storage,
+    /// The `f64` factor of `B`, `w`, and the sums the assembly rounded
+    /// (`f32` storage): where [`Self::into_online`] starts the `f64`
+    /// system its `X` steps update.
+    pub(super) exact: <P::Storage as crate::kernel::ScalarOps>::F64Held<VfeExact>,
 }
 
 impl<O, I: InducingLayout<K::Supply>, P, K> FittedSgpr<O, I, P, K>
@@ -394,6 +398,7 @@ where
         self.w = state.w;
         self.k_diag_sum = state.k_diag_sum;
         self.a_frobenius2 = state.a_frobenius2;
+        self.exact = state.exact;
     }
 
     /// `w` and the lower `L_B` of `B`, for the SVGP-at-Titsias checks.

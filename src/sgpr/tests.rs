@@ -1535,6 +1535,7 @@ fn vfe_from_fitted(fitted: &FittedSgpr<Fixed>) -> VfeState<f64> {
         w: fitted.w.clone(),
         k_diag_sum: fitted.k_diag_sum,
         a_frobenius2: fitted.a_frobenius2,
+        exact: (),
     }
 }
 

@@ -10,9 +10,11 @@
 //! threshold of its storage scalar (coordinate and supplied-distance
 //! models, `f64` and `f32`), mixed sequences of inducing and `X` steps
 //! with duplicate and near duplicate inducing points, and, at an `f32`
-//! storage scalar, mixed sequences and long runs of `X` steps whose
-//! inducing points stay apart (every `X` step a rank-1 update). This file
-//! uses only the public API.
+//! storage scalar, mixed sequences (inducing points at a gap, anywhere, and
+//! on or next to one), a long run of `X` steps, supplied-distance models,
+//! and saved, loaded, and cloned online models, each step held to a fresh
+//! factor of the same precision and to the `f64` factor. This file uses
+//! only the public API.
 
 use std::collections::HashSet;
 
@@ -21,6 +23,7 @@ use gprx::kernel::{
     DistanceKernel, KernelSpec, MaternKernel, MaternNu, RbfArdKernel, RbfKernel, ScalarDistance,
     WhiteKernel,
 };
+use gprx::persist::{LoadedSgpr, PersistRegistry};
 use gprx::{
     DoublePrecision, Fixed, FreeInducing, GaussianLikelihood, GpScalar, GprError, InducingId,
     MixedPrecision, OnlineSgpr, PointId, Sgpr, SinglePrecision,
@@ -1521,38 +1524,219 @@ fn distance_x_steps_next_to_a_duplicate_match_factor() {
     }
 }
 
-/// Steps of each sequence of [`f32_storage_long_x_runs_match_factor`].
-const LONG_X_OPS: usize = 600;
-/// Seeds of those sequences.
-const LONG_X_SEEDS: std::ops::Range<u64> = 0..3;
+/// Factor and floor of the bound an `f32` step is held to against the
+/// `f64` factor of the same points: within [`TRUTH_FACTOR`] times the
+/// error a fresh factor of the same precision has there, plus
+/// [`TRUTH_FLOOR`] (eight times the machine epsilon of `f32`), so a step
+/// is never much farther from the `f64` system than the rounding of that
+/// system is.
+const TRUTH_FACTOR: f64 = 2.0;
+const TRUTH_FLOOR: f64 = 8.0 * f32::EPSILON as f64;
 
-/// One sequence of `steps` steps from `seed` at precision `P`, with the
-/// `kernel` of `d` features and the noise variance `noise`, whose inducing
-/// points stay at least [`MIN_GAP`] apart: [`MIXED_N0`] training points
-/// and [`MIXED_M0`] inducing points drawn by [`draw_inducing`], then `X`
-/// inserts and deletes and, unless `x_only`, inducing inserts (at the gap)
-/// and deletes. Returns the largest difference ([`mixed_err_vs_factor`])
-/// from a factor of the same precision after any step, with the step it
-/// was found at.
+/// The mean and the variance at `xs` and the NLML of a factor of `X`, `y`,
+/// and `Z` at precision `P`.
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
-fn run_separated_sequence<P: GpScalar>(
+#[allow(clippy::too_many_arguments)]
+fn factor_values<P: GpScalar>(
     kernel: &KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    xs: &[f64],
+    d: usize,
+) -> Vec<f64> {
+    let full = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(x, y.len(), d, y, z, z.len() / d)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let pred = full.predict(xs, xs.len() / d, d).expect("factor predict");
+    let nlml = full.neg_log_marginal_likelihood().expect("factor nlml");
+    prediction_values(&pred.mean, &pred.variance, nlml)
+}
+
+/// [`factor_values`] of `online`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn online_values<P: GpScalar>(online: &OnlineSgpr<Fixed, P>, xs: &[f64], d: usize) -> Vec<f64> {
+    let pred = online.predict(xs, xs.len() / d, d).expect("online predict");
+    let nlml = online.neg_log_marginal_likelihood().expect("online nlml");
+    prediction_values(&pred.mean, &pred.variance, nlml)
+}
+
+fn prediction_values<R: KernelScalar>(mean: &[R], variance: &[R], nlml: f64) -> Vec<f64> {
+    mean.iter()
+        .chain(variance)
+        .map(|value| value.to_f64())
+        .chain([nlml])
+        .collect()
+}
+
+/// The largest [`common::rel_err`] of `got` against `want`.
+fn max_rel_err(got: &[f64], want: &[f64]) -> f64 {
+    assert_eq!(got.len(), want.len());
+    got.iter()
+        .zip(want)
+        .map(|(a, b)| common::rel_err(*a, *b))
+        .fold(0.0, f64::max)
+}
+
+/// Checks one `f32` step: `online` (the values of the online model) is
+/// within [`F32_FACTOR_TOL`] of `fresh` (a factor of the same points at
+/// the same precision), and within [`TRUTH_FACTOR`] times the error of
+/// `fresh` plus [`TRUTH_FLOOR`] of `truth` (the `f64` factor). Returns
+/// the difference from `fresh`.
+fn check_f32_step(online: &[f64], fresh: &[f64], truth: &[f64], ctx: &str) -> f64 {
+    let online_fresh = max_rel_err(online, fresh);
+    let online_truth = max_rel_err(online, truth);
+    let fresh_truth = max_rel_err(fresh, truth);
+    assert!(
+        online_fresh <= F32_FACTOR_TOL,
+        "{ctx}: {online_fresh:e} from a fresh factor"
+    );
+    assert!(
+        online_truth <= TRUTH_FACTOR * fresh_truth + TRUTH_FLOOR,
+        "{ctx}: {online_truth:e} from the f64 factor, a fresh factor {fresh_truth:e}"
+    );
+    online_fresh
+}
+
+/// [`check_f32_step`] of `online` against factors of `X`, `y`, and `Z`,
+/// after checking that `online` holds them.
+#[allow(clippy::too_many_arguments)]
+fn check_f32_online<P: GpScalar>(
+    online: &OnlineSgpr<Fixed, P>,
+    kernel: &KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    d: usize,
+    ctx: &str,
+) -> f64 {
+    assert_eq!((online.n(), online.m()), (y.len(), z.len() / d), "{ctx}");
+    assert_slice_close(online.x(), x, TOL);
+    assert_slice_close(online.z(), z, TOL);
+    let xs = f32_queries(d);
+    check_f32_step(
+        &online_values(online, &xs, d),
+        &factor_values::<P>(kernel, likelihood, x, y, z, &xs, d),
+        &factor_values::<DoublePrecision>(kernel, likelihood, x, y, z, &xs, d),
+        ctx,
+    )
+}
+
+/// Four queries of `d` features across the range of the data.
+fn f32_queries(d: usize) -> Vec<f64> {
+    (0..4 * d).map(|i| 0.3 + 0.9 * (i % 4) as f64).collect()
+}
+
+/// How [`run_f32_sequence`] draws a new inducing point.
+#[derive(Clone, Copy, Debug)]
+enum InducingDraw {
+    /// At least [`MIN_GAP`] from every inducing point ([`draw_inducing`]):
+    /// every pivot of the factor of `K_mm` holds the threshold, so every
+    /// `X` step updates by rank-1.
+    Gap,
+    /// Anywhere in the range: near duplicates only by chance.
+    Free,
+    /// A copy of an inducing point, a point `1e-5` to `1e-2` per
+    /// coordinate from one, or a free point ([`mixed_inducing`]): an `X`
+    /// step from a factor with a pivot below the threshold assembles again.
+    Duplicates,
+}
+
+/// One kind of [`run_f32_sequence`]: the `kernel` of `d` features, the
+/// noise variance, how inducing points are drawn, and the steps (`X` and
+/// inducing steps, or `X` steps only).
+#[derive(Clone, Copy)]
+struct F32Sequence<'a> {
+    kernel: &'a KernelSpec,
     d: usize,
     noise: f64,
-    seed: u64,
+    draw: InducingDraw,
     steps: usize,
     x_only: bool,
-) -> (f64, String) {
-    let likelihood = GaussianLikelihood::new(noise).expect("noise");
-    let mut rng = SmallRng::seed_from_u64(seed);
-    let mut x: Vec<f64> = (0..MIXED_N0 * d).map(|_| sample_coord(&mut rng)).collect();
-    let mut y: Vec<f64> = (0..MIXED_N0).map(|_| sample_coord(&mut rng)).collect();
+}
+
+/// The training points, targets, and inducing points a sequence of `d`
+/// features starts from: [`MIXED_N0`] and [`MIXED_M0`] points, the
+/// inducing points at [`MIN_GAP`] for [`InducingDraw::Gap`].
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn f32_start(rng: &mut SmallRng, d: usize, draw: InducingDraw) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let x: Vec<f64> = (0..MIXED_N0 * d).map(|_| sample_coord(rng)).collect();
+    let y: Vec<f64> = (0..MIXED_N0).map(|_| sample_coord(rng)).collect();
     let mut z = Vec::new();
     for m in 0..MIXED_M0 {
-        let z_new = draw_inducing(&mut rng, &z, m, d).expect("room for the first points");
+        let z_new = match draw {
+            InducingDraw::Gap => draw_inducing(rng, &z, m, d).expect("room for the first points"),
+            InducingDraw::Free | InducingDraw::Duplicates => {
+                (0..d).map(|_| sample_coord(rng)).collect()
+            }
+        };
         append_colmajor(&mut z, m, d, &z_new);
     }
-    let xs: Vec<f64> = (0..4 * d).map(|i| 0.3 + 0.9 * (i % 4) as f64).collect();
+    (x, y, z)
+}
+
+/// An `X` insert or delete that keeps `n` within [`MIXED_N_RANGE`].
+fn x_op(rng: &mut SmallRng, n: usize) -> MixedOp {
+    match rng.random_range(0..2) {
+        0 if n < MIXED_N_RANGE.1 => MixedOp::Insert,
+        _ if n > MIXED_N_RANGE.0 => MixedOp::Delete(rng.random_range(0..n)),
+        _ => MixedOp::Insert,
+    }
+}
+
+/// Runs `op` (an `X` insert or delete) on `online` and on `x` and `y`
+/// (`d` features).
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn apply_x_op<P: GpScalar>(
+    online: &mut OnlineSgpr<Fixed, P>,
+    rng: &mut SmallRng,
+    op: MixedOp,
+    x: &mut Vec<f64>,
+    y: &mut Vec<f64>,
+    d: usize,
+) {
+    let n = online.n();
+    match op {
+        MixedOp::Insert => {
+            let x_new: Vec<f64> = (0..d).map(|_| sample_coord(rng)).collect();
+            let y_new = sample_coord(rng);
+            online.insert(&x_new, y_new).expect("insert");
+            append_colmajor(x, n, d, &x_new);
+            y.push(y_new);
+        }
+        MixedOp::Delete(index) => {
+            online.delete(online.point_ids()[index]).expect("delete");
+            remove_colmajor(x, n, d, index);
+            y.remove(index);
+        }
+        _ => unreachable!("an X step"),
+    }
+}
+
+/// One sequence of `seq.steps` steps from `seed` at an `f32` precision
+/// `P`: [`MIXED_N0`] training points and [`MIXED_M0`] inducing points,
+/// then `X` inserts and deletes and, unless `seq.x_only`, inducing inserts
+/// (drawn as `seq.draw` says) and deletes. Every step is checked by
+/// [`check_f32_step`]; returns the largest difference from a fresh factor
+/// with the step it was found at.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_f32_sequence<P: GpScalar>(seq: F32Sequence<'_>, seed: u64) -> (f64, String) {
+    let F32Sequence {
+        kernel,
+        d,
+        noise,
+        draw,
+        steps,
+        x_only,
+    } = seq;
+    let likelihood = GaussianLikelihood::new(noise).expect("noise");
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let (mut x, mut y, mut z) = f32_start(&mut rng, d, draw);
     let mut online = Sgpr::new(kernel.clone(), likelihood)
         .with_optimizer(Fixed)
         .with_precision::<P>()
@@ -1564,18 +1748,19 @@ fn run_separated_sequence<P: GpScalar>(
     for step in 0..steps {
         let (n, m) = (online.n(), online.m());
         let mut op = if x_only {
-            match rng.random_range(0..2) {
-                0 if n < MIXED_N_RANGE.1 => MixedOp::Insert,
-                _ if n > MIXED_N_RANGE.0 => MixedOp::Delete(rng.random_range(0..n)),
-                _ => MixedOp::Insert,
-            }
+            x_op(&mut rng, n)
         } else {
             mixed_op(&mut rng, n, m)
         };
         if let MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom =
             op
         {
-            match draw_inducing(&mut rng, &z, m, d) {
+            let z_new = match draw {
+                InducingDraw::Gap => draw_inducing(&mut rng, &z, m, d),
+                InducingDraw::Free => Some((0..d).map(|_| sample_coord(&mut rng)).collect()),
+                InducingDraw::Duplicates => Some(mixed_inducing(&mut rng, op, &z, m, d)),
+            };
+            match z_new {
                 Some(z_new) => {
                     online.insert_inducing(&z_new).expect("insert inducing");
                     append_colmajor(&mut z, m, d, &z_new);
@@ -1590,55 +1775,26 @@ fn run_separated_sequence<P: GpScalar>(
                     .expect("delete inducing");
                 remove_colmajor(&mut z, m, d, index);
             }
-            MixedOp::Insert => {
-                let x_new: Vec<f64> = (0..d).map(|_| sample_coord(&mut rng)).collect();
-                let y_new = sample_coord(&mut rng);
-                online.insert(&x_new, y_new).expect("insert");
-                append_colmajor(&mut x, n, d, &x_new);
-                y.push(y_new);
-            }
-            MixedOp::Delete(index) => {
-                online.delete(online.point_ids()[index]).expect("delete");
-                remove_colmajor(&mut x, n, d, index);
-                y.remove(index);
+            MixedOp::Insert | MixedOp::Delete(_) => {
+                apply_x_op(&mut online, &mut rng, op, &mut x, &mut y, d);
             }
             MixedOp::InducingDuplicate(_) | MixedOp::InducingNear(_) | MixedOp::InducingRandom => {}
         }
-        let err = mixed_err_vs_factor(&online, kernel.clone(), likelihood, &x, &y, &z, &xs, d);
-        assert!(err.is_finite(), "seed={seed} step={step} {op:?}: {err}");
+        let ctx = format!("{draw:?} seed={seed} step={step} m={m} {op:?}");
+        let err = check_f32_online(&online, kernel, likelihood, &x, &y, &z, d, &ctx);
         if err > worst.0 {
-            worst = (err, format!("seed={seed} step={step} m={m} {op:?}"));
+            worst = (err, ctx);
         }
     }
     worst
 }
 
-/// The steps [`run_separated_seeds`] runs for each seed.
-#[derive(Clone, Copy)]
-enum Steps {
-    /// [`MIXED_OPS`] `X` and inducing steps per seed of [`MIXED_SEEDS`].
-    Mixed,
-    /// [`LONG_X_OPS`] `X` steps per seed of [`LONG_X_SEEDS`].
-    LongX,
-}
-
-/// Runs [`run_separated_sequence`] for each seed of `steps` and checks
-/// every step against [`F32_FACTOR_TOL`].
-fn run_separated_seeds<P: GpScalar>(
-    kernel: &KernelSpec,
-    d: usize,
-    noise: f64,
-    steps: Steps,
-    label: &str,
-) {
-    let (seeds, count, x_only) = match steps {
-        Steps::Mixed => (MIXED_SEEDS, MIXED_OPS, false),
-        Steps::LongX => (LONG_X_SEEDS, LONG_X_OPS, true),
-    };
-    let (err, at) = seeds
-        .map(|seed| run_separated_sequence::<P>(kernel, d, noise, seed, count, x_only))
-        .fold((0.0, String::new()), |a, b| if b.0 > a.0 { b } else { a });
-    assert!(err <= F32_FACTOR_TOL, "{label}: rel_err={err:e} at {at}");
+/// Runs [`run_f32_sequence`] for each of `seeds`; returns the largest
+/// difference from a fresh factor with where it was found.
+fn run_f32_seeds<P: GpScalar>(seq: F32Sequence<'_>, seeds: std::ops::Range<u64>) -> (f64, String) {
+    seeds
+        .map(|seed| run_f32_sequence::<P>(seq, seed))
+        .fold((0.0, String::new()), |a, b| if b.0 > a.0 { b } else { a })
 }
 
 #[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
@@ -1651,38 +1807,432 @@ fn wide_rbf_ard() -> KernelSpec {
     KernelSpec::from(RbfArdKernel::new(&[2.0, 3.0]).expect("ℓ"))
 }
 
-/// Mixed sequences of `X` inserts and deletes and inducing changes whose
-/// inducing points stay at least [`MIN_GAP`] apart (every pivot of the
-/// factor of `K_mm` above the threshold, so every `X` step updates by
-/// rank-1), at an `f32` storage scalar with `σn² = 1e-3` and wide
-/// lengthscales, on 1-D RBF and 2-D ARD RBF data: each step matches a
-/// factor of the same precision to [`F32_FACTOR_TOL`]. When an `X` insert
-/// evaluated its column of `A` in `f32` and solved it against the rounded
-/// factor of `K_mm`, and the factor of `B` was updated in `f32`, a step was
-/// up to `3.1e-5` (single, 1-D) and `1.3e-5` (single, 2-D) off. The largest
-/// difference is now `1.9e-6`.
-#[test]
-fn f32_storage_mixed_ops_with_separated_inducing_points_match_factor() {
-    run_separated_seeds::<SinglePrecision>(&wide_rbf(), 1, 1e-3, Steps::Mixed, "single rbf");
-    run_separated_seeds::<MixedPrecision>(&wide_rbf(), 1, 1e-3, Steps::Mixed, "mixed rbf");
-    run_separated_seeds::<SinglePrecision>(&wide_rbf_ard(), 2, 1e-3, Steps::Mixed, "single ard");
-    run_separated_seeds::<MixedPrecision>(&wide_rbf_ard(), 2, 1e-3, Steps::Mixed, "mixed ard");
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn narrow_rbf() -> KernelSpec {
+    KernelSpec::from(RbfKernel::new(0.5).expect("ℓ"))
 }
 
-/// [`LONG_X_OPS`] `X` inserts and deletes in a row from a factor whose
-/// inducing points are at least [`MIN_GAP`] apart, at an `f32` storage
-/// scalar, with the kernels and noise of the mixed sequences
-/// ([`mixed_rbf`], [`mixed_rbf_ard`], `σn² = 0.1`): no inducing change
-/// assembles the system in between, so an error one step leaves in the
-/// factor of `B` or in `‖A‖_F²` reaches every later step. Each step
-/// matches a factor of the same precision to [`F32_FACTOR_TOL`]. When the
-/// factor of `B` and the running sums were updated in `f32`, the steps
-/// drifted up to `2.3e-5` (single, 1-D, after 187 steps) and `7.7e-6`
-/// (mixed) off. The largest difference is now `2.5e-6`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn narrow_rbf_ard() -> KernelSpec {
+    KernelSpec::from(RbfArdKernel::new(&[0.5, 0.75]).expect("ℓ"))
+}
+
+/// Mixed sequences of `X` inserts and deletes and inducing changes whose
+/// inducing points stay at least [`MIN_GAP`] apart (every `X` step a
+/// rank-1 update), at an `f32` storage scalar with `σn² = 1e-3` and wide
+/// lengthscales, on 1-D RBF and 2-D ARD RBF data: each step matches a
+/// fresh factor of the same precision to [`F32_FACTOR_TOL`] and the `f64`
+/// factor as [`check_f32_step`] says. When an `X` insert evaluated its
+/// column of `A` in `f32` and solved it against the rounded factor of
+/// `K_mm`, and the factor of `B` was updated in `f32`, a step was up to
+/// `3.1e-5` (single, 1-D) and `1.3e-5` (single, 2-D) from a fresh factor.
+#[test]
+fn f32_storage_mixed_ops_with_separated_inducing_points_match_factor() {
+    for (kernel, d) in [(wide_rbf(), 1), (wide_rbf_ard(), 2)] {
+        let seq = F32Sequence {
+            kernel: &kernel,
+            d,
+            noise: 1e-3,
+            draw: InducingDraw::Gap,
+            steps: MIXED_OPS,
+            x_only: false,
+        };
+        run_f32_seeds::<SinglePrecision>(seq, MIXED_SEEDS);
+        run_f32_seeds::<MixedPrecision>(seq, MIXED_SEEDS);
+    }
+}
+
+/// Steps of each sequence of [`f32_storage_long_x_runs_match_factor`].
+const LONG_X_OPS: usize = 1500;
+/// Seeds of those sequences.
+const LONG_X_SEEDS: std::ops::Range<u64> = 0..1;
+
+/// [`LONG_X_OPS`] `X` inserts and deletes in a row at an `f32` storage
+/// scalar, with `σn² = 1e-3` and the lengthscales of the mixed sequences
+/// ([`mixed_rbf`], [`mixed_rbf_ard`]): no inducing change assembles the
+/// system in between, so an error one step leaves in the factor of `B` or
+/// in a running sum reaches every later step. Each step matches a fresh
+/// factor of the same precision to [`F32_FACTOR_TOL`] and the `f64`
+/// factor as [`check_f32_step`] says. When the factor of `B` and the
+/// running sums were updated in `f32`, the steps drifted up to `5.8e-5`
+/// (single, 1-D) from a fresh factor.
 #[test]
 fn f32_storage_long_x_runs_match_factor() {
-    run_separated_seeds::<SinglePrecision>(&mixed_rbf(), 1, 0.1, Steps::LongX, "single rbf");
-    run_separated_seeds::<MixedPrecision>(&mixed_rbf(), 1, 0.1, Steps::LongX, "mixed rbf");
-    run_separated_seeds::<SinglePrecision>(&mixed_rbf_ard(), 2, 0.1, Steps::LongX, "single ard");
-    run_separated_seeds::<MixedPrecision>(&mixed_rbf_ard(), 2, 0.1, Steps::LongX, "mixed ard");
+    for (kernel, d) in [(mixed_rbf(), 1), (mixed_rbf_ard(), 2)] {
+        let seq = F32Sequence {
+            kernel: &kernel,
+            d,
+            noise: 1e-3,
+            draw: InducingDraw::Gap,
+            steps: LONG_X_OPS,
+            x_only: true,
+        };
+        run_f32_seeds::<SinglePrecision>(seq, LONG_X_SEEDS);
+        run_f32_seeds::<MixedPrecision>(seq, LONG_X_SEEDS);
+    }
+}
+
+/// Seeds of [`f32_storage_stress_sequences_match_factor`] at
+/// [`SinglePrecision`]: these include the seeds that were far from the
+/// `f64` factor before the `f64` system started from the assembly's own
+/// values (23, 29, 30). A [`MixedPrecision`] model takes the same `X` steps
+/// and runs the first [`STRESS_MIXED_SEEDS`] only.
+const STRESS_SEEDS: std::ops::Range<u64> = 20..36;
+const STRESS_MIXED_SEEDS: std::ops::Range<u64> = 0..8;
+
+/// Mixed sequences of `X` and inducing steps at an `f32` storage scalar
+/// with `σn² = 1e-4` and short lengthscales (`0.5`; ARD `0.5`, `0.75`),
+/// inducing points drawn at a gap, anywhere, and on or next to an
+/// inducing point ([`InducingDraw`]), on 1-D RBF and 2-D ARD RBF data,
+/// over [`STRESS_SEEDS`]: each step matches a fresh factor of the same
+/// precision to [`F32_FACTOR_TOL`] and the `f64` factor as
+/// [`check_f32_step`] says. When the `f64` factor of `B`, `A y`, and
+/// `‖A‖_F²` the `X` steps update started from the stored (rounded) factor
+/// and `A` and took the rounded columns of `A`, a step was up to `3.8e-5`
+/// from a fresh factor (single, 2-D, free draws, seed 29, step 58: `3.8e-5`
+/// from the `f64` factor where a fresh factor was `1.1e-7`) and
+/// `1.7e-5` (single, 1-D, at a gap, seed 23, step 49).
+#[test]
+fn f32_storage_stress_sequences_match_factor() {
+    for (kernel, d) in [(narrow_rbf(), 1), (narrow_rbf_ard(), 2)] {
+        for draw in [
+            InducingDraw::Gap,
+            InducingDraw::Free,
+            InducingDraw::Duplicates,
+        ] {
+            let seq = F32Sequence {
+                kernel: &kernel,
+                d,
+                noise: 1e-4,
+                draw,
+                steps: MIXED_OPS,
+                x_only: false,
+            };
+            run_f32_seeds::<SinglePrecision>(seq, STRESS_SEEDS);
+            run_f32_seeds::<MixedPrecision>(seq, STRESS_MIXED_SEEDS);
+        }
+    }
+}
+
+/// `steps` random `X` inserts and deletes from `seed` on `online` (`f32`
+/// storage, `d` features, `X`, `y`, `Z` its data), each checked by
+/// [`check_f32_online`] against factors with `kernel` and `likelihood`.
+#[allow(clippy::too_many_arguments)]
+fn run_f32_x_steps<P: GpScalar>(
+    online: &mut OnlineSgpr<Fixed, P>,
+    kernel: &KernelSpec,
+    likelihood: GaussianLikelihood,
+    x: &mut Vec<f64>,
+    y: &mut Vec<f64>,
+    z: &[f64],
+    d: usize,
+    seed: u64,
+    steps: usize,
+    label: &str,
+) {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    for step in 0..steps {
+        let op = x_op(&mut rng, online.n());
+        apply_x_op(online, &mut rng, op, x, y, d);
+        let ctx = format!("{label} step={step} {op:?}");
+        check_f32_online(online, kernel, likelihood, x, y, z, d, &ctx);
+    }
+}
+
+/// Steps of each run of the saved, loaded, and cloned `f32` models.
+const F32_X_STEPS: usize = 40;
+
+/// An online `f32` model of the stress data ([`f32_start`] from `seed`,
+/// inducing points at a gap, [`narrow_rbf_ard`], `σn² = 1e-4`) after
+/// [`F32_X_STEPS`] checked `X` steps, with its data.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn stepped_f32_online<P: GpScalar>(
+    seed: u64,
+    label: &str,
+) -> (OnlineSgpr<Fixed, P>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let (kernel, likelihood) = (narrow_rbf_ard(), stress_likelihood());
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let (mut x, mut y, z) = f32_start(&mut rng, 2, InducingDraw::Gap);
+    let mut online = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, MIXED_N0, 2, &y, &z, MIXED_M0)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    run_f32_x_steps(
+        &mut online,
+        &kernel,
+        likelihood,
+        &mut x,
+        &mut y,
+        &z,
+        2,
+        seed,
+        F32_X_STEPS,
+        label,
+    );
+    (online, x, y, z)
+}
+
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn stress_likelihood() -> GaussianLikelihood {
+    GaussianLikelihood::new(1e-4).expect("noise")
+}
+
+/// A directory under the system temporary directory for this process.
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("gprx-sgpr-ops-{}-{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// An online `f32` model saved after `X` steps loads with its points and
+/// continues: the loaded model (assembled again from its data) and the
+/// model it was saved from take the same `X` steps, and each step of both
+/// is checked by [`check_f32_online`].
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn saved_f32_online_continues<P: GpScalar>(
+    label: &str,
+    unwrap: fn(LoadedSgpr) -> Option<OnlineSgpr<Fixed, P>>,
+) {
+    let (kernel, likelihood) = (narrow_rbf_ard(), stress_likelihood());
+    let (mut online, x, y, z) = stepped_f32_online::<P>(3, label);
+    let dir = temp_dir(label);
+    online.save(&dir).expect("save");
+    let mut loaded = unwrap(LoadedSgpr::load(&dir, &PersistRegistry::new()).expect("load"))
+        .expect("the saved precision");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(loaded.point_ids(), online.point_ids());
+    let ctx = format!("{label} loaded");
+    check_f32_online(&loaded, &kernel, likelihood, &x, &y, &z, 2, &ctx);
+    for (model, name) in [(&mut online, "saved"), (&mut loaded, "loaded")] {
+        let (mut x, mut y) = (x.clone(), y.clone());
+        let label = format!("{label} {name}");
+        run_f32_x_steps(
+            model,
+            &kernel,
+            likelihood,
+            &mut x,
+            &mut y,
+            &z,
+            2,
+            11,
+            F32_X_STEPS,
+            &label,
+        );
+    }
+}
+
+/// [`saved_f32_online_continues`] at [`SinglePrecision`] and
+/// [`MixedPrecision`].
+#[test]
+fn saved_f32_online_x_steps_match_factor() {
+    saved_f32_online_continues::<SinglePrecision>("single", |loaded| match loaded {
+        LoadedSgpr::OnlineSingle(model) => Some(model),
+        _ => None,
+    });
+    saved_f32_online_continues::<MixedPrecision>("mixed", |loaded| match loaded {
+        LoadedSgpr::OnlineMixed(model) => Some(model),
+        _ => None,
+    });
+}
+
+/// A fitted `f32` model saved and loaded, then made online: its `X` steps
+/// start from the system the load assembled, and each is checked by
+/// [`check_f32_online`].
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn loaded_f32_fitted_goes_online<P: GpScalar>(
+    label: &str,
+    unwrap: fn(LoadedSgpr) -> Option<gprx::FittedSgpr<Fixed, gprx::FixedInducing, P>>,
+) {
+    let (kernel, likelihood) = (narrow_rbf_ard(), stress_likelihood());
+    let mut rng = SmallRng::seed_from_u64(5);
+    let (mut x, mut y, z) = f32_start(&mut rng, 2, InducingDraw::Gap);
+    let fitted = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&x, MIXED_N0, 2, &y, &z, MIXED_M0)
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let dir = temp_dir(label);
+    fitted.save(&dir).expect("save");
+    let loaded = unwrap(LoadedSgpr::load(&dir, &PersistRegistry::new()).expect("load"))
+        .expect("the saved precision");
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut online = loaded.into_online();
+    run_f32_x_steps(
+        &mut online,
+        &kernel,
+        likelihood,
+        &mut x,
+        &mut y,
+        &z,
+        2,
+        5,
+        F32_X_STEPS,
+        label,
+    );
+}
+
+/// [`loaded_f32_fitted_goes_online`] at [`SinglePrecision`] and
+/// [`MixedPrecision`].
+#[test]
+fn loaded_f32_fitted_into_online_x_steps_match_factor() {
+    loaded_f32_fitted_goes_online::<SinglePrecision>("fitted-single", |loaded| match loaded {
+        LoadedSgpr::Single(model) => Some(model),
+        _ => None,
+    });
+    loaded_f32_fitted_goes_online::<MixedPrecision>("fitted-mixed", |loaded| match loaded {
+        LoadedSgpr::Mixed(model) => Some(model),
+        _ => None,
+    });
+}
+
+/// A clone of an online `f32` model after `X` steps and the model it was
+/// cloned from take different `X` steps: each keeps its own `f64` system,
+/// and each step of both is checked by [`check_f32_online`].
+fn cloned_f32_online_diverges<P: GpScalar>(label: &str) {
+    let (kernel, likelihood) = (narrow_rbf_ard(), stress_likelihood());
+    let (mut online, x, y, z) = stepped_f32_online::<P>(7, label);
+    let mut clone = online.clone();
+    for (model, seed, name) in [(&mut online, 21, "original"), (&mut clone, 22, "clone")] {
+        let (mut x, mut y) = (x.clone(), y.clone());
+        let label = format!("{label} {name}");
+        run_f32_x_steps(
+            model,
+            &kernel,
+            likelihood,
+            &mut x,
+            &mut y,
+            &z,
+            2,
+            seed,
+            F32_X_STEPS,
+            &label,
+        );
+    }
+}
+
+/// [`cloned_f32_online_diverges`] at [`SinglePrecision`] and
+/// [`MixedPrecision`].
+#[test]
+fn cloned_f32_online_x_steps_match_factor() {
+    cloned_f32_online_diverges::<SinglePrecision>("clone-single");
+    cloned_f32_online_diverges::<MixedPrecision>("clone-mixed");
+}
+
+/// Steps of each [`run_distance_f32_sequence`].
+const DIST_F32_OPS: usize = 40;
+
+/// The mean and the variance at [`DIST_QUERY`] and the NLML of a factor at
+/// precision `P` of supplied squared distances among `points` (1-D) with
+/// targets `y` and the training rows `inducing` as inducing points.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn distance_factor_values<P: GpScalar>(
+    kernel: &DistanceKernel,
+    image: &ScalarDistance,
+    likelihood: GaussianLikelihood,
+    points: &[f64],
+    y: &[f64],
+    inducing: &[usize],
+) -> Vec<f64> {
+    let z: Vec<f64> = inducing.iter().map(|&i| points[i]).collect();
+    let full = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(
+            [image.from_vec(sq_block(points, &z))],
+            points.len(),
+            y,
+            inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor");
+    let pred = full
+        .predict(
+            [image.from_vec(sq_block(&z, &DIST_QUERY))],
+            DIST_QUERY.len(),
+        )
+        .expect("factor predict");
+    let nlml = full.neg_log_marginal_likelihood().expect("factor nlml");
+    prediction_values(&pred.mean, &pred.variance, nlml)
+}
+
+/// Random `X` inserts and deletes from `seed` on a model of supplied
+/// squared distances at an `f32` precision `P` (`σn² = 1e-3`), its
+/// inducing points three training points: each step is checked by
+/// [`check_f32_step`] against factors of the same blocks.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_distance_f32_sequence<P: GpScalar>(seed: u64) {
+    let image = ScalarDistance::new();
+    let kernel = distance_rbf(&image);
+    let likelihood = GaussianLikelihood::new(1e-3).expect("noise");
+    let mut points = dist_points();
+    let mut y: Vec<f64> = points.iter().map(|&p| (0.9 * p).sin()).collect();
+    let mut inducing = vec![0, 4, 9];
+    let z: Vec<f64> = inducing.iter().map(|&i| points[i]).collect();
+    let mut online = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(
+            [image.from_vec(sq_block(&points, &z))],
+            points.len(),
+            &y,
+            &inducing,
+        )
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let q = DIST_QUERY.len();
+    for step in 0..DIST_F32_OPS {
+        let n = points.len();
+        let insert = n <= DIST_N || (n < 2 * DIST_N && rng.random::<bool>());
+        if insert {
+            let at = 6.0 * rng.random::<f64>();
+            let y_new = (0.9 * at).sin() + 0.1 * (rng.random::<f64>() - 0.5);
+            online
+                .insert([image.from_vec(sq_block(&z, &[at]))], y_new)
+                .expect("insert");
+            points.push(at);
+            y.push(y_new);
+        } else {
+            let free: Vec<usize> = (0..n).filter(|i| !inducing.contains(i)).collect();
+            let row = free[rng.random_range(0..free.len())];
+            online.delete(online.point_ids()[row]).expect("delete");
+            points.remove(row);
+            y.remove(row);
+            for i in &mut inducing {
+                if *i > row {
+                    *i -= 1;
+                }
+            }
+        }
+        let pred = online
+            .predict([image.from_vec(sq_block(&z, &DIST_QUERY))], q)
+            .expect("online predict");
+        let nlml = online.neg_log_marginal_likelihood().expect("online nlml");
+        let ctx = format!("seed={seed} step={step} insert={insert}");
+        check_f32_step(
+            &prediction_values(&pred.mean, &pred.variance, nlml),
+            &distance_factor_values::<P>(&kernel, &image, likelihood, &points, &y, &inducing),
+            &distance_factor_values::<DoublePrecision>(
+                &kernel, &image, likelihood, &points, &y, &inducing,
+            ),
+            &ctx,
+        );
+    }
+}
+
+/// [`run_distance_f32_sequence`] at [`SinglePrecision`] and
+/// [`MixedPrecision`], seeds `0` to `3`: a model of supplied distances
+/// evaluates the new column of `A` from the `f64` row it is given and, for
+/// a delete, from the `f64` row its training blocks hold.
+#[test]
+fn distance_f32_x_steps_match_factor() {
+    for seed in 0..4 {
+        run_distance_f32_sequence::<SinglePrecision>(seed);
+        run_distance_f32_sequence::<MixedPrecision>(seed);
+    }
 }
