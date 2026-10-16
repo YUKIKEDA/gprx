@@ -30,9 +30,9 @@ use crate::{PredictOptions, Prediction, PredictiveCovariance};
 
 use super::FixedInducing;
 use super::factor::{
-    InducingBorder, VfeExact, VfeState, VfeSystem, a_times_y, append_point, assemble_vfe,
-    coordinate_border, f64_weights, factor_pivots_hold, inducing_append, inducing_delete,
-    kernel_column, kernel_diag_at, point_at, predict_vfe_covariance, predict_vfe_into,
+    InducingBorder, PivotGate, VfeExact, VfeState, VfeSystem, a_times_y, append_point,
+    assemble_vfe, coordinate_border, f64_weights, inducing_append, inducing_delete, kernel_column,
+    kernel_diag_at, min_pivot_ratio, point_at, predict_vfe_covariance, predict_vfe_into,
     publish_sgpr_weights, push_column, remove_column_in_place, remove_point, vfe_loo,
     vfe_neg_log_marginal_likelihood,
 };
@@ -133,15 +133,24 @@ pub(super) enum InducingChange<T> {
 /// instead (`O(n·m²)`, the factor a batch model of those points takes)
 /// when any of these holds:
 ///
-/// - a pivot of the factor of `K_mm` is at most `τ` times its diagonal
-///   (`L_ii² ≤ τ (K_ii + j)` in `K_mm + j I = L Lᵀ`), with `τ = 1e-5` for
-///   [`crate::DoublePrecision`] and `τ = 1e-3` for an `f32` storage scalar
-///   ([`crate::SinglePrecision`], [`crate::MixedPrecision`]): the new
-///   column `L⁻¹ k(Z, x)` divides by that pivot, down to the rounding
-///   residue an exact duplicate inducing point leaves, so a rank-1 update
-///   would carry the rounding of the pivot into `B`. This holds until an
+/// - a pivot of the factor of `K_mm` is at most `8 ε` times its diagonal
+///   (`L_ii² ≤ 8 ε (K_ii + j)` in `K_mm + j I = L Lᵀ`, `ε = 2.2e-16` the
+///   machine epsilon of `f64`, for every storage scalar): the rounding
+///   residue an exact duplicate inducing point leaves, which the factor
+///   takes as a positive pivot when it takes no jitter. A rank-1 update
+///   and the assembly round that residue differently, and the assembly is
+///   the value a batch model of the same points has. This holds until an
 ///   inducing change or new `θ` leaves a factor whose pivots hold;
 /// - the downdate of `B` for a delete fails.
+///
+/// A pivot above that residue does not send a step to the assembly, small
+/// as it is. A smooth kernel on a few inducing points has such pivots
+/// without any duplicate (the eight k-means centres of a Forrester problem
+/// on `[0, 1]` at `ℓ = 1`: `1e-13`), and the fresh factor of such a `K_mm`
+/// is itself off the exact system by about its condition number times `ε`.
+/// A step is held to being no farther from the exact system than twice
+/// that distance plus `1e-10` (`f64`) or plus `8` `ε` of `f32` (`f32`),
+/// which it was at every step of the sweeps of ADR 0004.
 ///
 /// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
@@ -268,10 +277,10 @@ pub(super) struct OnlineState<P: ModelPrecision, U: Supply = NoSupply> {
     /// The offset `j` of `k_mm_l`: the one the last assembly of `K_mm`
     /// took under the jitter policy, which an inducing insert borders with.
     k_mm_jitter: f64,
-    /// [`factor_pivots_hold`] of `k_mm_l`, kept with it so an `X` step
-    /// does not pay the `O(m²)` check (see
-    /// [`OnlineSgpr::updates_x_in_place`]).
-    k_mm_pivots_hold: bool,
+    /// [`min_pivot_ratio`] of `k_mm_l`, kept with it so a step does not
+    /// pay the `O(m²)` read (see [`OnlineSgpr::updates_x_in_place`] and
+    /// [`OnlineSgpr::updates_inducing_in_place`]).
+    k_mm_pivot_ratio: f64,
     a: Mat<P::Storage>,
     /// Lower factor of `B = σn² I + A Aᵀ`, in the storage scalar: the
     /// rounding of `b_l_f64`.
@@ -463,7 +472,7 @@ where
             // Set with the sums and the `f64` factor of `B` below.
             ay: Vec::new(),
             core: fitted.core,
-            k_mm_pivots_hold: factor_pivots_hold(fitted.k_mm_l.as_ref()),
+            k_mm_pivot_ratio: min_pivot_ratio(fitted.k_mm_l.as_ref()),
             k_mm_l: fitted.k_mm_l,
             k_mm_l_f64: fitted.k_mm_l_f64,
             k_mm_jitter: fitted.k_mm_jitter,
@@ -544,7 +553,7 @@ where
         self.state.core = fitted.core;
         self.scratch = fitted.scratch;
         self.optimizer = fitted.optimizer;
-        self.state.k_mm_pivots_hold = factor_pivots_hold(fitted.k_mm_l.as_ref());
+        self.state.k_mm_pivot_ratio = min_pivot_ratio(fitted.k_mm_l.as_ref());
         self.state.k_mm_l = fitted.k_mm_l;
         self.state.k_mm_l_f64 = fitted.k_mm_l_f64;
         self.state.k_mm_jitter = fitted.k_mm_jitter;
@@ -609,7 +618,7 @@ where
 
     /// Takes `state` as the VFE system. The predict weights are the caller's.
     fn set_vfe(&mut self, state: VfeState<P::Storage>) {
-        self.state.k_mm_pivots_hold = factor_pivots_hold(state.k_mm_l.as_ref());
+        self.state.k_mm_pivot_ratio = min_pivot_ratio(state.k_mm_l.as_ref());
         self.state.k_mm_l = state.k_mm_l;
         self.state.k_mm_l_f64 = state.k_mm_l_f64;
         self.state.k_mm_jitter = state.k_mm_jitter;
@@ -843,11 +852,10 @@ where
     ///
     /// Updates `B` with a rank-1 downdate, in `f64` (see [`OnlineSgpr`]).
     /// The remaining points are factored again instead (`O(n·m²)`) when a
-    /// pivot of the factor of `K_mm` is at most `1e-5` times its diagonal
-    /// (`1e-3` for an `f32` storage scalar; an exact or near duplicate
-    /// among the inducing points, say) or the downdate loses positive
-    /// definiteness: the conditions on [`OnlineSgpr`]. The last remaining
-    /// point cannot be deleted.
+    /// pivot of the factor of `K_mm` is at most `8 ε` times its diagonal
+    /// (an exact duplicate among the inducing points, say) or the downdate
+    /// loses positive definiteness: the conditions on [`OnlineSgpr`]. The
+    /// last remaining point cannot be deleted.
     ///
     /// # Errors
     ///
@@ -1087,19 +1095,23 @@ where
     /// Whether an `X` insert or delete may update the factor of `B` by a
     /// rank-1 update or downdate (ADR 0004) rather than assemble the VFE
     /// system again: when every pivot of the factor of `K_mm` holds the
-    /// relative threshold of the storage scalar ([`factor_pivots_hold`]).
+    /// threshold of [`PivotGate::XStep`].
     ///
     /// An assembly takes any positive pivot of `K_mm` without jitter, down
     /// to the rounding residue an exact duplicate inducing point leaves.
     /// The new column `L⁻¹ k(Z, x)` of `A` divides by that pivot, so its
-    /// row there carries the relative rounding error of the pivot, and the
-    /// rank-1 update of `B` and the product `A Aᵀ` an assembly forms differ
-    /// by up to `ε ‖A‖² / σ²`; an assembly of the changed points has the
-    /// factor a batch model of them takes. An `X` step leaves `L` as it is,
-    /// so the answer is kept with `L` and changes only with the inducing
-    /// set or `θ`.
+    /// row there carries the rounding error of the pivot, and the rank-1
+    /// update of `B` and the product `A Aᵀ` an assembly forms differ by up
+    /// to `ε ‖A‖² / σ²`; an assembly of the changed points has the factor a
+    /// batch model of them takes. A pivot above the residue (a smooth
+    /// kernel on a few points has them far below the threshold of an
+    /// inducing change) is carried by the assembly as well, and the update
+    /// stays within twice the fresh factor's distance from the exact system
+    /// (the `X_STEP_PIVOT_RTOL` note in `factor/updates.rs`). An `X` step
+    /// leaves `L` as it is, so the answer is kept with `L` and changes only
+    /// with the inducing set or `θ`.
     fn updates_x_in_place(&self) -> bool {
-        self.state.k_mm_pivots_hold
+        PivotGate::XStep.holds(self.state.k_mm_pivot_ratio)
     }
 
     /// Takes the assembled `state` as the VFE system and publishes its
@@ -1129,15 +1141,17 @@ where
     /// changed inducing set chooses its own `j` (zero when the near
     /// duplicate that needed it is gone), and only an assembly finds it.
     /// Not when a pivot of that factor is at or below the relative
-    /// threshold of an inserted pivot ([`factor_pivots_hold`]), such as the
-    /// rounding residue an assembly with `j = 0` takes for an exact
+    /// threshold of an inserted pivot ([`PivotGate::InducingStep`]), such
+    /// as the rounding residue an assembly with `j = 0` takes for an exact
     /// duplicate: an update from that factor carries its rounding error
     /// into every row it computes, while the factor of the changed set,
-    /// which an assembly reproduces, has its own.
+    /// which an assembly reproduces, has its own. This is not the
+    /// threshold of an `X` step ([`PivotGate::XStep`]): an inducing change
+    /// rebuilds `L` and every row of `A` from the factor it starts from.
     fn updates_inducing_in_place(&self) -> bool {
         !<P::Storage as ScalarOps>::ROUNDS_FROM_F64
             && self.state.k_mm_jitter <= 0.0
-            && self.state.k_mm_pivots_hold
+            && PivotGate::InducingStep.holds(self.state.k_mm_pivot_ratio)
     }
 
     /// Commits one change of the inducing set: `change` gives it from the
@@ -1653,10 +1667,9 @@ where
     /// update of the stored `f32` factor reproduces.
     ///
     /// The VFE system of all `n` points is assembled again instead
-    /// (`O(n·m²)`) when a pivot of the factor of `K_mm` is at most `1e-5`
-    /// times its diagonal (`1e-3` for an `f32` storage scalar; an exact or
-    /// near duplicate among the inducing points, say): the conditions on
-    /// [`OnlineSgpr`].
+    /// (`O(n·m²)`) when a pivot of the factor of `K_mm` is at most `8 ε`
+    /// times its diagonal (an exact duplicate among the inducing points,
+    /// say): the conditions on [`OnlineSgpr`].
     ///
     /// `x_new` has length [`Self::d`]. `x_new` and `y_new` are in the
     /// original units and go through the transforms fitted at training.

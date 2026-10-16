@@ -12,8 +12,8 @@ pub(crate) use derivatives::{analytic_gradient, analytic_hessian};
 pub(crate) use loo::vfe_loo;
 pub(crate) use predict::{VfeSystem, predict_vfe_covariance, predict_vfe_into};
 pub(crate) use updates::{
-    InducingBorder, a_times_y, append_point, coordinate_border, factor_pivots_hold,
-    inducing_append, inducing_delete, kernel_column, kernel_diag_at, point_at, push_column,
+    InducingBorder, PivotGate, a_times_y, append_point, coordinate_border, inducing_append,
+    inducing_delete, kernel_column, kernel_diag_at, min_pivot_ratio, point_at, push_column,
     remove_column_in_place, remove_point,
 };
 pub(crate) use vfe::{
