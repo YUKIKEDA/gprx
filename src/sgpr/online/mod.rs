@@ -118,8 +118,8 @@ pub(super) enum InducingChange<T> {
 ///
 /// `insert` appends one training point and returns a [`PointId`].
 /// [`Self::delete`] removes one point by that identifier. VFE factors for
-/// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put
-/// (ADR 0004). Each step computes in `f64` whatever the storage scalar:
+/// `X` update with a rank-1 cholupdate of `B` while `K_mm` stays put.
+/// Each step computes in `f64` whatever the storage scalar:
 /// the new column `L⁻¹ k(Z, x)` of `A` is evaluated in `f64` and solved
 /// against the `f64` factor of `K_mm` (for an `f32` storage scalar, the
 /// one the last assembly formed before it rounded), the factor of `B` is
@@ -144,19 +144,22 @@ pub(super) enum InducingChange<T> {
 /// - the downdate of `B` for a delete fails.
 ///
 /// A pivot above that residue does not send a step to the assembly, small
-/// as it is. A smooth kernel on a few inducing points has such pivots
-/// without any duplicate (the eight k-means centres of a Forrester problem
-/// on `[0, 1]` at `ℓ = 1`: `1e-13`), and the fresh factor of such a `K_mm`
-/// is itself off the exact system by about its condition number times `ε`.
-/// A step is held to being no farther from the exact system than twice
-/// that distance plus `1e-10` (`f64`) or plus `8` `ε` of `f32` (`f32`),
-/// which it was at every step of the sweeps of ADR 0004.
+/// as it is. A smooth kernel with a handful of inducing points close
+/// together relative to its lengthscale has such pivots without any
+/// duplicate (a pivot ratio near `1e-13` is ordinary), and the fresh factor
+/// of such a `K_mm` is itself off the exact system by about its condition
+/// number times `ε`. A step is held to being no farther from the exact
+/// system than twice the distance of the fresh factor of the same points,
+/// plus a floor of `1e-10` (`f64`) or `8` `ε` of `f32` (`f32`). In
+/// measurements against the exact system, computed in extended precision,
+/// that bound held after every step of runs of inserts and deletes, from
+/// well conditioned inducing sets down to this range.
 ///
 /// `insert_inducing` appends one inducing point and returns an
 /// [`InducingId`]. [`Self::delete_inducing`] removes one inducing point
-/// by that identifier. Inducing points change the factors in place (ADR
-/// 0005): an insert borders the factors of `K_mm` and `B` and adds a row
-/// to `A` (`O(n·m)` plus the `O(m²)` border), and a delete drops a row of
+/// by that identifier. Inducing points change the factors in place: an
+/// insert borders the factors of `K_mm` and `B` and adds a row to `A`
+/// (`O(n·m)` plus the `O(m²)` border), and a delete drops a row of
 /// the factor of `K_mm` by a trailing rank-1 update and solves `A` and `B`
 /// again from the kept `K(Z, X) = L A` (`O(n·m²)`, no kernel evaluation).
 /// The VFE system is assembled again on the changed inducing set instead
@@ -181,7 +184,7 @@ pub(super) enum InducingChange<T> {
 ///   inducing point on or next to one the model holds;
 /// - the `B` of a delete does not factor.
 ///
-/// Neither moves `X` or `θ`.
+/// Neither `insert_inducing` nor `delete_inducing` moves `X` or `θ`.
 /// Parameters are kernel `θ` then likelihood `θ`. [`Self::set_params`] and
 /// [`Self::refit`] rebuild the VFE system.
 ///

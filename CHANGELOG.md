@@ -97,6 +97,12 @@ crate can name); `gprx::internals` is outside that contract.
 
 - A save streams each tensor into the file instead of building the whole
   file in memory first: its allocations no longer grow with `n`.
+- `OnlineSgpr::insert_inducing` and `delete_inducing` update the factors
+  incrementally instead of always assembling the system again, and
+  `OnlineSgpr` assembles again in more conditions: a `K_mm` with a
+  near-duplicate inducing point or a jitter, and every inducing change of an
+  `f32` model. An `f32` `insert` / `delete` of a training point computes in
+  `f64`. Results are unchanged beyond rounding; the API is unchanged.
 
 ### Unchanged
 
@@ -105,8 +111,13 @@ crate can name); `gprx::internals` is outside that contract.
   within a relative 1e-14), and a coordinate model 0.2.0 saves loads in
   0.1.0.
 - The 0.1.0 README and examples build and run against 0.2.0 without
-  changes. So do its tests, except `tests/custom_kernel.rs`, whose
-  `KernelTerm` impls define `clone_box` (see above).
+  changes. So do its tests, with two exceptions. `tests/custom_kernel.rs`
+  no longer compiles: its `KernelTerm` impls define `clone_box` (see
+  above). `inducing_ops_rbf_matches_factor` in `tests/sgpr_ops.rs` fails,
+  because its tolerance of `1e-12` is tighter than the `1e-10` to which an
+  inducing insert or delete now agrees with a fresh `factor`: the results
+  can differ from a fresh `factor` in the 12th digit instead of being
+  identical.
 
 ## [0.1.0] - 2026-10-06
 

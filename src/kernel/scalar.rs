@@ -26,7 +26,7 @@ pub(crate) mod sealed {
         /// The `f64` Cholesky factor a sparse model keeps beside a stored
         /// factor of this scalar: the factor of `K_mm` its assembly formed
         /// before rounding, and the factor of `B` the rank-1 `X` steps of
-        /// an online SGPR update (ADR 0004). `f64` keeps none: its stored
+        /// an online SGPR update. `f64` keeps none: its stored
         /// factor is that factor. `f32` keeps an `f64` matrix, so a new
         /// column of `A` is solved against the factor an assembly solves
         /// against, and a run of updates rounds the stored factor once per

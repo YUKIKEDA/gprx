@@ -148,8 +148,8 @@ libgp has two behaviors the comparison code avoids. The variance from `predict` 
 | kernel sum / product | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | sparse GP with inducing points | ✓ `Sgpr` | — | ✓ `InducingPointKernel` | ✓ `SparseGPRegression` | — | — |
 | SVGP with minibatches | ✓ `Svgp` (Adam) | — | ✓ | class only, no minibatch loop | — | — |
-| add training points without a full refit | ✓ `OnlineGpr` | — | ✓ `get_fantasy_model` | — | ✓ `add_pattern` | ✓ `add_samples` |
-| delete training points | ✓ `OnlineGpr` | — | — | — | — | — |
+| add training points without a full refit | ✓ `OnlineGpr` / `OnlineSgpr` | — | ✓ `get_fantasy_model` | — | ✓ `add_pattern` | ✓ `add_samples` |
+| delete training points | ✓ `OnlineGpr` / `OnlineSgpr` | — | — | — | — | — |
 | posterior samples | ✓ `sample` | ✓ `sample_y` | ✓ | ✓ `posterior_samples` | — | ✓ `sample_at` |
 | f32 / mixed precision | ✓ | — | ✓ | — | — | — |
 | save and load a fitted model | ✓ | ✓ pickle / joblib | ✓ `state_dict` | ✓ `save_model` | ✓ `write` | ✓ serde |
