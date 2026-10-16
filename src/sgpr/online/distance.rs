@@ -396,9 +396,8 @@ impl<O, P: crate::precision::GpScalar> OnlineSgpr<O, P, DistanceKernel<DistanceO
     /// Appends one training point at the current `θ` with the rank-1 VFE
     /// update of the coordinate `insert`, from its squared distances to the
     /// inducing points. The VFE system is assembled again instead under
-    /// the same condition (a pivot of the factor of `K_mm` at most `1e-5`
-    /// times its diagonal, `1e-3` for an `f32` storage scalar; see
-    /// [`OnlineSgpr`]); [`Self::delete`] removes a point as the coordinate
+    /// the same condition (a pivot of the factor of `K_mm` at most `8 ε`
+    /// times its diagonal; see [`OnlineSgpr`]); [`Self::delete`] removes a point as the coordinate
     /// model does.
     ///
     /// `sources` binds, per slot, the `m × 1` column from the `m` inducing

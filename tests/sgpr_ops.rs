@@ -1340,13 +1340,17 @@ fn mixed_rbf_ard() -> KernelSpec {
 /// away from the inducing points, and inducing deletes at the first, the
 /// middle, the last, and a random index, mixed with `X` inserts and
 /// deletes, on 1-D RBF data: each step matches a factor of the same `X`,
-/// `y`, and `Z`. An inducing change and an `X` step from a factor of
-/// `K_mm` with a pivot `L_ii² ≤ 1e-5 (K_ii + j)` assemble the system
-/// again. Before an inducing change did, a delete there was `0.20` off
-/// (seed 2, step 46); before an `X` step did, an `X` step after an exact
-/// duplicate was `2.9e-4` off (seed 5, step 8), its rank-1 update of `B`
-/// carrying the rounding of a residue pivot. The largest difference is now
-/// `1e-13`.
+/// `y`, and `Z`. An inducing change from a factor of `K_mm` with a pivot
+/// `L_ii² ≤ 1e-5 (K_ii + j)` assembles the system again, and an `X` step
+/// from one with a pivot `L_ii² ≤ 8 ε (K_ii + j)` (the rounding residue of
+/// an exact duplicate; between the two an `X` step updates by rank-1, held
+/// to the exact system in
+/// [`x_steps_next_to_a_near_duplicate_stay_near_the_exact_system`]).
+/// Before an inducing change did, a delete there was `0.20` off (seed 2,
+/// step 46); before an `X` step did, an `X` step after an exact duplicate
+/// was `2.9e-4` off (seed 5, step 8), its rank-1 update of `B` carrying the
+/// rounding of a residue pivot. The largest difference is now `1.0e-11`
+/// (`1e-13` while an `X` step assembled below `1e-5`).
 #[test]
 fn mixed_ops_rbf_with_near_duplicates_match_factor() {
     run_mixed_seeds::<DoublePrecision>(&mixed_rbf(), 1, INDUCING_TOL, "rbf");
@@ -1365,11 +1369,13 @@ fn mixed_ops_rbf_ard_2d_with_near_duplicates_match_factor() {
 /// The mixed sequences at an `f32` storage scalar, against a factor of the
 /// same precision at [`F32_FACTOR_TOL`]. Every inducing change assembles
 /// again; an `X` step does when a pivot of the factor of `K_mm` is at most
-/// `1e-3` times its diagonal. Updated by rank-1 there, an `X` step after an
-/// exact duplicate was `2.3e10` off on 1-D RBF data (seed 5, step 8, both
-/// precisions) and `30` on 2-D ARD data (seed 5, step 48). The largest
-/// difference is now `4.0e-7` (`1.0e-6` before an `X` step computed in
-/// `f64`, [`f32_storage_mixed_ops_with_separated_inducing_points_match_factor`]).
+/// `8 ε` times its diagonal (`1e-3` until R8-4). Updated by rank-1 in
+/// `f32` arithmetic there, an `X` step after an exact duplicate was `2.3e10`
+/// off on 1-D RBF data (seed 5, step 8, both precisions) and `30` on 2-D
+/// ARD data (seed 5, step 48). The largest difference is now `5.6e-17`
+/// (`4.0e-7` while an `X` step assembled below `1e-3`, `1.0e-6` before an
+/// `X` step computed in `f64`,
+/// [`f32_storage_mixed_ops_with_separated_inducing_points_match_factor`]).
 #[test]
 fn f32_storage_mixed_ops_with_near_duplicates_match_factor() {
     run_mixed_seeds::<SinglePrecision>(&mixed_rbf(), 1, F32_FACTOR_TOL, "single rbf");
@@ -1423,12 +1429,11 @@ fn line_x_steps_err<P: GpScalar>(z: &[f64]) -> f64 {
 }
 
 /// Two inducing pairs `0.014` and `0.0098` apart leave the factor of
-/// `K_mm` a pivot of `1.4e-5` times its diagonal: above the `f64`
-/// threshold of `1e-5`, so `X` steps of a [`DoublePrecision`] model update
-/// by rank-1, and below the `f32` one of `1e-3`, so those of a
-/// [`SinglePrecision`] or [`MixedPrecision`] model assemble again.
-/// Updated by rank-1 in `f32`, the steps were `1.6e-5` (single) and
-/// `9.7e-6` (mixed) off.
+/// `K_mm` a pivot of `1.4e-5` times its diagonal: above the threshold of an
+/// `X` step (`8 ε`), so the steps of every precision update by rank-1.
+/// Updated by rank-1 in `f32` arithmetic, the steps were `1.6e-5` (single)
+/// and `9.7e-6` (mixed) off; they compute in `f64` now (R8-3), and the
+/// threshold of an `f32` model was `1e-3` until R8-4.
 #[test]
 fn x_steps_next_to_a_near_duplicate_match_factor() {
     let gap = 0.014;
@@ -2234,5 +2239,340 @@ fn distance_f32_x_steps_match_factor() {
     for seed in 0..4 {
         run_distance_f32_sequence::<SinglePrecision>(seed);
         run_distance_f32_sequence::<MixedPrecision>(seed);
+    }
+}
+
+/// How far `online` is from the exact system (the mean and the variance at
+/// `xs` and the NLML, computed in double-double by
+/// [`common::dd::vfe_reference`]) next to how far a factor of the same
+/// points at precision `P` is: `(online from exact, factor from exact,
+/// online from factor)`, each the largest [`common::rel_err`]. `ls` are the
+/// lengthscales of the RBF `kernel`.
+#[allow(clippy::too_many_arguments)]
+fn distances_from_the_exact_system<P: GpScalar>(
+    online: &OnlineSgpr<Fixed, P>,
+    kernel: &KernelSpec,
+    ls: &[f64],
+    likelihood: GaussianLikelihood,
+    x: &[f64],
+    y: &[f64],
+    z: &[f64],
+    xs: &[f64],
+    d: usize,
+) -> (f64, f64, f64) {
+    let exact = common::dd::vfe_reference(ls, likelihood.noise_variance(), x, y, z, xs, d);
+    let fresh = factor_values::<P>(kernel, likelihood, x, y, z, xs, d);
+    let got = online_values(online, xs, d);
+    (
+        max_rel_err(&got, &exact),
+        max_rel_err(&fresh, &exact),
+        max_rel_err(&got, &fresh),
+    )
+}
+
+/// The absolute floor of the bound an `f64` `X` step is held to against
+/// the exact system (next to [`TRUTH_FACTOR`] times the distance of a
+/// fresh factor): the tolerance of the inducing sequences,
+/// [`INDUCING_TOL`].
+const F64_TRUTH_FLOOR: f64 = INDUCING_TOL;
+
+/// `n` points of `[0, w]` and a smooth target with noise, from `seed`.
+fn smooth_data(n: usize, w: f64, seed: u64) -> (Vec<f64>, Vec<f64>) {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let x: Vec<f64> = (0..n).map(|_| w * rng.random::<f64>()).collect();
+    let y = x
+        .iter()
+        .map(|&v| (2.5 * v / w).sin() + 0.3 * (rng.random::<f64>() - 0.5))
+        .collect();
+    (x, y)
+}
+
+/// The double-double reference is accurate to `1e-30` in its arithmetic
+/// (`exp` against two values computed to 50 digits) and agrees with a
+/// factor where the factor is accurate: the values the bounds below are
+/// measured against.
+#[test]
+fn double_double_reference_matches_a_well_conditioned_factor() {
+    use common::dd::Dd;
+    for (arg, hi, lo) in [
+        (1.0, std::f64::consts::E, 1.445_646_891_729_250_2e-16),
+        (
+            -7.3,
+            0.000_675_538_775_193_844_4,
+            -2.907_750_493_846_276_6e-20,
+        ),
+    ] {
+        let want = Dd::new(hi) + Dd::new(lo);
+        let diff = (Dd::new(arg).exp() - want).to_f64().abs();
+        assert!(diff <= 1e-30 * hi, "exp({arg}): {diff:e}");
+    }
+    let third = Dd::ONE / (Dd::ONE + Dd::ONE + Dd::ONE);
+    let diff = (third * (Dd::ONE + Dd::ONE + Dd::ONE) - Dd::ONE)
+        .to_f64()
+        .abs();
+    assert!(diff <= 1e-31, "1/3 * 3 - 1: {diff:e}");
+    let two = Dd::ONE + Dd::ONE;
+    let diff = (two.sqrt() * two.sqrt() - two).to_f64().abs();
+    assert!(diff <= 1e-31, "sqrt(2)^2 - 2: {diff:e}");
+    let (x, y) = smooth_data(40, 4.0, 3);
+    let z = [0.4, 1.4, 2.4, 3.4];
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+    let xs = [0.3, 1.2, 2.1, 3.0];
+    let exact = common::dd::vfe_reference(&[1.0], 0.1, &x, &y, &z, &xs, 1);
+    let fresh = factor_values::<DoublePrecision>(&kernel, likelihood, &x, &y, &z, &xs, 1);
+    let err = max_rel_err(&fresh, &exact);
+    assert!(err < 1e-13, "{err:e}");
+}
+
+/// `X` inserts and deletes next to a near duplicate inducing point, on 1-D
+/// RBF data at `ℓ = 1`: the inducing set is `0.4, 1.4, 2.4, 3.4` and a
+/// point `δ` from `1.4`, so the smallest pivot ratio of `K_mm` runs from
+/// about `5e-3` (`δ = 0.1`) down to the rounding residue (`δ ≤ 1e-8`).
+/// Every step is within [`TRUTH_FACTOR`] times the distance a factor of
+/// the same points has from the exact system, plus [`F64_TRUTH_FLOOR`],
+/// of that system: the guarantee of an `X` step whichever path it takes
+/// (from a pivot ratio above `8 ε` it updates by rank-1, below it
+/// assembles).
+#[test]
+fn x_steps_next_to_a_near_duplicate_stay_near_the_exact_system() {
+    let kernel = KernelSpec::from(RbfKernel::new(1.0).expect("ℓ"));
+    let xs = [0.3, 1.2, 2.1, 3.0];
+    for noise in [1e-1, 1e-3] {
+        let likelihood = GaussianLikelihood::new(noise).expect("noise");
+        for exponent in 1..=9 {
+            let delta = 10f64.powi(-exponent);
+            let z = [0.4, 1.4, 2.4, 3.4, 1.4 + delta];
+            let (mut x, mut y) = smooth_data(30, 4.0, 11);
+            let mut online = Sgpr::new(kernel.clone(), likelihood)
+                .with_optimizer(Fixed)
+                .factor(&x, y.len(), 1, &y, &z, z.len())
+                .map_err(|(_, e)| e)
+                .expect("factor")
+                .into_online();
+            let mut rng = SmallRng::seed_from_u64(7);
+            for step in 0..8 {
+                let n = y.len();
+                if step % 2 == 0 {
+                    let (x_new, y_new) = (4.0 * rng.random::<f64>(), rng.random::<f64>());
+                    online.insert(&[x_new], y_new).expect("insert");
+                    x.push(x_new);
+                    y.push(y_new);
+                } else {
+                    let index = rng.random_range(0..n);
+                    online.delete(online.point_ids()[index]).expect("delete");
+                    x.remove(index);
+                    y.remove(index);
+                }
+                let (on_exact, fresh_exact, _) = distances_from_the_exact_system(
+                    &online,
+                    &kernel,
+                    &[1.0],
+                    likelihood,
+                    &x,
+                    &y,
+                    &z,
+                    &xs,
+                    1,
+                );
+                assert!(
+                    on_exact <= TRUTH_FACTOR * fresh_exact + F64_TRUTH_FLOOR,
+                    "noise={noise} delta={delta:e} step={step}: {on_exact:e} from the exact \
+                     system, a factor {fresh_exact:e}"
+                );
+            }
+        }
+    }
+}
+
+/// A benchmark-like problem of `compare/perf`: all `n` points and targets
+/// (`d` features, column-major), the kernel and its lengthscales, the
+/// inducing points, and the queries.
+struct SmoothProblem {
+    kernel: KernelSpec,
+    ls: Vec<f64>,
+    d: usize,
+    x: Vec<f64>,
+    y: Vec<f64>,
+    z: Vec<f64>,
+    xs: Vec<f64>,
+}
+
+/// The Forrester problem: `n` points of `[0, 1]`, `f(x) = (6x - 2)² sin(12x
+/// - 4)` plus noise, RBF at `ℓ = 1`, and the first eight k-means centres of
+/// the benchmark as inducing points (rounded to three digits): a smallest
+/// pivot ratio of `K_mm` of about `1e-13`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn forrester_problem(n: usize) -> SmoothProblem {
+    let mut rng = SmallRng::seed_from_u64(0);
+    let x: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
+    let y = x
+        .iter()
+        .map(|&v| (6.0 * v - 2.0).powi(2) * (12.0 * v - 4.0).sin() + (rng.random::<f64>() - 0.5))
+        .collect();
+    SmoothProblem {
+        kernel: KernelSpec::from(RbfKernel::new(1.0).expect("ℓ")),
+        ls: vec![1.0],
+        d: 1,
+        x,
+        y,
+        z: vec![0.225, 0.606, 0.975, 0.09, 0.42, 0.737, 0.802, 0.543],
+        xs: vec![0.05, 0.35, 0.65, 0.95],
+    }
+}
+
+/// The weighted sphere problem: a `side × side` grid of `[0, 1]²`, `f =
+/// (x / 0.25)² + y²` plus noise, ARD RBF at `ℓ_d = 4`, and the first eight
+/// k-means centres of the benchmark as inducing points: a smallest pivot
+/// ratio of `K_mm` of about `1e-7`.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn sphere_problem(side: usize) -> SmoothProblem {
+    let mut rng = SmallRng::seed_from_u64(9);
+    let n = side * side;
+    let grid = |i: usize| i as f64 / (side - 1) as f64;
+    let mut x = vec![0.0; 2 * n];
+    for i in 0..n {
+        x[i] = grid(i % side);
+        x[n + i] = grid(i / side);
+    }
+    let y = (0..n)
+        .map(|i| (x[i] / 0.25).powi(2) + x[n + i].powi(2) + (rng.random::<f64>() - 0.5))
+        .collect();
+    SmoothProblem {
+        kernel: KernelSpec::from(RbfArdKernel::new(&[4.0, 4.0]).expect("ℓ")),
+        ls: vec![4.0, 4.0],
+        d: 2,
+        x,
+        y,
+        z: vec![
+            0.45, 0.65, 0.104, 0.9, 0.357, 0.467, 0.933, 0.3, 0.696, 0.233, 0.442, 0.9, 0.914,
+            0.058, 0.633, 0.242,
+        ],
+        xs: vec![0.2, 0.5, 0.8, 0.35, 0.3, 0.6, 0.1, 0.9],
+    }
+}
+
+/// The `X` steps of the benchmark: from all but the last 16 points, insert
+/// those 16 in order, then delete 16 points spread over the model. Calls
+/// `check` after the model took each step, with the training points and
+/// targets the model now holds.
+#[allow(clippy::expect_used)] // helper is outside `#[test]`; clippy.toml allows only the test body
+fn run_smooth_steps<P: GpScalar>(
+    problem: &SmoothProblem,
+    noise: f64,
+    mut check: impl FnMut(&OnlineSgpr<Fixed, P>, &[f64], &[f64], &str),
+) {
+    let SmoothProblem {
+        kernel, d, x, y, z, ..
+    } = problem;
+    let d = *d;
+    let n_all = y.len();
+    let n0 = n_all - 16;
+    let likelihood = GaussianLikelihood::new(noise).expect("noise");
+    let mut cur_x: Vec<f64> = (0..d)
+        .flat_map(|f| x[f * n_all..f * n_all + n0].iter().copied())
+        .collect();
+    let mut cur_y = y[..n0].to_vec();
+    let mut online = Sgpr::new(kernel.clone(), likelihood)
+        .with_optimizer(Fixed)
+        .with_precision::<P>()
+        .factor(&cur_x, n0, d, &cur_y, z, z.len() / d)
+        .map_err(|(_, e)| e)
+        .expect("factor")
+        .into_online();
+    for i in n0..n_all {
+        let n = cur_y.len();
+        let x_new: Vec<f64> = (0..d).map(|f| x[f * n_all + i]).collect();
+        online.insert(&x_new, y[i]).expect("insert");
+        append_colmajor(&mut cur_x, n, d, &x_new);
+        cur_y.push(y[i]);
+        check(&online, &cur_x, &cur_y, &format!("insert {i}"));
+    }
+    for step in 0..16 {
+        let n = cur_y.len();
+        let index = (n * (2 * step + 1) / 33).min(n - 1);
+        online.delete(online.point_ids()[index]).expect("delete");
+        remove_colmajor(&mut cur_x, n, d, index);
+        cur_y.remove(index);
+        check(
+            &online,
+            &cur_x,
+            &cur_y,
+            &format!("delete {step} at {index}"),
+        );
+    }
+}
+
+/// `X` steps on the benchmark problems of `compare/perf` (Forrester at
+/// `n = 256` and `1024`, the weighted sphere at `16 × 16` and `32 × 32`,
+/// `σn² = 0.1`), from a `K_mm` whose smallest pivot ratio is far below the
+/// threshold of an inducing change (`1e-13` and `1e-7`) without any
+/// duplicate. Each step takes the rank-1 path
+/// (`x_steps_stay_rank_1_for_a_smooth_ill_conditioned_k_mm` in
+/// `src/sgpr/online/tests.rs`) and is within [`TRUTH_FACTOR`] times the
+/// distance a fresh factor has from the exact system, plus
+/// [`F64_TRUTH_FLOOR`], of that system, and within `1e-10` of the fresh
+/// factor. Before the threshold of an `X` step was lowered each of those
+/// steps assembled the system again and equalled the factor.
+#[test]
+fn x_steps_on_a_smooth_ill_conditioned_k_mm_stay_near_the_exact_system() {
+    for problem in [
+        forrester_problem(256),
+        forrester_problem(1024),
+        sphere_problem(16),
+        sphere_problem(32),
+    ] {
+        let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+        run_smooth_steps::<DoublePrecision>(&problem, 0.1, |online, x, y, ctx| {
+            let (on_exact, fresh_exact, on_fresh) = distances_from_the_exact_system(
+                online,
+                &problem.kernel,
+                &problem.ls,
+                likelihood,
+                x,
+                y,
+                &problem.z,
+                &problem.xs,
+                problem.d,
+            );
+            assert!(
+                on_exact <= TRUTH_FACTOR * fresh_exact + F64_TRUTH_FLOOR,
+                "d={} n={} {ctx}: {on_exact:e} from the exact system, a factor {fresh_exact:e}",
+                problem.d,
+                y.len()
+            );
+            assert!(
+                on_fresh <= INDUCING_TOL,
+                "{ctx}: {on_fresh:e} from a factor"
+            );
+        });
+    }
+}
+
+/// [`x_steps_on_a_smooth_ill_conditioned_k_mm_stay_near_the_exact_system`]
+/// at an `f32` storage scalar: each step is within [`F32_FACTOR_TOL`] of a
+/// fresh factor of the same precision and within the bound of
+/// [`check_f32_step`] of the `f64` factor (the exact system to `1e-11`
+/// here). The step computes in `f64` (R8-3), so its values are the
+/// rounding of the `f64` system's.
+#[test]
+fn f32_x_steps_on_a_smooth_ill_conditioned_k_mm_match_factor() {
+    fn run<P: GpScalar>(problem: &SmoothProblem) {
+        let likelihood = GaussianLikelihood::new(0.1).expect("noise");
+        let SmoothProblem {
+            kernel, d, z, xs, ..
+        } = problem;
+        run_smooth_steps::<P>(problem, 0.1, |online, x, y, ctx| {
+            check_f32_step(
+                &online_values(online, xs, *d),
+                &factor_values::<P>(kernel, likelihood, x, y, z, xs, *d),
+                &factor_values::<DoublePrecision>(kernel, likelihood, x, y, z, xs, *d),
+                ctx,
+            );
+        });
+    }
+    for problem in [forrester_problem(256), sphere_problem(16)] {
+        run::<SinglePrecision>(&problem);
+        run::<MixedPrecision>(&problem);
     }
 }

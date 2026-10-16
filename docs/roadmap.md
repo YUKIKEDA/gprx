@@ -30,6 +30,7 @@ D1-6 → D2-1 → D2-2 → D2-3 → D2-4 → D2-5 → C3-1
 C3-2 → C3-1 (publish)
 R8-1 → R8-2
 R8-2 → R8-3
+R8-3 → R8-4
 ```
 
 Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot claim a speedup without `phase-2`. Each R row lists its own dependencies on its Issue. C1-4, C1-5, and C1-6 follow C1-1 and do not wait on each other. C1-3 follows C1-2. C1-7 waits until C1-2, C1-3, C1-4, C1-5, and C1-6 are done. C2-1 follows C1-7.
@@ -209,9 +210,10 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| R8-1 | Bug | OnlineSgpr inducing insert / delete use ADR 0005's incremental update | [#520](https://github.com/YUKIKEDA/gprx/issues/520) | open |
-| R8-2 | Bug | OnlineSgpr `X` insert / delete from a `K_mm` factor with a pivot below the threshold match `factor` | [#525](https://github.com/YUKIKEDA/gprx/issues/525) | open |
-| R8-3 | Bug | f32 OnlineSgpr X rank-1 updates match factor at a well-conditioned K_mm | [#527](https://github.com/YUKIKEDA/gprx/issues/527) | open |
+| R8-1 | Bug | OnlineSgpr inducing insert / delete use ADR 0005's incremental update | [#520](https://github.com/YUKIKEDA/gprx/issues/520) | done |
+| R8-2 | Bug | OnlineSgpr `X` insert / delete from a `K_mm` factor with a pivot below the threshold match `factor` | [#525](https://github.com/YUKIKEDA/gprx/issues/525) | done |
+| R8-3 | Bug | f32 OnlineSgpr X rank-1 updates match factor at a well-conditioned K_mm | [#527](https://github.com/YUKIKEDA/gprx/issues/527) | done |
+| R8-4 | Bug | OnlineSgpr X steps stay rank-1 for smooth ill-conditioned K_mm (benchmark regression of R8-2) | [#530](https://github.com/YUKIKEDA/gprx/issues/530) | open |
 
 ## B (real-dataset comparison)
 
