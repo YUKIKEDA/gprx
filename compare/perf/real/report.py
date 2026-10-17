@@ -111,7 +111,7 @@ def tables(summary: list[dict], ja: bool = False) -> str:
     groups = sorted({(c["model"], c["protocol"]) for c in summary})
     if ja:
         header = (
-            "| データセット | ライブラリ | 分割 | RMSE | NLPD | 95% 区間 | 学習 [秒] | "
+            "| データセット | ライブラリ | 学習とテストの分割 | RMSE | NLPD | 95% 区間 | 学習 [秒] | "
             "評価回数 | 反復回数 | 評価 1 回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |"
         )
     else:
@@ -142,8 +142,6 @@ def tables(summary: list[dict], ja: bool = False) -> str:
 def optimizer_table(ja: bool = False) -> str:
     if ja:
         lines = [
-            "表の各欄には、測定した版の各ライブラリのソースから書き写した設定を載せている。",
-            "",
             "| ライブラリ | 既定の最適化 | 条件を揃えた最適化 | 探索する量 | 範囲 |",
             "| --- | --- | --- | --- | --- |",
         ]
@@ -164,10 +162,13 @@ def machine_line(meta: dict, ja: bool = False) -> str:
     names = ("scikit-learn", "gpytorch", "GPy", "torch", "scipy", "argmin")
     libs = ", ".join(f"{k} {v[k]}" for k in names if v.get(k))
     if ja:
-        libs = "、".join(f"{k} {v[k]}" for k in names if v.get(k))
+        python = "、".join(f"{k} {v[k]}" for k in names if k != "argmin" and v.get(k))
+        rust = f"gprx が使う argmin は {v['argmin']}、" if v.get("argmin") else ""
         return (
-            f"測定には {m['cpu']}（論理 CPU {m['logical_cpus']}、メモリ {m['memory_gib']} GiB、{m['os']}）を使った。"
-            f"ライブラリの版は {libs} で、libgp は {v['libgp'][:8]} である。"
+            f"測定に使った CPU は {m['cpu']} である。"
+            f"論理 CPU は {m['logical_cpus']} 個、メモリは {m['memory_gib']} GiB、OS は {m['os']} だった。"
+            f"Python のライブラリの版は {python} である。"
+            f"{rust}libgp はコミット {v['libgp'][:8]} を使った。"
         )
     return f"Measured on {m['cpu']} ({m['logical_cpus']} logical CPUs, {m['memory_gib']} GiB, {m['os']}). {libs}; libgp {v['libgp'][:8]}."
 
@@ -198,7 +199,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         (
             "学習の時間（Exact GP）",
             ("上段は学習にかかった秒数を、下段はライブラリが尤度とその勾配をまとめて計算した回数を示す。"
-            "どちらの軸も対数目盛りである。秒数は、回数が揃っているところでだけ比べる。"),
+            "どちらの軸も対数目盛りである。秒数を比べてよいのは、回数が揃っている場合だけである。"),
         ),
     ),
     "accuracy_sgpr_matched.svg": (
@@ -208,7 +209,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "予測の誤差（SGPR）",
-            "読み方は Exact GP の誤差の図と同じである。誘導点は 512 個で、上段が RMSE、下段が NLPD である。",
+            "読み方は Exact GP の誤差の図と同じで、上段が RMSE、下段が NLPD である。モデルの誘導点は 512 個である。",
         ),
     ),
     "fit_time_sgpr_matched.svg": (
@@ -254,7 +255,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "メモリの推移（energy）",
             ("線はプロセス全体の常駐メモリを表す。横軸は、プロセスが始まってからの秒数である。"
             "点線は各ライブラリの色で描いてあり、そのライブラリが学習または予測を始めた時刻を示す。"
-            "図は分割 0 で測ったものである。"),
+            "図は 0 番目の分割で測った。"),
         ),
     ),
     "rss_timeline_kin40k_sgpr_s0_matched.svg": (
@@ -264,7 +265,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "メモリの推移（kin40k）",
-            "読み方は energy のメモリの図と同じである。モデルは誘導点 512 個の SGPR で、図は分割 0 で測ったものである。",
+            "読み方は energy のメモリの図と同じである。モデルは誘導点 512 個の SGPR である。図は 0 番目の分割で測った。",
         ),
     ),
     "curve_maunaloa_matched.svg": (
@@ -275,7 +276,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "Mauna Loa の予測",
-            ("ライブラリごとに 1 枚の枠を使う。線は予測の平均を、帯は 95% 区間を表す。"
+            ("ライブラリごとに枠を分けて描いた。線は予測の平均を、帯は 95% 区間を表す。"
             "塗りつぶした点は学習データで、白抜きの点は学習に使わずに残した点である。"),
         ),
     ),
@@ -287,7 +288,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "Snelson の予測",
-            ("ライブラリごとに 1 枚の枠を使う。線は予測の平均を、帯は 95% 区間を表す。"
+            ("ライブラリごとに枠を分けて描いた。線は予測の平均を、帯は 95% 区間を表す。"
             "点は学習データで、学習に使わずに残した点は無い。"),
         ),
     ),

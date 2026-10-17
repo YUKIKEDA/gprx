@@ -22,7 +22,7 @@ Training time depends on the optimizer as much as on the matrix arithmetic. Each
 There are two setups.
 
 - The library default. Each library trains with the settings it ships with.
-- A shared setup. Each library keeps its own objective and gradient. The iteration limit is 100, the gradient tolerance is √ε, and the history length is 10. The programs are not the same. gprx uses argmin's L-BFGS with a More–Thuente line search, and those limits are already its default. scikit-learn, GPyTorch, and GPy pass the same limits to scipy's L-BFGS-B. libgp has only Rprop, which cannot take a gradient tolerance. The minibatch model has no default Adam setting that finishes on hundreds of thousands of points, so every library uses learning rate 0.01, batch size 1024, and three passes over the data.
+- A shared setup. Each library keeps its own objective and gradient. The iteration limit is 100, the gradient tolerance is √ε, and the history length is 10. The programs are not the same. gprx uses argmin's L-BFGS with a More–Thuente line search, and those limits are already its default. scikit-learn, GPyTorch, and GPy pass the same limits to scipy's L-BFGS-B. libgp has only RProp, which cannot take a gradient tolerance. The minibatch model has no default Adam setting that finishes on hundreds of thousands of points, so every library uses learning rate 0.01, batch size 1024, and three passes over the data.
 
 A difference in fit time is not a difference in speed when the evaluation counts differ. Peak memory is the high point of the resident set of the whole process. Memory over time is in the figures in the results.
 
@@ -326,4 +326,4 @@ just perf-real-full                                            # the comparison 
 just perf-visual                                               # the two Snelson figures above
 ```
 
-`--timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md).
+`just perf-real --timeline` records the resident memory of the whole process every 10 ms. The raw output stays in `compare/perf/out/real/` and is not committed. `docs/bench/summary.json` holds the table numbers, the machine, the library versions, and the optimizer settings. Details: [`compare/perf/README.md`](https://github.com/YUKIKEDA/gprx/blob/main/compare/perf/README.md).

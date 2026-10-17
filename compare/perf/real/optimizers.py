@@ -101,18 +101,18 @@ OPTIMIZERS_JA: dict[str, dict[str, str]] = {
         "matched": LBFGSB_MATCHED_JA + "。勾配は -mll × n を autograd で微分して求める",
         "space": "softplus を通す前の生のパラメータ",
         "bounds": "ノイズは 1e-5 以上（この比較で設定した。GPyTorch の既定は 1e-4）。"
-        "ℓ と outputscale は正であることだけ",
+        "ℓ と outputscale には、正であることだけを課す",
     },
     "gpy": {
         "native": "model.optimize()。paramz の opt_lbfgsb が scipy の fmin_l_bfgs_b を "
         "maxfun = maxiter = 1000、factr 1e7、pgtol 1e-5 で呼ぶ",
         "matched": LBFGSB_MATCHED_JA,
         "space": "各パラメータの softplus（Logexp）",
-        "bounds": "正であることだけ。上限は無い",
+        "bounds": "正であることだけを課し、上限は無い",
     },
     "libgp": {
         "native": "RProp（resilient backpropagation）、100 回反復、eps_stop 0、Delta0 0.1、"
-        "Deltamin 1e-6、Deltamax 50、eta- 0.5、eta+ 1.2。途中で尤度が最も高かった値を残す",
+        "Deltamin 1e-6、Deltamax 50、eta- 0.5、eta+ 1.2。途中で尤度が最も高かったときのパラメータを残す",
         "matched": "対象外。libgp の最適化器は RProp と CG だけで、RProp は勾配の許容値を受け取らない",
         "space": "log ℓ、log sf、log sn（分散ではなく、振幅と標準偏差）",
         "bounds": "なし",
