@@ -2,9 +2,9 @@
 
 # gprx
 
-gprx は、Rust でガウス過程回帰を行うクレートである。全学習点を使う厳密な GPR、スパース GPR（VFE）、SVGP の 3 つを備えている。学習前のトレーナーが `Gpr` で、`Gpr::fit` がこれを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化したうえで `FittedGpr` を返す。`Sgpr` と `Svgp` も同じ部品から組み立てる。厳密な GPR とスパース GPR のモデルは学習後もオンラインで更新でき、どのモデルもディレクトリへ保存して読み込める。カーネルに渡す入力は座標でもよいし、呼び出し側が求めた二乗距離でもよい。
+gprx は、Rust でガウス過程回帰を行うクレートである。全学習点を使う厳密な GPR、スパース GPR（VFE）、SVGP の 3 つを備えている。`Gpr` は学習前のトレーナーである。`Gpr::fit` はこのトレーナーを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化したうえで `FittedGpr` を返す。`Sgpr` と `Svgp` も、同じ部品で組み立てられている。厳密な GPR とスパース GPR のモデルは学習後もオンラインで更新でき、どのモデルもディレクトリへ保存して読み込める。カーネルに渡す入力は座標でもよいし、呼び出し側が求めた二乗距離でもよい。
 
-入力 `X` は列優先で並べる。`n` 個の点と `d` 個の特徴があるなら、全行の特徴 0 を先に置き、そのあとに特徴 1 を続ける。`fit` はトレーナーを値で受け取って消費する。観測ノイズの大きさは `GaussianLikelihood` が持つ。公開 API として約束しているのは、既定のフィーチャで使える **0.2.0**（タグ `v0.2.0`）の範囲で、MSRV は 1.88 である。0.x のあいだは、マイナー版の更新でもこの API に互換性のない変更が入ることがある。0.1.0 から 0.2.0 で何が変わり、どう移行すればよいかは[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にまとめてある。`internals`（`bench-internals` と `insert-stages`）は、この約束に含まれない。
+入力 `X` は列優先で並べる。`n` 個の点と `d` 個の特徴があるなら、全行の特徴 0 を先に置き、そのあとに特徴 1 を続ける。`fit` はトレーナーを値で受け取って消費する。観測ノイズの大きさは `GaussianLikelihood` が持つ。公開 API として約束しているのは、**0.2.0**（タグ `v0.2.0`）のうち既定のフィーチャで使える部分である。MSRV は 1.88 とする。0.x のあいだは、マイナー版の更新でもこの API に互換性のない変更が入ることがある。0.1.0 から 0.2.0 で何が変わり、どう移行すればよいかは[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にまとめてある。`internals`（`bench-internals` と `insert-stages`）は、この約束に含まれない。
 
 ```toml
 [dependencies]
@@ -34,7 +34,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` と `factor` は、失敗したときにトレーナーをエラーと一緒に返す。戻り値の型は `Result<Fitted, (Trainer, GprError)>` である。`Gpr` には `From<(Gpr<O, P, K>, GprError)> for GprError` があるので、`?` で受ければトレーナーは捨てられ、`GprError` だけが呼び出し元へ伝わる。`Sgpr` と `Svgp` にはこの変換がないため、以下の例と同じく `.map_err(|(_, e)| e)?` と書く。同じトレーナーで再試行したいなら、`Err((trainer, err))` のパターンで受けてトレーナーを取り戻せばよい。
 
-モデルのメソッドは、`fitted.predict(..)` のように値に対して呼ぶのが基本である。型のパスから呼ぶときは注意が要る。座標のモデルと距離のモデルの両方にある名前のメソッド（`fit`、`factor`、`predict` / 共分散 / `sample` の系統、`insert`、`insert_inducing`、疎なモデルの `into_online` と `save`）を、`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて呼ぶと、`E0034` でコンパイルに失敗する。パスだけでは、同じ名前のどのメソッドを指すのかが決まらないからである。この場合は値が持つ型パラメータまで書き、既定の型パラメータの `FittedGpr` なら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったモデルなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` とする。
+モデルのメソッドは、`fitted.predict(..)` のように値に対して呼ぶのが基本である。型のパスから呼ぶときは注意が要る。座標のモデルと距離のモデルには、同じ名前のメソッドがいくつもある。`fit`、`factor`、`predict` / 共分散 / `sample` の系統、`insert`、`insert_inducing`、疎なモデルの `into_online` と `save` である。これらを `FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて呼ぶと、`E0034` でコンパイルに失敗する。パスだけでは、同じ名前のどのメソッドを指すのかが決まらないからである。この場合は値が持つ型パラメータまで書き、既定の型パラメータの `FittedGpr` なら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったモデルなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` とする。
 
 入力 `X` と誘導点 `Z` は、列優先に並べた `f64` の配列で渡す。全行の特徴 0 が先で、特徴 1 がその次に来る。点の数を `n_rows`、特徴の数を `n_cols` で指定し、`y` の長さは `n_rows` にそろえる。入力が空のとき、長さが `n_rows * n_cols` と一致しないとき、`NaN` や `Inf` を含むときは、いずれも `GprError` になる。
 
@@ -89,11 +89,11 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`predict` が返す分散は、元の `y` の尺度での観測の分散 `VarianceKind::Observation`（`latent + σn²`）である。`VarianceKind::Latent` を選ぶと `σn²` が除かれる。この選択は、`predict_with` に渡す `PredictOptions` のフィールド `variance_kind` で行う。`predict` は呼ぶたびに結果のバッファを確保する。確保を避けるには `predict_into` か `predict_with_into` を使う。この 2 つは渡した `Prediction`（フィールドは `mean`、`variance`、`variance_kind`）へ結果を書き込み、クエリの長さが前回と同じなら `mean` と `variance` の領域を使い回す。
+`predict` が返す分散は `VarianceKind::Observation`（`latent + σn²`）で、観測値の分散を元の `y` の尺度で表す。`VarianceKind::Latent` を選ぶと `σn²` が除かれる。この選択は、`predict_with` に渡す `PredictOptions` のフィールド `variance_kind` で行う。`predict` は呼ぶたびに結果のバッファを確保する。確保を避けるには `predict_into` か `predict_with_into` を使う。この 2 つは渡した `Prediction`（フィールドは `mean`、`variance`、`variance_kind`）へ結果を書き込み、クエリの長さが前回と同じなら `mean` と `variance` の領域を使い回す。
 
 クエリ点どうしの共分散まで要るなら `predict_covariance` を使う。返ってくる `PredictiveCovariance` のフィールドは `mean`、`covariance`、`variance_kind` で、`covariance` は列優先の `m × m` 行列（添字は `col * m + row`）になっている。その対角は、同じクエリとオプションで呼んだ `predict` の分散と一致する。オプションを指定したいときは `predict_covariance_with` に `PredictOptions` を渡す。
 
-`sample(xs, n_rows, n_cols, n_draws, seed)` は、この共分散から `μ + Lz` の形でサンプルを取り出し、列優先の `m × n_draws` で返す。`seed` は gprx 内蔵の Xoshiro256++ の開始状態なので、どのプラットフォームでも同じ乱数列が得られる。`PredictOptions` を取る版が `sample_with` である。
+`sample(xs, n_rows, n_cols, n_draws, seed)` は、この共分散から `μ + Lz` の形でサンプルを取り出し、列優先の `m × n_draws` で返す。`seed` は gprx 内蔵の Xoshiro256++ の開始状態なので、どのプラットフォームでも同じ乱数列が得られる。`PredictOptions` を指定したいときは `sample_with` を使う。
 
 `loo_predict` が返すのは新しい `x` での予測ではなく、全学習点での GPML 流の leave-one-out の平均と分散である。オプション付きで呼ぶなら `loo_predict_with` を使う。
 
@@ -143,7 +143,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 学習済みモデルの中身は `n`、`d`、`kernel`、`likelihood`、`x`、`y`、`alpha` で読める。設定した方針を読むのは `distance_cache_policy`、`cholesky_buffer`、`math`、`jitter_policy` の 4 つである。`fit` の前の `Gpr` でも、`kernel`、`likelihood`、`num_params`、`get_params` と、方針を読むこの 4 つは使える。`set_params` が使えるようになるのは `fit` のあとである。`alpha` の返し方はモデルによって違う。`FittedGpr::alpha` は、直前の因子分解で得たスライスを返す。`OnlineGpr::alpha` が `Result` を返すのは、`insert` や `delete` のあと `α` が古いまま残り、その次に呼んだときに解き直すからである。
 
-`into_trainer` は、今の `θ` を引き継いだ未学習の `Gpr` を返す。学習済みモデルに `with_optimizer` を呼んでも、変わるのはその後の `refit` の動きだけで、`OnlineGpr::with_optimizer` も同様である。`refit` の中身は最適化器の型で分かれる。`FittedGpr<O: Optimizer>` では、保存してある学習データの上で、今の `θ` から探索をやり直す。`FittedGpr<Fixed>` では `L` と `α` を組み直すだけで、探索はしない。どちらの場合も、変換は学習し直さない。
+`into_trainer` は、今の `θ` を引き継いだ未学習の `Gpr` を返す。学習済みモデルの `with_optimizer` を呼んでも、変わるのはその後の `refit` の動きだけで、`OnlineGpr::with_optimizer` も同様である。`refit` の中身は最適化器の型で分かれる。`FittedGpr<O: Optimizer>` では、保存してある学習データの上で、今の `θ` から探索をやり直す。`FittedGpr<Fixed>` では `L` と `α` を組み直すだけで、探索はしない。どちらの場合も、変換は学習し直さない。
 
 点を 1 つずつ足したり消したりしたいときは、`into_online` で `OnlineGpr` に変換する。`insert(x_new, y_new)` は 1 点を追加して `PointId` を返し、`delete(id)` はその点を取り除く。最後に残った点は削除できず、`GprError::InsufficientData`（`min` は 2）になる。`PointId` には公開コンストラクタがない。`into_online` が既存の点に `0 .. n-1` を割り当て、以降の挿入には増えていく番号が振られる。一度使った番号は再利用しない。いまモデルにある id の一覧は `point_ids` で得られ、モデルにない id を渡すと `InvalidPointId` になる。オンラインモデルの `into_trainer` は `Gpr` を返す。`OnlineGpr` の `refit` も学習済みモデルと同じ分かれ方で、`Optimizer` なら探索し、`Fixed` なら因子を組み直す。
 
@@ -185,7 +185,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `with_prefer_speed` と `with_prefer_memory` は `Gpr` のメソッドで、距離のキャッシュとコレスキー分解のバッファをまとめて設定する。`DistanceCachePolicy` の既定は `Cached` で、`Uncached` にすると距離を毎回計算し直す。`DistanceCachePolicy` と `KernelExp` は non-exhaustive である。`CholeskyBuffer` がとる値は `Retain` と `Reuse` の 2 つである。
 
-`Sgpr` と `Svgp` で使える設定は `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform` で、`Sgpr` にはさらに `with_inducing` がある。この 2 つのモデルでは、`K_mm` のジッタが `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)` から始まる。`fit` の前でも `kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params` を読め、`set_params` で `θ` を更新できる。
+`Sgpr` と `Svgp` で使える設定は `with_optimizer`、`with_precision`、`with_math`、`with_jitter_policy`、`with_input_transform`、`with_target_transform` で、`Sgpr` にはさらに `with_inducing` がある。この 2 つのモデルでは、`K_mm` のジッタが `JitterPolicy::adaptive(1e-8, 10.0, 5, 1e-3)` から始まる。`fit` の前でも、`kernel`、`likelihood`、`math`、`jitter_policy`、`num_params`、`get_params` で値を読める。`set_params` で `θ` を更新することもできる。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -264,13 +264,13 @@ fn main() -> Result<(), gprx::GprError> {
 
 `fit` と `factor` の引数は `(x, n_rows, n_cols, y, z, n_inducing)` で、`z` には `n_inducing` 個の点を `x` と同じ `n_cols` 個の特徴で列優先に並べて渡す。`factor` は `θ` も `Z` も動かさない。誘導点を自由にすると、パラメータのベクトルはカーネルの `θ`、尤度の `θ` の後ろに列優先の `Z` が続く形になる。`Z` の各座標が動ける区間は、入力の変換をかけたあとの学習データから決まる。データの範囲を両側にその幅の 10%（ただし `0.1` 以上）広げ、下端が `0` より大きければ `0` まで下げたものが、その区間である。Matérn の `ν = 1/2` は座標についての微分を持たないので、`Z` を自由にすると `GprError::CoordGradientUnsupported` になる。
 
-`FittedSgpr` には、`FittedGpr` と同じ予測、共分散、サンプル、leave-one-out のメソッドがそろっている。目的関数のメソッド（`neg_log_marginal_likelihood`、`num_params`、`get_params`、`set_params`、`value_and_gradient_into`、`hessian_into`）も共通である。モデルの中身は `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` で読め、`z` が返すのは元の座標での誘導点である。
+`FittedSgpr` には、`FittedGpr` と同じ予測、共分散、サンプル、leave-one-out のメソッドがそろっている。目的関数のメソッド（`neg_log_marginal_likelihood`、`num_params`、`get_params`、`set_params`、`value_and_gradient_into`、`hessian_into`）も共通である。モデルの中身は `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` で読める。`z` が返すのは元の座標での誘導点である。
 
 `into_online` が返す `OnlineSgpr` でも、これらの読み取りと目的関数のメソッドはそのまま使え、さらに `point_ids` と `inducing_ids` が加わる。学習点を `insert` / `delete` するときは `PointId` で、誘導点を `insert_inducing` / `delete_inducing` するときは `InducingId` で指定する。`InducingId` にも公開コンストラクタはなく、番号は再利用されない。モデルにない id を渡すと `InvalidInducingId` になる。`OnlineSgpr<O: Optimizer>` の `refit` は探索をやり直すが、`Z` は固定したままである。`OnlineSgpr<Fixed>` には `refit` がない。学習済みのモデルに戻すには `into_fitted` を呼び、`FittedSgpr<_, FixedInducing, _>` を受け取る。`save` でディレクトリへ保存できるが、疎なモデルには `save_with_factor` がない。
 
 ### ミニバッチ: `Svgp`、`FittedSvgp`
 
-`Svgp::new` の型は `Svgp<Fixed>` である。このまま `factor` を呼ぶと、今の `θ` で白色化した変分事後分布 `q` を作り、探索はしない。学習させるには `with_optimizer(Adam::new()).fit(...)` とし、ミニバッチの Adam で `θ` と `q` を動かす。`Adam` は `Optimizer` を実装していないので、`Gpr` と `Sgpr` には渡せない。
+`Svgp::new` の型は `Svgp<Fixed>` である。`factor` は、今の `θ` で白色化した変分事後分布 `q` を作る。探索はしない。学習させるには `with_optimizer(Adam::new()).fit(...)` とし、ミニバッチの Adam で `θ` と `q` を動かす。`Adam` は `Optimizer` を実装していないので、`Gpr` と `Sgpr` には渡せない。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -294,9 +294,9 @@ fn main() -> Result<(), gprx::GprError> {
 }
 ```
 
-`FittedSvgp::neg_elbo` は、証拠下限（ELBO）の符号を反転した値を返す。`num_params`、`get_params`、`set_params`、`value_and_gradient_into` が評価するのは全データでの目的関数で、`hessian_into` はない。Adam のループでは、データ項を `n / batch` 倍し、KL 項には倍率をかけない。
+`FittedSvgp::neg_elbo` は、証拠下限（ELBO）の符号を反転した値を返す。`num_params`、`get_params`、`set_params`、`value_and_gradient_into` は、全データでの目的関数のパラメータと値を扱う。`hessian_into` はない。Adam のループでは、データ項を `n / batch` 倍し、KL 項には倍率をかけない。
 
-予測、共分散、サンプルのメソッドはほかのモデルと同じで、`predict`、`predict_with`、`predict_into`、`predict_with_into`、`predict_covariance`、`predict_covariance_with`、`sample`、`sample_with` がある。中身を読むメソッドは `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` である。leave-one-out とオンライン型、`refit` は用意していない。`save` でディレクトリへ保存できる。
+予測、共分散、サンプルのメソッドはほかのモデルと同じである。予測には `predict`、`predict_with`、`predict_into`、`predict_with_into` を使う。共分散とサンプルには `predict_covariance`、`predict_covariance_with`、`sample`、`sample_with` を使う。モデルの中身は `n`、`m`、`d`、`kernel`、`likelihood`、`math`、`jitter_policy`、`x`、`y`、`z` で読める。leave-one-out とオンライン型、`refit` は用意していない。`save` でディレクトリへ保存できる。
 
 `Adam::new` の既定値は、学習率 `1e-3`、`β1 = 0.9`、`β2 = 0.999`、`ε = 1e-8`、バッチの大きさ 32、エポック数 100、シード 0 である。変えるには `with_learning_rate`、`with_beta1`、`with_beta2`、`with_epsilon`、`with_batch_size`（`NonZeroUsize`）、`with_epochs`（`NonZeroU64`）、`with_seed` を使う。このうち学習率、2 つのベータ、イプシロンのセッターは `Result` を返す。
 
@@ -328,7 +328,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 カーネルは `KernelSpec` の木として組み立てる。カーネルの葉から作るなら `KernelSpec::from(leaf)`、自作の項から作るなら `KernelSpec::custom(term)` を使う。和は `+`、積は `*` で書き、`*` のほうが `+` より先に結合するので、`c * k + k2` は定数倍したカーネルと別のカーネルとの和になる。`num_params`、`get_params`、`set_params` が扱う log-`θ` は、カーネルの葉を深さ優先でたどった順に一列に並ぶ。各パラメータがどのカーネルの葉に属するかは、`parameter_bindings` が `Vec<ParameterBinding>` で返す。`ParameterBinding` のフィールドは `index`、`leaf_id`、`local_index` である。
 
-評価用の形にするには `compile` を呼び、`CompiledKernel<f64>` を得る。保存するスカラーの型を選びたいなら `compile_as::<T>()` を使う。`T` の境界は `KernelScalar` で、実装しているのは `f32` と `f64` だけである。このトレイトには `from_f64`、`to_f64`、`exp`、`ln`、`sqrt`、`abs`、`is_finite`、`powf`、`sin`、`cos`、`max`、`min` のメソッドがある。`CompiledKernel` でも `num_params`、`get_params`、`set_params` が使える。
+評価用の形にするには `compile` を呼び、`CompiledKernel<f64>` を得る。保存するスカラーの型を選びたいなら `compile_as::<T>()` を使う。`T` の境界は `KernelScalar` で、実装しているのは `f32` と `f64` だけである。このトレイトは数値の演算をメソッドとして持つ。`f64` との変換は `from_f64` と `to_f64` である。関数は `exp`、`ln`、`sqrt`、`abs`、`powf`、`sin`、`cos` で、判定と比較は `is_finite`、`max`、`min` である。`CompiledKernel` でも `num_params`、`get_params`、`set_params` が使える。
 
 `KernelSpec` と `CompiledKernel` は non-exhaustive な列挙で、`match` の分岐に使うバリアントは `Rbf`、`RbfArd`、`Matern`、`MaternArd`、`Periodic`、`RationalQuadratic`、`RationalQuadraticArd`、`Constant`、`Linear`、`White`、`Custom`、`Sum`、`Product` である。`Sum` と `Product` の中身は、`KernelSpec` では `Box` の組、`CompiledKernel` では平坦なベクタになっている。
 
@@ -361,13 +361,13 @@ fn main() -> Result<(), gprx::GprError> {
 
 観測ノイズは `GaussianLikelihood` が受け持ち、`WhiteKernel` はカーネルに追加する項である。尤度のノイズとホワイト項の両方を大きくすると、同じノイズを二重に数えることになる。
 
-等方のカーネルの葉は、長さスケールを `lengthscale` と `log_lengthscale` で読める。Matérn ではさらに `nu` も読める。ほかのカーネルの葉が読む値は、周期カーネルが `period` と `log_period`、有理二次が `alpha` と `log_alpha`、線形とホワイトが `variance` と `log_variance`、定数が `constant` と `log_constant` である。
+等方のカーネルの葉は、長さスケールを `lengthscale` と `log_lengthscale` で読める。Matérn ではさらに `nu` も読める。ほかのカーネルの葉で取得できる値は、周期カーネルが `period` と `log_period`、有理二次が `alpha` と `log_alpha`、線形とホワイトが `variance` と `log_variance`、定数が `constant` と `log_constant` である。
 
 最適化の座標から作るコンストラクタには `from_log_lengthscale`、`from_log_lengthscales`、`from_log`、`from_log_variance`、`from_log_constant` がある。このうち `from_log` は 2 つの値を取り、周期カーネルには log 長さスケールと log 周期を、有理二次には log 長さスケールと log `α` を渡す。
 
 区間の持ち方もカーネルの葉ごとに違う。等方の RBF と Matérn、定数、線形、ホワイトのカーネルの葉は、`bounds` を 1 つだけ持つ。ARD のカーネルの葉では、長さスケールの区間を `ArdLengthscales` が管理する。周期カーネルの区間は `lengthscale_bounds` と `period_bounds` に分かれ、`with_bounds` には両方の区間を渡す。有理二次も同様に `lengthscale_bounds` と `alpha_bounds` に分かれ、`with_bounds` で両方を設定する。
 
-ARD のカーネルの葉では、`lengthscale(dim)` が 1 つの `ℓ_d` を返し、`log_lengthscales` が保存されたベクトルを返す。`lengthscales()` で得られる `ArdLengthscales` には、`new`、`from_log_lengthscales`、`with_bounds`、`lengthscale(dim)`、`log_lengthscales`、`num_params`、`get_params`、`set_params` がある。ARD の `with_bounds` が受け取る区間は 1 つで、すべての `ℓ_d` に同じ区間を使う。有理二次 ARD の `with_bounds` だけは、長さスケールの区間と `α` の区間の 2 つを取る。
+ARD のカーネルの葉では、`lengthscale(dim)` が 1 つの `ℓ_d` を返し、`log_lengthscales` が保存されたベクトルを返す。`lengthscales()` は `ArdLengthscales` を返す。`ArdLengthscales` は `new` か `from_log_lengthscales` で作り、区間は `with_bounds` で設定する。値は `lengthscale(dim)` と `log_lengthscales` で読める。`num_params`、`get_params`、`set_params` も使える。ARD の `with_bounds` が受け取る区間は 1 つで、すべての `ℓ_d` に同じ区間を使う。有理二次 ARD の `with_bounds` だけは、長さスケールの区間と `α` の区間の 2 つを取る。
 
 カーネルの葉と `CompiledKernel` は、`faer` の行列（`MatRef` / `MatMut`）の上で `apply`、`apply_cross`、`grad`、`hess` を使って評価する。これらを呼ぶには、依存に `faer = "0.24"` を加える。`LinearKernel` 以外のカーネルの葉は、これらのメソッドで二乗距離を読み、対角を `fill_diag` で書き込む。`LinearKernel` だけは、この 4 つのメソッドで座標を読み、対角を `fill_diag_points` で書き込む。また、`ConstantKernel` と `WhiteKernel` は `apply_points`、`apply_cross_points`、`grad_points`、`hess_points` も備え、`RbfKernel`、`RbfArdKernel`、等方の `MaternKernel`、`WhiteKernel` は `grad_wrt_coord_dim` も備える。
 
@@ -375,7 +375,7 @@ ARD のカーネルの葉では、`lengthscale(dim)` が 1 つの `ℓ_d` を返
 
 二乗距離を読む自作のカーネルの葉は、トレイト `KernelTerm<T>` を実装して作る。実装するメソッドは `num_params`、`get_params`、`set_params`、`bounds_into`、`apply`、`apply_cross`、`fill_diag`、`grad`、`hess`、`hess_points` である。疎なモデルで使うなら、そのモデルが必要とする微分のメソッドも要る。`grad_cross` と `hess_cross` を実装し、`FreeInducing` で使うにはさらに `grad_wrt_sq_dist`、`hess_wrt_sq_dist`、`grad_wrt_sq_dist_theta` を実装する。保存したい場合は `persist_id` と `persist_state` も実装する。この 2 つは `serde_json::Value` を返すので、依存に `serde_json = "1"` を加える。
 
-実装は、すべての `T: KernelScalar` に対して一度書けばよい。モデルで使うには、そのカーネルの葉が `f64` と `f32` の両方で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` を満たしている必要がある。`CustomKernel::new(term)` がこれを `Box` に包み、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` でカーネルの木に入れる。疎なモデルが必要とする微分を省いた自作のカーネルの葉は、`CoordGradientUnsupported` を返す。実装の例は、後の保存と読み込みの例にある。
+実装は、すべての `T: KernelScalar` に対して一度書けばよい。モデルで使うには、そのカーネルの葉が `f64` と `f32` の両方で実装され、`Clone`、`Debug`、`Send`、`Sync`、`'static` を満たしている必要がある。`CustomKernel::new(term)` は、その実装を `Box` に包む。カーネルの木に入れるには、`KernelSpec::from(custom)` か `KernelSpec::custom(term)` を使う。疎なモデルが必要とする微分を省いた自作のカーネルの葉は、`CoordGradientUnsupported` を返す。実装の例は、後の保存と読み込みの例にある。
 
 ```rust
 use gprx::kernel::{
@@ -483,9 +483,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 ARD のカーネルの葉には `ArdDistance::from_leaf(leaf)` を使う。受け付けるのは `RbfArdKernel`、`MaternArdKernel`、`RationalQuadraticArdKernel` で（境界は `ArdDistanceLeaf`）、戻り値はスロットと、そのスロットに載せたカーネルの葉である。このスロットは次元ごとの `(Δ_k)²` を 1 つずつ、計 `d` 個のブロックとして受け取る。ここでの `d` は、そのカーネルの葉が持つ長さスケールの数である。同じスロットに 2 つ目以降のカーネルの葉を載せるには `kernel(leaf)` を使い、長さスケールの数が `d` と違えば `DimensionMismatch` になる。1 つのスロットに載ったカーネルの葉は、どれも同じ供給を読む。`ConstantKernel`、`WhiteKernel`、`LinearKernel` はスロットに載せず、これまでどおり `KernelSpec` のカーネルの葉として使う。
 
-こうして組んだカーネルは、`KernelSpec` とは別の型 `DistanceKernel<C>` になる。印の `C` は、座標を読まない `DistanceOnly` か、座標を読むカーネルの葉も含む `WithPoints` のどちらかである。`DistanceKernel` どうしを `+` や `*` で組み合わせると、`JoinPoints` が両者の印をまとめる。`ConstantKernel` か `WhiteKernel` と組み合わせた場合は、どちらの順に書いても `C` は変わらない。右側に `KernelSpec` を置いた `DistanceKernel` は `WithPoints` になる。座標の項を左側に置きたいときは、`DistanceKernel::from(spec)`（スロットを持たない `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないため、`KernelSpec + leaf.into()` と書くと、座標どうしの和として型が推論されてしまう。
+こうして組んだカーネルは、`KernelSpec` とは別の型 `DistanceKernel<C>` になる。型パラメータの `C` はマーカー型で、座標を読まない `DistanceOnly` か、座標を読むカーネルの葉も含む `WithPoints` のどちらかである。`DistanceKernel` どうしを `+` や `*` で組み合わせると、`JoinPoints` が両者のマーカー型から結果のマーカー型を決める。`ConstantKernel` か `WhiteKernel` と組み合わせた場合は、どちらの順に書いても `C` は変わらない。右側に `KernelSpec` を置いた `DistanceKernel` は `WithPoints` になる。座標の項を左側に置きたいときは、`DistanceKernel::from(spec)`（スロットを持たない `DistanceKernel<WithPoints>`）と書く。`KernelSpec + DistanceKernel` は実装していないため、`KernelSpec + leaf.into()` と書くと、座標どうしの和として型が推論されてしまう。
 
-`num_params`、`get_params`、`set_params`、`parameter_bindings` の振る舞いは `KernelSpec` と同じである。`slots()` は、深さ優先でたどって最初に現れた順に `DistanceSlot` を返す。型の側では、`KernelSpec<S>` と `CompiledKernel<T, S>` の最後の型パラメータ `S` が、封印されたトレイト `Supply` によって供給の種類を表す。既定の `NoSupply` は座標の木を表し、値を持たない。そのため型パラメータを省いた `KernelSpec` と `CompiledKernel<T>` は座標の型を指し、もう一方の種類を持つのは `DistanceKernel` だけになる。
+`num_params`、`get_params`、`set_params`、`parameter_bindings` の振る舞いは `KernelSpec` と同じである。`slots()` は、深さ優先でたどって最初に現れた順に `DistanceSlot` を返す。型の側では、`KernelSpec<S>` と `CompiledKernel<T, S>` の最後の型パラメータ `S` が、封印されたトレイト `Supply` によって供給の種類を表す。`S` の既定は `NoSupply` で、座標の木を表す。`NoSupply` は値を持たない。型パラメータを省いた `KernelSpec` と `CompiledKernel<T>` では `S` が `NoSupply` になるので、この 2 つは座標の木の型を指す。もう一方の種類の供給を持つのは `DistanceKernel` だけである。
 
 `Gpr::new` は任意の `ModelKernel`、つまり `KernelSpec` と `DistanceKernel<C>` のどちらでも受け付ける。`with_input_transform` を呼べるのは、`PointKernel` を満たすモデル（`KernelSpec` と `DistanceKernel<WithPoints>`）だけである。各スロットには、呼び出しのたびに `DistanceSource` を 1 つ渡す。どの方法で供給を作るかによって、コピーが起きるかどうかが次のように変わる。
 
@@ -513,7 +513,7 @@ ARD のカーネルの葉には `ArdDistance::from_leaf(leaf)` を使う。受�
 
 `cross` は学習点からクエリへの `n × q` のブロック、`square` はクエリどうしの `q × q` のブロックである。距離のモデルでは、`to_kernel()` で `DistanceKernel` のコピーを、`slots()` でそのスロットを取り出せる。`d` と `x` を持つのは `WithPoints` のモデルだけである。
 
-`into_online` を使えば、距離のモデルもオンラインのモデルに変換できる。その `insert` には、スロットごとに、今ある点から新しい点への二乗距離を `n × 1` の列（`point_ids` の順）で渡す。ARD のスロットではこの列を `d` 本渡す。どの列も、上の表のどの供給で作ってもよい。呼び方は、`DistanceOnly` なら `insert(sources, y_new)`、`WithPoints` なら `insert(sources, x_new, y_new)` である。渡した列は学習の正方行列と同じように検査され（`tidy` を指定していれば補正され）、モデルに保持される。`delete(id)` は、保持している二乗距離からその点をその場で取り除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。どちらのモデルも、一度伸びたあとはメモリを確保しない（scalar の正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に伸びる）。例外は、ワーカーが 2 つ以上ある Rayon のプールで大きな削除をする場合で、このときは因子の更新と並んで動くジョブを 1 つ積む。
+`into_online` を使えば、距離のモデルもオンラインのモデルに変換できる。その `insert` には、スロットごとに、今ある点から新しい点への二乗距離を `n × 1` の列（`point_ids` の順）で渡す。ARD のスロットではこの列を `d` 本渡す。どの列も、上の表のどの供給で作ってもよい。呼び方は、`DistanceOnly` なら `insert(sources, y_new)`、`WithPoints` なら `insert(sources, x_new, y_new)` である。渡した列は学習の正方行列と同じように検査され（`tidy` を指定していれば補正され）、モデルに保持される。`delete(id)` は、保持している二乗距離からその点をその場で取り除く。オンラインのモデルは、学習済みのモデルと同じ引数で予測する。どちらのモデルも、保持する領域を一度広げたあとはメモリを確保しない（領域を広げるとき、スカラーのスロットの正方行列は 4 分の 1 ずつ、ARD のスロットは倍々に大きくなる）。例外は、ワーカーが 2 つ以上ある Rayon のプールで大きな削除をする場合である。このときは削除の処理が、因子の更新と並んで動くジョブを 1 つプールに積む。
 
 距離を受け取る疎なモデルでは、誘導点を学習点の添字で指定する。誘導点にする学習点の添字を `inducing` に重複なく並べ、`fit` / `factor` の各供給には、学習点からそれらの誘導点への `n × m` のブロックを渡す（列 `a` が学習点 `inducing[a]` に対応する）。`K_mm` は、このブロックのうち誘導点に当たる行を読む。モデルはブロックを渡された形のまま保持し、ムーブで渡した表はコピーせず、借用した表は 1 回だけコピーする。
 
@@ -521,7 +521,7 @@ ARD のカーネルの葉には `ArdDistance::from_leaf(leaf)` を使う。受�
 
 `into_online` は、ブロックを保持したままオンラインのモデルに変換する。`insert` には、スロットごとに誘導点から新しい点への `m × 1` の二乗距離を渡す。`insert_inducing` では誘導点にする学習点を `PointId` で指定し、学習点からその点への `n × 1` の二乗距離を渡す。渡した値は、保持している組と照合して検査する。誘導点になっている点は、`delete_inducing` で外すまで `delete` できない。
 
-計算量は座標のモデルと少し異なる。座標のモデルは距離の組を `n · d` 個の座標から計算するが、距離のモデルの factor は与えられた `d · n · m` 個の値を読む。そのため ARD のスロットでは、factor の計算量が座標のモデルより大きくなる。一方、勾配と予測の計算量は座標のモデルを上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+計算量は座標のモデルと少し異なる。座標のモデルは距離の組を `n · d` 個の座標から計算するが、距離のモデルの因子分解は与えられた `d · n · m` 個の値を読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルより大きくなる。一方、勾配と予測の計算量は座標のモデルを上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{
@@ -648,7 +648,7 @@ fn _ard_bound(leaf: impl ArdDistanceLeaf, slot: ArdDistance) -> Result<DistanceK
 }
 ```
 
-距離のモデルのほかの使い方も、同じ 4 点で示す。`fit`、`predict` の系統、`sample`、オンラインの `insert` / `delete`、`InvalidDistance` を `match` で受ける処理、`slots()` に現れる ARD のスロット、座標を持つモデルでの入力変換、疎なモデルの保存と読み込みを扱う。
+距離のモデルのほかの使い方も、同じ 4 つの学習点で示す。`fit`、`predict` の系統、`sample`、オンラインの `insert` / `delete`、`InvalidDistance` を `match` で受ける処理、`slots()` に現れる ARD のスロット、座標を持つモデルでの入力変換、疎なモデルの保存と読み込みを扱う。
 
 ```rust
 use gprx::kernel::{
@@ -748,7 +748,7 @@ fn main() -> Result<(), GprError> {
 
 ### 尤度
 
-`GaussianLikelihood::new(noise_variance)` は、観測ノイズの分散 `σn²` を log のパラメータとして持つ。使えるメソッドは `from_log_noise_variance`、`noise_variance`、`log_noise_variance`、`bounds`、`with_bounds`、`num_params`、`get_params`、`set_params` である。`add_noise_diag` はカーネル行列の対角に `σn²` を足し、`noise_grad_diag` はその対角を 1 つのパラメータで微分した値を返す。ノイズの分散が有限でないか正でなければ `InvalidNoiseVariance` になる。正の値でも、ノイズの区間（既定は `(1e-5, 1e5)`）から外れていれば `InvalidInterval` になる。
+`GaussianLikelihood::new(noise_variance)` は、観測ノイズの分散 `σn²` を log のパラメータとして持つ。log の値から作るには `from_log_noise_variance` を使う。値は `noise_variance` と `log_noise_variance` で読み、区間は `bounds` で読んで `with_bounds` で設定する。`num_params`、`get_params`、`set_params` も使える。`add_noise_diag` はカーネル行列の対角に `σn²` を足し、`noise_grad_diag` はその対角を 1 つのパラメータで微分した値を返す。ノイズの分散が有限でないか正でなければ `InvalidNoiseVariance` になる。正の値でも、ノイズの区間（既定は `(1e-5, 1e5)`）から外れていれば `InvalidInterval` になる。
 
 ```rust
 use gprx::{GaussianLikelihood, Interval};
@@ -851,7 +851,7 @@ fn main() -> Result<(), gprx::GprError> {
 | `Fixed` | 探索しない。使えるのは `factor` だけで、`Optimizer` は実装しない | ユニット構造体 |
 | `Adam` | ミニバッチ。`Svgp` 専用 | ミニバッチの節を参照 |
 
-`with_restarts(n, seed)` は、log 空間で一様に選んだ開始点を `n` 個（`NonZeroU32`）追加し、そのなかで最も小さい値を残す。最初の開始点はモデルの `θ` である。提案が区間の外に出たときの扱いは `BoundaryPolicy` で決まる。既定の `BoundaryPolicy::Clamp` は開区間のすぐ内側へ寄せ、`BoundaryPolicy::Periodic` は反対側へ折り返す。
+`with_restarts(n, seed)` は、log 空間で一様に選んだ開始点を `n` 個（`NonZeroU32`）追加する。各開始点から探索した結果のうち、目的関数の値が最も小さいものを残す。最初の開始点はモデルの `θ` である。提案が区間の外に出たときの扱いは `BoundaryPolicy` で決まる。既定の `BoundaryPolicy::Clamp` は開区間のすぐ内側へ寄せ、`BoundaryPolicy::Periodic` は反対側へ折り返す。
 
 `Optimizer::minimize` は `OptResult { params, value, iterations }` を返す。定数 `USES_CHANGE_INDICES` の既定は `false` で、`FastSimulatedAnnealing` は `true` にしている。どの座標が変わったかを報告する自作のソルバも `true` にする。そうすると、`CholeskyBuffer::Retain` のときの学習では、変わったカーネルの葉だけを組み直す。自作のソルバは `Optimizer<P>` を実装して作り、`P` には `Objective`、`Differentiable`、`TwiceDifferentiable` のいずれかを指定する。`IncrementalObjective::value_with_changes` は、渡した添字が変えるカーネルの葉だけを組み直す。添字が空のとき、重複しているとき、範囲外のときは `GprError` になる。
 
@@ -1035,7 +1035,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### パラメータ
 
-`Interval::new(lo, hi)` は、`lo < hi` を満たす有限の開区間を作り、`lo`、`hi`、`contains` で中身を調べられる。エラーの種類は `IntervalError::InvalidBounds` と `OutOfRange` で、`GprError::InvalidInterval` がこのエラーを包む。`BoundedParam::new(value, interval)` は、区間の厳密な内側にある利用者単位の値を持つ。`default_positive(value)` を使うと、区間は `Interval::DEFAULT_POSITIVE` になる。値は `value`、区間は `interval` で読め、`ln` は `log(value)` を返す。`with_value` は区間を保ったまま値を、`with_interval` は値を保ったまま区間を差し替える。カーネルの葉と `GaussianLikelihood` は内部に `BoundedParam` を持つが、呼び出し側はふつう `with_bounds` を通して扱う。
+`Interval::new(lo, hi)` は、`lo < hi` を満たす有限の開区間を作る。区間の中身は `lo`、`hi`、`contains` で調べられる。エラーの種類は `IntervalError::InvalidBounds` と `OutOfRange` で、`GprError::InvalidInterval` がこのエラーを包む。`BoundedParam::new(value, interval)` は、区間の厳密な内側にある利用者単位の値を持つ。`default_positive(value)` を使うと、区間は `Interval::DEFAULT_POSITIVE` になる。`BoundedParam` の値は `value` で、区間は `interval` で取得できる。`ln` は `log(value)` を返す。`with_value` は区間を保ったまま値を、`with_interval` は値を保ったまま区間を差し替える。カーネルの葉と `GaussianLikelihood` は内部に `BoundedParam` を持つが、呼び出し側はふつう `with_bounds` を通して扱う。
 
 ```rust
 use gprx::{BoundedParam, Interval, IntervalError};
@@ -1497,7 +1497,7 @@ fn main() -> Result<(), GprError> {
 | `LoadedDistanceSgpr<C>` | `LoadedSgpr` と同じ名前の 8 つで、中身は `DistanceKernel<C>` を使うモデル |
 | `LoadedDistanceSvgp<C>` | `LoadedSvgp` と同じ名前の 4 つで、中身は `FittedSvgp<_, DistanceKernel<C>>` |
 
-読み込んだ全学習点のモデルは、`Fixed` と `CholeskyBuffer::Retain` の組み合わせになる。ファイルにはソルバが保存されないので、もう一度探索したいときは、`match` で取り出したモデルに `with_optimizer` を呼んでから `refit` する。`save` で因子なしに保存したファイルは、読み込むときに因子分解をやり直す。`save_with_factor` で保存したファイルなら分解し直さず、`f64` のモデルは `L` をメモリマップしたまま使い、`f32` のモデルはコピーして使う。
+読み込んだ全学習点のモデルは、`Fixed` と `CholeskyBuffer::Retain` の組み合わせになる。ファイルにはソルバが保存されないので、もう一度探索したいときは、`match` で取り出したモデルの `with_optimizer` を呼んでから `refit` する。`save` で因子なしに保存したファイルは、読み込むときに因子分解をやり直す。`save_with_factor` で保存したファイルなら分解し直さず、`f64` のモデルは `L` をメモリマップしたまま使い、`f32` のモデルはコピーして使う。
 
 ### エラー
 
@@ -1581,7 +1581,7 @@ fn main() -> Result<(), GprError> {
 
 ## 比較
 
-精度、学習時間、メモリ使用量を他のライブラリと比べた結果は、[English](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.md) | [比較](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.ja.md) にまとめてある。
+精度、学習時間、メモリ使用量を他のライブラリと比べた結果は、[ライブラリの比較](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.ja.md)にまとめてある。英語版は [comparison.md](https://github.com/YUKIKEDA/gprx/blob/main/docs/comparison.md) である。
 
 ## ライセンス
 
