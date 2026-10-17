@@ -173,7 +173,7 @@ flowchart TB
 | `O` | どの最適化器で学習するか | `Lbfgs`（Exact と Sparse の既定）, `NelderMead`, `TrustRegion`, `FastSimulatedAnnealing`, 利用者の `Optimizer`。`factor` だけなら `Fixed`。`Svgp::fit` は `Adam`（`Svgp` の既定は `Fixed`） |
 | `P` | 精度。コンパイル時に決める | `DoublePrecision`（既定）, `SinglePrecision`, `MixedPrecision`（残差の計算は `PromoteStorage` か `ReevaluateKernel`） |
 | `I` | 誘導点 `Z` を固定するか最適化するか | `FixedInducing`（既定。`Z` はパラメータに含めない）, `FreeInducing`（`Z` を `θ` と一緒に最適化する。座標を読むカーネルでだけ使える） |
-| `K` | モデルのカーネルが何を入力として読むか。3 つのモデルで共通（[design §5.1](design.ja.md#51-仕様と評価器精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた二乗距離だけ）, `DistanceKernel<WithPoints>`（与えられた二乗距離と座標） |
+| `K` | モデルのカーネルが何を入力として読むか。3 つのモデルで共通（[design §5.1](design.ja.md#51-spec宣言層-evaluator実行層の分離および精度ジェネリクス)） | `KernelSpec`（既定。座標）, `DistanceKernel<DistanceOnly>`（与えられた二乗距離だけ）, `DistanceKernel<WithPoints>`（与えられた二乗距離と座標） |
 
 ## 6. モデルの状態の移り方
 
@@ -197,7 +197,7 @@ flowchart LR
     D -- "LoadedSvgp::load" --> LV["LoadedSvgp"]
 ```
 
-`DistanceKernel<C>` を使うモデルも同じ順に状態が移り、読み込みには `LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` を使う（[persist-format.ja.md 10 節](persist-format.ja.md#10-与えられた二乗距離のモデル)）。
+`DistanceKernel<C>` を使うモデルも同じ順に状態が移り、読み込みには `LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` を使う（[persist-format.ja.md 10 節](persist-format.ja.md#10-呼び出し側が二乗距離を与えるモデル)）。
 
 読み込んだモデルはそのまま予測に使える。ただし最適化器の型は `Fixed` で、ハイパーパラメータを探索する最適化器は保持していない。もう一度学習したいときは、`LoadedGpr` などの variant から具体的なモデル（`FittedGpr` など）を取り出し、それに対して `with_optimizer` で最適化器を指定し、`refit` を呼ぶ。各 `save` が何を書くかは [persist-format.ja.md](persist-format.ja.md) にまとめてある。
 

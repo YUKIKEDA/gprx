@@ -1397,7 +1397,7 @@ fn main() -> Result<(), GprError> {
 }
 ```
 
-与えられた二乗距離のモデルも、同じ `save` / `save_with_factor` で保存する。保存したファイルには、モデルが保持する学習の `d²`（全学習点のモデルなら下三角、疎なモデルなら `n × m` のブロックと誘導点の添字）と、カーネルのスロットの表も入る。ローダーの型はカーネルの印（`DistanceOnly` か `WithPoints`）で決まり、座標のモデルのファイルや、もう一方の印のファイルを読もうとすると `WrongModel` になる。読み込んだカーネルが持つのは新しいスロットで、保存前の `ScalarDistance` や `ArdDistance` はそのどれにも当たらない。予測では、`slots()`（保存したカーネルでの順）からスロットを取り出し、クエリの供給をそれに結び付ける。形式の詳細は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-与えられた二乗距離のモデル)にある。
+与えられた二乗距離のモデルも、同じ `save` / `save_with_factor` で保存する。保存したファイルには、モデルが保持する学習の `d²`（全学習点のモデルなら下三角、疎なモデルなら `n × m` のブロックと誘導点の添字）と、カーネルのスロットの表も入る。ローダーの型はカーネルの印（`DistanceOnly` か `WithPoints`）で決まり、座標のモデルのファイルや、もう一方の印のファイルを読もうとすると `WrongModel` になる。読み込んだカーネルが持つのは新しいスロットで、保存前の `ScalarDistance` や `ArdDistance` はそのどれにも当たらない。予測では、`slots()`（保存したカーネルでの順）からスロットを取り出し、クエリの供給をそれに結び付ける。形式の詳細は [persist-format.ja.md 10 節](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md#10-呼び出し側が二乗距離を与えるモデル)にある。
 
 ```rust
 use gprx::kernel::{
