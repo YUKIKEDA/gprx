@@ -977,8 +977,8 @@ pub struct OnlineGpr<O = Lbfgs, P: GpScalar = DoublePrecision> {
 4. **オンライン更新**: 1点追加/削除とフル再fitの結果一致、任意インデックス削除、追加削除の繰り返し、PointIdと内部インデックスの整合性(§11の不変条件)
 5. **オンラインのプロパティテスト**: ランダムな insert/delete 列の各段階で incremental == `Gpr<Fixed>::factor`（mean, variance, LML, alpha）。削除順はテスト内のシードつき `rand` でランダム化する
 5b. **オンライン insert の外部照合**: 同じ θ で libgp の `add_pattern` を使った結果と、gprx の predict（平均・観測分散）と NLML を、相対 `1e-8` で照合する。delete の外部 API は無い。`cargo test` はコミット済み JSON を読む（C++ を呼ばない）
-5c. **Sparse の外部照合**: 同じ初期 θ の `Sgpr<Fixed>::factor` と GPyTorch の周辺化 SGPR、`Svgp<Fixed>::factor`（prior `q`）と whitened SVGP を相対 `1e-8`（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
-5d. **Sparse オンラインの外部照合**: 同じ初期 θ の `OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` を、各段階の GPyTorch の周辺化 SGPR（毎回全体を組み立て直す）と相対 `1e-8`（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
+5c. **Sparse の外部照合**: 同じ初期 θ で、`Sgpr<Fixed>::factor` を GPyTorch の周辺化 SGPR と、`Svgp<Fixed>::factor`（prior `q`）を whitened SVGP と、相対 `1e-8` で照合する（平均・Observation・Latent・NLML / ELBO）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
+5d. **Sparse オンラインの外部照合**: 同じ初期 θ で、`OnlineSgpr` の `insert` / `delete` / `insert_inducing` / `delete_inducing` の各段階を、GPyTorch の周辺化 SGPR（毎回全体を組み立て直す）と相対 `1e-8` で照合する（平均・Observation・Latent・NLML）。`cargo test` はコミット済み JSON を読む（Python を呼ばない）
 6. **精度**: f32/f64/混合精度の比較、悪条件行列、反復改良が収束しないときの f64 へのフォールバック
 7. **推論結果**: 既知の小規模GPR実装との比較(mean、潜在分散、観測分散、log marginal likelihood, gradient)。sklearn JSON は数値の第二照合であり、公開 API の契約ではない。アルゴリズムの正本は GPML / Rasmussen
 8. **前処理**: `StandardizeTarget`適用後のpredictが、未標準化モデルと元スケールで一致すること(アフィン変換の閉じた形)
