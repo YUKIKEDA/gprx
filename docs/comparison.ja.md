@@ -135,7 +135,7 @@ nlpd /= m;
 </details>
 <!-- snippets:end -->
 
-比較のコードは、libgp の 2 つの挙動に合わせて書いてある。一つは、`predict` が返す分散にノイズが含まれないことである。もう一つは、点を一括で追加する `add_patterns(x, y)` が列優先の行列を行として読むことである。そのため、この関数が正しく動くのは次元が 1 のときに限られる。
+比較のコードは、libgp の 2 つの挙動を避けるように書いてある。一つは、`predict` が返す分散にノイズが含まれないことである。もう一つは、点を一括で追加する `add_patterns(x, y)` が列優先の行列を行として読むことである。そのため、この関数が正しく動くのは次元が 1 のときに限られる。
 
 ### 機能
 
@@ -172,7 +172,7 @@ nlpd /= m;
 図は表のあとに続く。各図の直前に、その図が何を示すかを書いた。
 
 <!-- bench:begin -->
-測定に使った CPU は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel である。論理 CPU は 16 個、メモリは 47.8 GiB、OS は Windows-11-10.0.26200-SP0 だった。Python のライブラリの版は scikit-learn 1.6.1、gpytorch 1.15.2、GPy 1.14.2、torch 2.14.0、scipy 1.18.1 である。gprx が使う argmin は 0.11.0、libgp はコミット f4a2fb7d を使った。
+測定に使った CPU は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel である。論理 CPU は 16 個、メモリは 47.8 GiB、OS は Windows-11-10.0.26200-SP0 である。Python のライブラリの版は scikit-learn 1.6.1、gpytorch 1.15.2、GPy 1.14.2、torch 2.14.0、scipy 1.18.1 である。gprx が使う argmin は 0.11.0、libgp はコミット f4a2fb7d である。
 
 | ライブラリ | 既定の最適化 | 条件を揃えた最適化 | 探索する量 | 範囲 |
 | --- | --- | --- | --- | --- |
@@ -305,7 +305,7 @@ gprx と GPyTorch のどちらも、Adam を学習率 0.01、バッチ 1024 で�
 
 ### 1 次元の図
 
-この 2 つの図には、Snelson の学習データ 200 点を使う。測定に使った CPU は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel である。論理 CPU は 16 個、メモリは 47.8 GiB、OS は Windows-11-10.0.26200-SP0 だった。ライブラリの版は GPyTorch 1.15.2、GPy 1.14.2、torch 2.14.0、scipy 1.18.1、argmin 0.11.0、libgp f4a2fb7d である。
+この 2 つの図には、Snelson の学習データ 200 点を使う。測定に使った CPU は Intel64 Family 6 Model 191 Stepping 2, GenuineIntel である。論理 CPU は 16 個、メモリは 47.8 GiB、OS は Windows-11-10.0.26200-SP0 である。ライブラリの版は GPyTorch 1.15.2、GPy 1.14.2、torch 2.14.0、scipy 1.18.1、argmin 0.11.0、libgp f4a2fb7d である。
 
 **Snelson のスパース GP**
 

@@ -166,9 +166,9 @@ def machine_line(meta: dict, ja: bool = False) -> str:
         rust = f"gprx が使う argmin は {v['argmin']}、" if v.get("argmin") else ""
         return (
             f"測定に使った CPU は {m['cpu']} である。"
-            f"論理 CPU は {m['logical_cpus']} 個、メモリは {m['memory_gib']} GiB、OS は {m['os']} だった。"
+            f"論理 CPU は {m['logical_cpus']} 個、メモリは {m['memory_gib']} GiB、OS は {m['os']} である。"
             f"Python のライブラリの版は {python} である。"
-            f"{rust}libgp はコミット {v['libgp'][:8]} を使った。"
+            f"{rust}libgp はコミット {v['libgp'][:8]} である。"
         )
     return f"Measured on {m['cpu']} ({m['logical_cpus']} logical CPUs, {m['memory_gib']} GiB, {m['os']}). {libs}; libgp {v['libgp'][:8]}."
 
