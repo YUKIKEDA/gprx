@@ -87,11 +87,11 @@ perf-real-smoke *args:
 perf-real-data:
     uv run --directory compare --group perf python -X utf8 -m perf.real.data --pin
 
-# B1-1 figures, aggregated results, and the README tables from compare/perf/out/real.
+# B1-1 figures, aggregated results, and the comparison doc tables from compare/perf/out/real.
 perf-real-report *args:
     uv run --directory compare --group perf python -X utf8 -m perf.real.report {{args}}
 
-# B1-1 the comparison that the README tables come from (hours).
+# B1-1 the comparison that the comparison doc tables come from (hours).
 # One optimizer (matched). Exact only where one fit stays under about 5 minutes:
 # Snelson, Mauna Loa, yacht, energy. Concrete is the same size class as energy
 # and is not repeated. Wine and larger sets are Sgpr. kin8nm and protein match

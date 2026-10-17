@@ -2,10 +2,11 @@
 keeps: ``docs/bench/summary.json`` (mean and standard error per cell, the
 machine and library versions, every optimizer), the SVG figures, and the
 Markdown tables between ``<!-- bench:begin -->`` and ``<!-- bench:end -->`` in
-both READMEs.
+``docs/comparison.md`` and ``docs/comparison.ja.md``, and the code between
+``<!-- snippets:begin -->`` and ``<!-- snippets:end -->`` in the same two pages.
 
 ```text
-python -m perf.real.report [--no-readme]
+python -m perf.real.report [--no-docs]
 ```
 """
 
@@ -27,7 +28,7 @@ REPO = Path(__file__).resolve().parents[3]
 BENCH = REPO / "docs" / "bench"
 BEGIN, END = "<!-- bench:begin -->", "<!-- bench:end -->"
 SNIPPETS = REPO / "compare" / "perf" / "real" / "snippets"
-READMES = (REPO / "README.md", REPO / "README.ja.md")
+PAGES = (REPO / "docs" / "comparison.md", REPO / "docs" / "comparison.ja.md")
 LIB_ORDER = list(RUNNERS)
 
 
@@ -87,9 +88,9 @@ def fmt(stat: dict | None, digits: int = 4) -> str:
 
 
 _TITLES = {
-    "exact": ("Exact GP", "全学習点を使うモデル"),
-    "sgpr": ("SGPR, 512 inducing points", "誘導点 512 個のモデル"),
-    "svgp": ("SVGP", "ミニバッチのモデル"),
+    "exact": ("Exact GP", "全学習点を使うモデル（Exact GP）"),
+    "sgpr": ("SGPR, 512 inducing points", "誘導点 512 個のモデル（SGPR）"),
+    "svgp": ("SVGP", "ミニバッチで学習するモデル（SVGP）"),
 }
 
 
@@ -110,8 +111,8 @@ def tables(summary: list[dict], ja: bool = False) -> str:
     groups = sorted({(c["model"], c["protocol"]) for c in summary})
     if ja:
         header = (
-            "| データセット | ライブラリ | 測れた分割 | RMSE | NLPD | 95%区間 | 学習 [秒] | "
-            "評価回数 | 反復 | 1回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |"
+            "| データセット | ライブラリ | 分割 | RMSE | NLPD | 95% 区間 | 学習 [秒] | "
+            "評価回数 | 反復回数 | 評価 1 回あたり [ms] | 負の対数周辺尤度 | メモリ [MiB] |"
         )
     else:
         header = (
@@ -141,7 +142,7 @@ def tables(summary: list[dict], ja: bool = False) -> str:
 def optimizer_table(ja: bool = False) -> str:
     if ja:
         lines = [
-            "各マスは、その版のソースから書き写した設定。",
+            "表の各欄には、測定した版の各ライブラリのソースから書き写した設定を載せている。",
             "",
             "| ライブラリ | 既定の最適化 | 条件を揃えた最適化 | 探索する量 | 範囲 |",
             "| --- | --- | --- | --- | --- |",
@@ -161,8 +162,8 @@ def machine_line(meta: dict, ja: bool = False) -> str:
     libs = ", ".join(f"{k} {v[k]}" for k in ("scikit-learn", "gpytorch", "GPy", "torch", "scipy", "argmin") if v.get(k))
     if ja:
         return (
-            f"測定した機械は {m['cpu']}（論理 CPU {m['logical_cpus']}、メモリ {m['memory_gib']} GiB、{m['os']}）。"
-            f"{libs}。libgp {v['libgp'][:8]}。"
+            f"測定には {m['cpu']}（論理 CPU {m['logical_cpus']}、メモリ {m['memory_gib']} GiB、{m['os']}）を使った。"
+            f"ライブラリの版は {libs} で、libgp は {v['libgp'][:8]} である。"
         )
     return f"Measured on {m['cpu']} ({m['logical_cpus']} logical CPUs, {m['memory_gib']} GiB, {m['os']}). {libs}; libgp {v['libgp'][:8]}."
 
@@ -177,10 +178,10 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Snelson has no test points, so that column is empty."),
         ),
         (
-            "予測の誤差（全学習点）",
-            ("列がデータセット。上は RMSE、下は NLPD で、どちらも小さいほど良い。"
-            "点はライブラリ、縦棒は分割ごとのばらつき。"
-            "Snelson にはテスト点が無いので、その列は空。"),
+            "予測の誤差（Exact GP）",
+            ("列はデータセットごとに分かれている。上段が RMSE、下段が NLPD で、どちらも小さいほど良い。"
+            "点の形がライブラリを表し、縦棒は分割をまたいだ標準誤差を表す。"
+            "Snelson にはテスト点が無いので、その列は空になっている。"),
         ),
     ),
     "fit_time_matched.svg": (
@@ -191,9 +192,9 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Compare the seconds only where the counts match."),
         ),
         (
-            "学習の時間（全学習点）",
-            ("上は学習にかかった秒、下は尤度と勾配を一緒に計算した回数。どちらも対数軸。"
-            "秒を比べるときは、下の回数が揃っているかを見る。"),
+            "学習の時間（Exact GP）",
+            ("上段は学習にかかった秒数を、下段はライブラリが尤度とその勾配をまとめて計算した回数を示す。"
+            "どちらの軸も対数目盛りである。秒数は、回数が揃っているところでだけ比べる。"),
         ),
     ),
     "accuracy_sgpr_matched.svg": (
@@ -202,8 +203,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Same reading as the Exact GP error figure. 512 inducing points. RMSE on top, NLPD below.",
         ),
         (
-            "予測の誤差（誘導点 512 個）",
-            "読み方は、全学習点の予測誤差の図と同じ。上は RMSE、下は NLPD。",
+            "予測の誤差（SGPR）",
+            "読み方は Exact GP の誤差の図と同じである。誘導点は 512 個で、上段が RMSE、下段が NLPD である。",
         ),
     ),
     "fit_time_sgpr_matched.svg": (
@@ -212,8 +213,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Same reading as the Exact GP time figure. Seconds on top, likelihood-and-gradient counts below.",
         ),
         (
-            "学習の時間（誘導点 512 個）",
-            "上は秒、下は尤度と勾配の計算回数。どちらも対数軸。",
+            "学習の時間（SGPR）",
+            "読み方は Exact GP の時間の図と同じである。上段が秒数、下段が尤度と勾配をまとめて計算した回数である。",
         ),
     ),
     "accuracy_svgp_matched.svg": (
@@ -223,9 +224,9 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "GPy has no minibatch trainer, so it is absent. RMSE on top, NLPD below."),
         ),
         (
-            "予測の誤差（ミニバッチ）",
-            ("Adam で学習し、学習率 0.01、バッチ 1024、データ 3 周。gprx と GPyTorch で同じ設定。"
-            "GPy にはこの学習が無い。上は RMSE、下は NLPD。"),
+            "予測の誤差（SVGP）",
+            ("どちらのライブラリも、Adam を学習率 0.01、バッチ 1024 で使い、データを 3 周させて学習した。"
+            "GPy にはミニバッチで学習する仕組みが無いので、図に入っていない。上段が RMSE、下段が NLPD である。"),
         ),
     ),
     "fit_time_svgp_matched.svg": (
@@ -234,8 +235,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Seconds on top, Adam updates below. The update count matches, so the seconds are the speed.",
         ),
         (
-            "学習の時間（ミニバッチ）",
-            "上は秒、下は Adam の更新回数。回数は揃っているので、秒の差が速さの差になる。",
+            "学習の時間（SVGP）",
+            "上段が秒数、下段が Adam の更新回数である。更新回数が揃っているので、秒数の差がそのまま速さの差になる。",
         ),
     ),
     "rss_timeline_energy_exact_s0_matched.svg": (
@@ -246,9 +247,10 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "A dotted line, in that library's color, is when training or prediction starts. Split 0."),
         ),
         (
-            "メモリの推移（energy、全学習点）",
-            ("線はプロセス全体の常駐メモリ。横軸はプロセスが始まってからの秒。"
-            "点線は、その色のライブラリが学習または予測を始めた時刻。分割は 0 番。"),
+            "メモリの推移（energy）",
+            ("線はプロセス全体の常駐メモリを表す。横軸は、プロセスが始まってからの秒数である。"
+            "点線はライブラリと同じ色で描いてあり、そのライブラリが学習または予測を始めた時刻を示す。"
+            "図は分割 0 で測ったものである。"),
         ),
     ),
     "rss_timeline_kin40k_sgpr_s0_matched.svg": (
@@ -257,8 +259,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
             "Same reading as the energy memory figure. SGPR with 512 inducing points, split 0.",
         ),
         (
-            "メモリの推移（kin40k、誘導点 512 個）",
-            "読み方は energy のメモリの図と同じ。分割は 0 番。",
+            "メモリの推移（kin40k）",
+            "読み方は energy のメモリの図と同じである。モデルは誘導点 512 個の SGPR で、図は分割 0 で測ったものである。",
         ),
     ),
     "curve_maunaloa_matched.svg": (
@@ -269,8 +271,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "Mauna Loa の予測",
-            ("1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。"
-            "塗った点は学習データ、抜き点はテストデータ。"),
+            ("ライブラリごとに 1 枚の枠を使う。線は予測の平均を、帯は 95% 区間を表す。"
+            "塗りつぶした点は学習データで、白抜きの点は学習に使わずに残した点である。"),
         ),
     ),
     "curve_snelson_matched.svg": (
@@ -281,7 +283,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "Snelson の予測",
-            "1 枚が 1 ライブラリ。線が予測の平均、帯が 95% 区間。点は学習データ。テスト用の点は無い。",
+            ("ライブラリごとに 1 枚の枠を使う。線は予測の平均を、帯は 95% 区間を表す。"
+            "点は学習データで、学習に使わずに残した点は無い。"),
         ),
     ),
 }
@@ -289,7 +292,8 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
 
 def figures_markdown(names: list[str], ja: bool = False) -> str:
     intro = (
-        "点の色と形はどの図でも同じ。青丸が gprx、橙の四角が scikit-learn、緑の三角が GPyTorch、黄の菱形が GPy。"
+        "点の色と形は、どの図でも同じライブラリを表す。青丸が gprx、橙の四角が scikit-learn、"
+        "緑の三角が GPyTorch、黄の菱形が GPy である。"
         if ja
         else "The marker is the same library in every figure: a blue circle is gprx, an orange square is "
         "scikit-learn, a green triangle is GPyTorch, and a yellow diamond is GPy."
@@ -298,10 +302,10 @@ def figures_markdown(names: list[str], ja: bool = False) -> str:
     for name in names:
         pair = _CAPTIONS.get(name)
         if pair is None:
-            blocks += [f"![{name}](docs/bench/{name})", ""]
+            blocks += [f"![{name}](bench/{name})", ""]
             continue
         title, body = pair[1 if ja else 0]
-        blocks += [f"**{title}**", "", body, "", f"![{title}](docs/bench/{name})", ""]
+        blocks += [f"**{title}**", "", body, "", f"![{title}](bench/{name})", ""]
     return "\n".join(blocks).rstrip()
 
 
@@ -318,13 +322,13 @@ def bench_body(meta: dict, summary: list[dict], figures: list[str], ja: bool = F
     )
 
 
-def splice(readme: Path, body: str, begin: str = BEGIN, end: str = END) -> bool:
-    text = readme.read_text(encoding="utf-8")
+def splice(page: Path, body: str, begin: str = BEGIN, end: str = END) -> bool:
+    text = page.read_text(encoding="utf-8")
     if begin not in text or end not in text:
         return False
     head, rest = text.split(begin, 1)
     _, tail = rest.split(end, 1)
-    readme.write_text(f"{head}{begin}\n{body}\n{end}{tail}", encoding="utf-8", newline="")
+    page.write_text(f"{head}{begin}\n{body}\n{end}{tail}", encoding="utf-8", newline="")
     return True
 
 
@@ -378,13 +382,13 @@ def main(argv: list[str]) -> int:
                 path = None
             if path:
                 figures.append(path.name)
-    if "--no-readme" not in argv:
-        for readme in READMES:
-            ja = readme.name == "README.ja.md"
-            done = splice(readme, bench_body(meta, summary, figures, ja)) and splice(
-                readme, snippets_block(), "<!-- snippets:begin -->", "<!-- snippets:end -->"
+    if "--no-docs" not in argv:
+        for page in PAGES:
+            ja = page.name == "comparison.ja.md"
+            done = splice(page, bench_body(meta, summary, figures, ja)) and splice(
+                page, snippets_block(), "<!-- snippets:begin -->", "<!-- snippets:end -->"
             )
-            print(readme.name, "updated" if done else "no markers, left as is")
+            print(page.name, "updated" if done else "no markers, left as is")
     print(f"wrote {BENCH / 'summary.json'} and {len(figures)} figures")
     return 0
 
