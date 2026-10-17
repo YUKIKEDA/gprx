@@ -163,7 +163,7 @@ Exact GP and SGPR (512 inducing points) use L-BFGS for at most 100 iterations. T
 
 Exact GP is Snelson, Mauna Loa, yacht, and energy. SGPR is wine, power plant, and naval (20 splits), kin40k (5 splits), and 3droad and song (1 split). The minibatch model is kin40k, 3droad, song, and HouseElectric (1 split each).
 
-RMSE is the prediction error and NLPD is the log loss of the predictive distribution; lower is better. The 95% column is the fraction of test points inside that interval. Fit seconds are the timed training. Evaluations count a combined likelihood-and-gradient call. The iteration column is the optimizer's own count, and the gprx rows are blank. Milliseconds per evaluation are the median of fit time divided by the evaluation count. NLML is the negative log marginal likelihood at the end of training. Memory is the high point of the whole process tree's resident set.
+RMSE is the prediction error and NLPD is the log loss of the predictive distribution; lower is better. The 95% column is the fraction of test points inside that interval. Fit seconds are the timed training. Evaluations count a combined likelihood-and-gradient call. The iteration column is the optimizer's own count, and the gprx rows show N/A. Milliseconds per evaluation are the median of fit time divided by the evaluation count. NLML is the negative log marginal likelihood at the end of training. Memory is the high point of the whole process tree's resident set.
 
 Treat a gap in fit seconds as a difference in speed only where the evaluation counts match.
 

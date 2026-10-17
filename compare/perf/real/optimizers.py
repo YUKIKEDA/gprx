@@ -73,6 +73,58 @@ OPTIMIZERS: dict[str, dict[str, str]] = {
     },
 }
 
+LBFGSB_MATCHED_JA = (
+    "scipy の L-BFGS-B。maxiter 100、gtol sqrt(eps)、ftol 0、maxcor 10。"
+    "目的関数と勾配はそのライブラリ自身のものを使う"
+)
+
+#: The ``native``, ``matched``, ``space`` and ``bounds`` of ``OPTIMIZERS``, in
+#: Japanese, for ``docs/comparison.ja.md``. The settings are the same.
+OPTIMIZERS_JA: dict[str, dict[str, str]] = {
+    "gprx": {
+        "native": "argmin 0.11 の LBFGS と MoreThuente の直線探索。履歴の長さ 10、反復は最大 100 回、"
+        "勾配ノルムの許容値 sqrt(eps)",
+        "matched": "既定と同じ呼び出し。gprx の既定値が、揃えた設定とすでに一致している",
+        "space": "各区間の中での log θ のロジット。探索に制約はかからない",
+        "bounds": "ℓ、信号の分散、ノイズの分散のそれぞれに (1e-5, 1e5)",
+    },
+    "sklearn": {
+        "native": "scipy minimize の L-BFGS-B を optimizer='fmin_l_bfgs_b' で呼ぶ。設定は scipy の既定値"
+        "（maxiter 15000、ftol 2.2e-9、gtol 1e-5、maxcor 10、maxls 20）",
+        "matched": LBFGSB_MATCHED_JA,
+        "space": "log θ",
+        "bounds": "ℓ、定数カーネルの値、ノイズの大きさのそれぞれに (1e-5, 1e5)（カーネルの既定値）",
+    },
+    "gpytorch": {
+        "native": "torch.optim.Adam、学習率 0.1、50 ステップ（Exact GP のチュートリアルの設定。"
+        "GPyTorch には既定の最適化器が無い）",
+        "matched": LBFGSB_MATCHED_JA + "。勾配は -mll × n を autograd で微分して求める",
+        "space": "softplus を通す前の生のパラメータ",
+        "bounds": "ノイズは 1e-5 以上（この比較で設定した。GPyTorch の既定は 1e-4）。"
+        "ℓ と outputscale は正であることだけ",
+    },
+    "gpy": {
+        "native": "model.optimize()。paramz の opt_lbfgsb が scipy の fmin_l_bfgs_b を "
+        "maxfun = maxiter = 1000、factr 1e7、pgtol 1e-5 で呼ぶ",
+        "matched": LBFGSB_MATCHED_JA,
+        "space": "各パラメータの softplus（Logexp）",
+        "bounds": "正であることだけ。上限は無い",
+    },
+    "libgp": {
+        "native": "RProp（resilient backpropagation）、100 回反復、eps_stop 0、Delta0 0.1、"
+        "Deltamin 1e-6、Deltamax 50、eta- 0.5、eta+ 1.2。途中で尤度が最も高かった値を残す",
+        "matched": "対象外。libgp の最適化器は RProp と CG だけで、RProp は勾配の許容値を受け取らない",
+        "space": "log ℓ、log sf、log sn（分散ではなく、振幅と標準偏差）",
+        "bounds": "なし",
+    },
+    "friedrich": {
+        "native": "対象外。ARD カーネルが無い",
+        "matched": "対象外。ARD カーネルが無い",
+        "space": "-",
+        "bounds": "-",
+    },
+}
+
 PY_PACKAGES = ("numpy", "scipy", "scikit-learn", "torch", "gpytorch", "GPy", "paramz")
 
 

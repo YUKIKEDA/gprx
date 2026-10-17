@@ -22,7 +22,7 @@ from . import plot
 from .curves import CURVES
 from .data import OUT
 from .libs import RUNNERS
-from .optimizers import OPTIMIZERS
+from .optimizers import OPTIMIZERS, OPTIMIZERS_JA
 
 REPO = Path(__file__).resolve().parents[3]
 BENCH = REPO / "docs" / "bench"
@@ -153,14 +153,18 @@ def optimizer_table(ja: bool = False) -> str:
             "| --- | --- | --- | --- | --- |",
         ]
     for lib, o in OPTIMIZERS.items():
+        if ja:
+            o = OPTIMIZERS_JA[lib]
         lines.append(f"| {lib} | {o['native']} | {o['matched']} | {o['space']} | {o['bounds']} |")
     return "\n".join(lines)
 
 
 def machine_line(meta: dict, ja: bool = False) -> str:
     m, v = meta["machine"], meta["versions"]
-    libs = ", ".join(f"{k} {v[k]}" for k in ("scikit-learn", "gpytorch", "GPy", "torch", "scipy", "argmin") if v.get(k))
+    names = ("scikit-learn", "gpytorch", "GPy", "torch", "scipy", "argmin")
+    libs = ", ".join(f"{k} {v[k]}" for k in names if v.get(k))
     if ja:
+        libs = "、".join(f"{k} {v[k]}" for k in names if v.get(k))
         return (
             f"測定には {m['cpu']}（論理 CPU {m['logical_cpus']}、メモリ {m['memory_gib']} GiB、{m['os']}）を使った。"
             f"ライブラリの版は {libs} で、libgp は {v['libgp'][:8]} である。"
@@ -180,7 +184,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         (
             "予測の誤差（Exact GP）",
             ("列はデータセットごとに分かれている。上段が RMSE、下段が NLPD で、どちらも小さいほど良い。"
-            "点の形がライブラリを表し、縦棒は分割をまたいだ標準誤差を表す。"
+            "点の形がライブラリを表し、縦棒は分割ごとの値から求めた標準誤差を表す。"
             "Snelson にはテスト点が無いので、その列は空になっている。"),
         ),
     ),
@@ -225,7 +229,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         ),
         (
             "予測の誤差（SVGP）",
-            ("どちらのライブラリも、Adam を学習率 0.01、バッチ 1024 で使い、データを 3 周させて学習した。"
+            ("gprx と GPyTorch のどちらも、Adam を学習率 0.01、バッチ 1024 で使い、データを 3 周させて学習した。"
             "GPy にはミニバッチで学習する仕組みが無いので、図に入っていない。上段が RMSE、下段が NLPD である。"),
         ),
     ),
@@ -249,7 +253,7 @@ _CAPTIONS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
         (
             "メモリの推移（energy）",
             ("線はプロセス全体の常駐メモリを表す。横軸は、プロセスが始まってからの秒数である。"
-            "点線はライブラリと同じ色で描いてあり、そのライブラリが学習または予測を始めた時刻を示す。"
+            "点線は各ライブラリの色で描いてあり、そのライブラリが学習または予測を始めた時刻を示す。"
             "図は分割 0 で測ったものである。"),
         ),
     ),
