@@ -1,4 +1,4 @@
-"""SVG figures for the README from ``out/real/results.json`` and the RSS
+"""SVG figures for the comparison doc from ``out/real/results.json`` and the RSS
 timelines (``--timeline``).
 
 ```text
@@ -8,7 +8,7 @@ python -m perf.real.plot [--out DIR] [--protocol native|matched] [--timeline-cas
 Palette: the validated categorical order (blue, orange, aqua, yellow,
 magenta) on the light chart surface. Three of those fall under 3:1 contrast
 there, so every mark also has its own marker shape, the legend is always
-present, and the README carries the numbers as tables.
+present, and the comparison doc carries the numbers as tables.
 """
 
 from __future__ import annotations
@@ -103,7 +103,7 @@ def _table(rows: list[dict], protocol: str, model: str = "exact") -> dict[str, d
     return out
 
 
-#: Every README figure uses this canvas. More columns share the width; they do
+#: Every comparison figure uses this canvas. More columns share the width; they do
 #: not change the file's aspect ratio. 12.2 in is the previous six-column
 #: chart, the widest of the set, so that chart does not get narrower.
 FIG_W = 12.2

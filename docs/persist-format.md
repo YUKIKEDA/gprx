@@ -100,7 +100,7 @@ Floating-point numbers are written in the shortest form that reads back to the s
 | `inducing_ids`, `next_inducing_id` | Added, required for `online_sgpr`, absent otherwise. `point_ids` and `next_point_id` are also required for `online_sgpr` |
 | `distance` | Added for a `DistanceKernel` model, absent otherwise. A sparse model's also holds `inducing` (§10) |
 
-`precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, same kernel, transforms, and 2 inducing points), with only the keys that differ from §3 shown in full:
+`precision`, `residual`, `math`, `kernel`, `likelihood`, and the four transform keys have the same form as in §3. An example (`svgp`, the data and transforms of §3, an RBF kernel alone, and 2 inducing points), with every key `save` writes. It differs from §3 in the values of `model`, `m`, `kernel`, and `jitter`, and in having no `has_factor`, `factor_kind`, or `distance_cache`:
 
 ```json
 {

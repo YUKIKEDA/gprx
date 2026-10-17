@@ -81,9 +81,9 @@ Gemini inspects the Japanese prose. The pages are:
 - `docs/persist-format.ja.md`
 - `docs/architecture.ja.md`
 
-The procedure is `.agents/skills/natural-japanese/SKILL.md` in score mode (`references/diagnose.md`). Gemini does not rewrite the pages in that inspection.
+The procedure is `.agents/skills/natural-japanese/SKILL.md` in score mode (`references/diagnose.md`), run through the Antigravity CLI with a Gemini model (`agy -p <prompt> --model gemini-3.8-flash-high`). The Gemini CLI is retired and is not this check. Gemini does not rewrite the pages in that inspection. When Gemini cannot run (its quota is exhausted), an agent that did not edit the page runs the same procedure with the same prompt, and its findings are judged as Gemini's are (the owner, 2026-10-17, when the quota ran out before the 0.2.0 publish).
 
-The agent that edited a page does not inspect, score, or rewrite that Japanese. A reading by that agent is not this check. Do not leave a page as a gloss of the English. Whether it is a gloss is a Gemini finding. `docs/design.ja.md` gets the same inspection.
+The agent that edited a page does not inspect, score, or rewrite that Japanese. A reading by that agent is not this check. Do not leave a page as a gloss of the English. Whether it is a gloss is a Gemini finding. `docs/design.ja.md` gets the same inspection, with one exception: it is not failed for being a gloss. `docs/design.md` carries the same specification in full, so the two correspond paragraph by paragraph and sentence by sentence by design, and a reader compares them that way. Its inspection is judged by the score, the vocabulary, and the sentences reported as unnatural (the owner, 2026-10-17, when the inspection before the 0.2.0 publish judged every Japanese page a gloss).
 
 ### Vocabulary
 
