@@ -20,7 +20,7 @@ Order:
 4. What a caller needs in order to make that call
 5. Choosing a model
 6. How-to, one subsection per task
-7. One link to the API reference on docs.rs (`https://docs.rs/gprx`)
+7. A link to the API reference on docs.rs (`https://docs.rs/gprx`), with links to its module entry points
 8. One link to the comparison doc
 9. License
 
