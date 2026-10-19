@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491)) is done: 0.2.0 is on crates.io (tag `v0.2.0`). C3-3 ([#535](https://github.com/YUKIKEDA/gprx/issues/535)) is open: the workflows on `actions/checkout` for Node.js 24 and on Ubuntu 26.04.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491)) is done: 0.2.0 is on crates.io (tag `v0.2.0`). C3-3 ([#535](https://github.com/YUKIKEDA/gprx/issues/535)) is done: the workflows run on `actions/checkout` v7 (Node.js 24) and CI passed on Ubuntu 26.04.
 
 ## Dependencies
 
@@ -251,7 +251,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | --- | --- | --- | --- | --- |
 | C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | done |
 | C3-2 | Task | A manual `Release` workflow: checks, dated changelog, tag, crates.io Trusted Publishing, GitHub Release | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | done |
-| C3-3 | Task | Workflows on `actions/checkout` for Node.js 24 and checked on Ubuntu 26.04 | [#535](https://github.com/YUKIKEDA/gprx/issues/535) | open |
+| C3-3 | Task | Workflows on `actions/checkout` for Node.js 24 and checked on Ubuntu 26.04 | [#535](https://github.com/YUKIKEDA/gprx/issues/535) | done |
 
 ## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
 

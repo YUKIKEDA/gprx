@@ -21,6 +21,8 @@ A human runs the `Release` workflow from the Actions tab on `main`, with the ver
 
 Do not create the tag or the Release by hand. If `cargo publish` fails after the tag is pushed, delete the tag and the release branch, fix the cause, and run the workflow again.
 
+After the run, read its annotations. A deprecation (an action's Node.js version, a runner image) is an Issue and a roadmap row before the next release, not a note left in the run. The 0.2.0 run warned about `actions/checkout@v4` on Node.js 20 and `ubuntu-latest` moving to Ubuntu 26.04; both were fixed without a Release run to show it (#535), so the next run is the one that confirms no warning remains.
+
 ## Before the `Release` workflow
 
 All of the following are true for the `main` commit it will run on. A failure in the reader check blocks the workflow.
