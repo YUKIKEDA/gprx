@@ -504,7 +504,8 @@ impl ArdDistance {
 
     /// Binds copies of `d2`, one table per dimension, to this slot: the
     /// copies are then handled as [`Self::from_vecs`], so an `f64` model
-    /// keeps `d · n²` values. [`Self::borrow`] fits without the copy.
+    /// keeps `d · n²` values. [`Self::borrow`] packs the tables straight into
+    /// the model's triangles instead, without that dense copy.
     ///
     /// # Examples
     ///
@@ -1195,8 +1196,8 @@ pub trait DistanceFill: Send + Sync {
 /// | Source | Copy |
 /// | --- | --- |
 /// | `from_vec(d2)` / `from_vecs(blocks)` | moved into the call. An `f64` model keeps the tables as its store, so a fit copies nothing, and an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2` (an ARD table that [`Self::tidy`] repairs is packed instead). An `f32` model casts them into a buffer of its own, packed for ARD; a [`MixedPrecision`](crate::MixedPrecision) model keeps the `f64` tables and adds that cast |
-/// | `from_slice(d2)` / `from_slices(blocks)` | copied at the call, then handled as `from_vec` / `from_vecs`: an `f64` model keeps the copy (`d · n²` for an ARD slot). `borrow` fits without that copy |
-/// | `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by a fit (an ARD square straight into its packed triangles) |
+/// | `from_slice(d2)` / `from_slices(blocks)` | copied once at the call, then handled as `from_vec` / `from_vecs`: an `f64` model keeps that copy as its store, which for an ARD slot is `d · n²` values |
+/// | `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model. A fit copies it once into the model's store: a scalar table as it is, as many values as `from_slice`; an ARD square straight into its packed triangles, without the dense `d · n²` copy of `from_slices` (a table that [`Self::tidy`] repairs is copied first, to repair it) |
 /// | `fill(&filler)` | written by [`DistanceFill::fill_column`]; a fit fills the model's store once, a prediction fills scratch |
 ///
 /// Tables are column-major: the pair `(i, j)` is at `i + j * n_rows`. A

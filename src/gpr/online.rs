@@ -520,10 +520,17 @@ where
     /// The last remaining point cannot be deleted.
     ///
     /// A model on supplied distances removes the point from the training
-    /// squares it keeps, in place. Once the model has grown, neither an
-    /// insert nor a delete allocates, except that a large delete on a Rayon
-    /// pool of more than one worker queues one job beside the factor's
-    /// update.
+    /// squares it keeps, in place. Once the model has grown, what a change
+    /// allocates depends on the precision, as measured on one Rayon worker:
+    ///
+    /// | Precision | `insert` | `delete` |
+    /// | --- | --- | --- |
+    /// | [`DoublePrecision`](crate::DoublePrecision) | nothing | nothing |
+    /// | [`SinglePrecision`](crate::SinglePrecision), [`MixedPrecision`](crate::MixedPrecision) | one allocation | two allocations |
+    ///
+    /// Neither allocates more than the same model on coordinates. On a
+    /// Rayon pool of more than one worker, a large delete also queues one
+    /// job beside the factor's update.
     ///
     /// # Errors
     ///

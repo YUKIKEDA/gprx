@@ -3,12 +3,23 @@
 //! Built-in leaves are enum arms. User distance leaves implement [`KernelTerm`]
 //! and enter the tree as [`KernelSpec::Custom`].
 //!
-//! Each built-in leaf stores its positive parameters as `log`. `new` takes
+//! Each built-in leaf keeps its positive parameters in user units, each
+//! inside an open [`Interval`](crate::Interval) (default
+//! [`Interval::DEFAULT_POSITIVE`](crate::Interval::DEFAULT_POSITIVE),
+//! `(1e-5, 1e5)`), and gives the optimizer `θ = log(value)`. `new` takes
 //! user units, and the `from_log_*` constructors (`from_log` on
-//! [`PeriodicKernel`] and [`RationalQuadraticKernel`]) take the optimizer
-//! coordinate. `bounds` / `with_bounds` use an open [`Interval`](crate::Interval)
-//! (default [`Interval::DEFAULT_POSITIVE`](crate::Interval::DEFAULT_POSITIVE),
-//! `(1e-5, 1e5)`).
+//! [`PeriodicKernel`] and [`RationalQuadraticKernel`]) take `θ`.
+//!
+//! The interval setters differ by leaf. A leaf with one parameter
+//! ([`RbfKernel`], [`MaternKernel`], [`ConstantKernel`], [`LinearKernel`],
+//! [`WhiteKernel`]) has `bounds()` and `with_bounds(interval)`.
+//! [`PeriodicKernel`] has `lengthscale_bounds()` / `period_bounds()` and
+//! [`RationalQuadraticKernel`] has `lengthscale_bounds()` / `alpha_bounds()`,
+//! each with `with_bounds(lengthscale, other)`. An ARD leaf sets one interval
+//! on every `ℓ_d` with `with_bounds(interval)` ([`RbfArdKernel`],
+//! [`MaternArdKernel`]) or `with_bounds(lengthscale, alpha)`
+//! ([`RationalQuadraticArdKernel`], which also has `alpha_bounds()`). No
+//! leaf with two parameters, and no ARD leaf, has a plain `bounds()`.
 //!
 //! | Leaf | Construct | Parameters |
 //! | --- | --- | --- |
@@ -47,12 +58,18 @@
 //! indices of the inducing points of [`Sgpr`](crate::Sgpr) /
 //! [`Svgp`](crate::Svgp):
 //!
-//! | Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
+//! | Model | `fit` / `factor` | `predict` family | `predict_covariance` and `sample` |
 //! | --- | --- | --- | --- |
 //! | `Gpr`, [`DistanceOnly`] | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
 //! | `Gpr`, [`WithPoints`] | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
 //! | `Sgpr` / `Svgp`, [`DistanceOnly`] | `(sources, n, y, inducing)` | `(sources, q)` | `(cross, square, q)` |
 //! | `Sgpr` / `Svgp`, [`WithPoints`] | `(sources, n, x, n_cols, y, inducing)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+//!
+//! `sample` takes `n_draws, seed` after the listed arguments. A `_with`
+//! method (`predict_with`, `predict_covariance_with`, `sample_with`) adds a
+//! [`PredictOptions`](crate::PredictOptions) after them, before
+//! `n_draws, seed` for `sample_with`, and an `_into` method ends with its
+//! output buffer.
 //!
 //! A training source of `Gpr` is the `n × n` square among the training
 //! points; one of `Sgpr` / `Svgp` is the `n × m` block from the training
