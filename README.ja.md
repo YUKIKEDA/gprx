@@ -38,7 +38,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `x` には、`n_rows` 個の点と `n_cols` 個の特徴を列優先で並べた `f64` を渡す。`y` の長さは `n_rows` にそろえる。入力が空のとき、長さが `n_rows * n_cols` と合わないとき、`NaN` や `Inf` が混じっているときは、パニックせずに `GprError` を返す。
 
-メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` のエラーになり、コンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら、値が持つ型パラメータを書く。既定の型パラメータのモデルなら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったモデルなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
+メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` のエラーになり、コンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら、値が持つ型パラメータを書く。型パラメータが既定のモデルなら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったモデルなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
 
 ## モデルの選び方
 
@@ -84,7 +84,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 特徴ごとに表を分ける `ArdDistance`、座標を読むカーネルの葉との組み合わせ（`WithPoints`）、疎なモデルに渡す引数は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc で説明している。列を必要になったときに埋める `fill` の例は [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) に、カーネルの組み合わせ方の例は [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) の rustdoc にある。
 
-疎なモデル（`Sgpr` と `Svgp`）では、計算量が座標のモデルと少し異なる。座標のモデルは距離の組を `n · d` 個の座標から計算するが、距離のモデルの因子分解は与えられた `d · n · m` 個の値を読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルより大きくなる。一方、勾配と予測の計算量は座標のモデルを上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+`Sgpr` と `Svgp` の因子分解は、座標のモデルなら `n · d` 個の座標から計算する距離の組を、与えられた `d · n · m` 個の値として読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルの因子分解より大きくなる。一方、勾配と予測の計算量は、座標のモデルの計算量を上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
