@@ -85,7 +85,9 @@ impl NelderMead {
         Ok(self)
     }
 
-    /// Adds `n` extra log-uniform starts (`n ≥ 1`) and keeps the lowest NLML.
+    /// Adds `n` extra starts (`n ≥ 1`) and keeps the lowest NLML. Each extra
+    /// start is drawn log-uniform in each interval with `lo > 0` and uniform
+    /// in any other.
     ///
     /// The first start is the model `θ`. Failed extra starts are discarded.
     /// The default trainer has no restarts and no seed.

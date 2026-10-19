@@ -120,7 +120,9 @@ impl TrustRegion {
         Ok(self)
     }
 
-    /// Adds `n` extra log-uniform starts (`n ≥ 1`) and keeps the lowest NLML.
+    /// Adds `n` extra starts (`n ≥ 1`) and keeps the lowest NLML. Each extra
+    /// start is drawn log-uniform in each interval with `lo > 0` and uniform
+    /// in any other.
     ///
     /// See the example on [`Self::new`].
     pub fn with_restarts(mut self, n: NonZeroU32, seed: u64) -> Self {

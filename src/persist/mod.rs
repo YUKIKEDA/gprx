@@ -12,9 +12,14 @@
 //! [`PersistRegistry`].
 //!
 //! A load returns an enum with one variant per precision (and, for the
-//! models that update online, per factor kind). Every variant's model is
-//! [`Fixed`]; call `with_optimizer` on the matched model,
-//! then `refit`, to search again.
+//! models that update online, per factor kind). The models of the GPR and
+//! SGPR loaders carry [`Fixed`]; an SVGP model has no optimizer parameter.
+//! Only a [`LoadedGpr`] or [`LoadedDistanceGpr`] model searches again: call
+//! `with_optimizer` on the matched model, then `refit`. A loaded SGPR or SVGP
+//! model, online or not, has no `with_optimizer` and no search: to train
+//! again, give its `kernel()` (`to_kernel()` on supplied distances) and
+//! `likelihood()` to a new [`Sgpr`](crate::Sgpr) or [`Svgp`](crate::Svgp)
+//! with the training data.
 //!
 //! | Enum | Variants |
 //! | --- | --- |

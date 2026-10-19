@@ -4,7 +4,8 @@
 //! and enter the tree as [`KernelSpec::Custom`].
 //!
 //! Each built-in leaf stores its positive parameters as `log`. `new` takes
-//! user units, and the `from_log_*` constructors take the optimizer
+//! user units, and the `from_log_*` constructors (`from_log` on
+//! [`PeriodicKernel`] and [`RationalQuadraticKernel`]) take the optimizer
 //! coordinate. `bounds` / `with_bounds` use an open [`Interval`](crate::Interval)
 //! (default [`Interval::DEFAULT_POSITIVE`](crate::Interval::DEFAULT_POSITIVE),
 //! `(1e-5, 1e5)`).
