@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491), 0.2.0) is open: the change that publishes 0.2.0, then the checks on its merge commit, the tag, and `cargo publish`.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491)) is done: 0.2.0 is on crates.io (tag `v0.2.0`). C3-3 ([#535](https://github.com/YUKIKEDA/gprx/issues/535)) is open: the workflows on `actions/checkout` for Node.js 24 and on Ubuntu 26.04.
 
 ## Dependencies
 
@@ -28,6 +28,7 @@ C1-7 → C2-1
 D1-1 → D1-2 → D1-3 → D1-3a → D1-3b → D1-3c → D1-4 → D1-5 → D1-5a → D1-6
 D1-6 → D2-1 → D2-2 → D2-3 → D2-4 → D2-5 → C3-1
 C3-2 → C3-1 (publish)
+C3-2 → C3-3
 R8-1 → R8-2
 R8-2 → R8-3
 R8-3 → R8-4
@@ -213,7 +214,7 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 | R8-1 | Bug | OnlineSgpr inducing insert / delete use ADR 0005's incremental update | [#520](https://github.com/YUKIKEDA/gprx/issues/520) | done |
 | R8-2 | Bug | OnlineSgpr `X` insert / delete from a `K_mm` factor with a pivot below the threshold match `factor` | [#525](https://github.com/YUKIKEDA/gprx/issues/525) | done |
 | R8-3 | Bug | f32 OnlineSgpr X rank-1 updates match factor at a well-conditioned K_mm | [#527](https://github.com/YUKIKEDA/gprx/issues/527) | done |
-| R8-4 | Bug | OnlineSgpr X steps stay rank-1 for smooth ill-conditioned K_mm (benchmark regression of R8-2) | [#530](https://github.com/YUKIKEDA/gprx/issues/530) | open |
+| R8-4 | Bug | OnlineSgpr X steps stay rank-1 for smooth ill-conditioned K_mm (benchmark regression of R8-2) | [#530](https://github.com/YUKIKEDA/gprx/issues/530) | done |
 
 ## B (real-dataset comparison)
 
@@ -248,8 +249,9 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | open |
-| C3-2 | Task | A manual `Release` workflow: checks, dated changelog, tag, crates.io Trusted Publishing, GitHub Release | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | open |
+| C3-1 | Task | Publish 0.2.0 with a changelog of what breaks 0.1.0 | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | done |
+| C3-2 | Task | A manual `Release` workflow: checks, dated changelog, tag, crates.io Trusted Publishing, GitHub Release | [#491](https://github.com/YUKIKEDA/gprx/issues/491) | done |
+| C3-3 | Task | Workflows on `actions/checkout` for Node.js 24 and checked on Ubuntu 26.04 | [#535](https://github.com/YUKIKEDA/gprx/issues/535) | open |
 
 ## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
 
