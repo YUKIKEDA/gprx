@@ -38,7 +38,7 @@ Same program: `cargo run --example fit_predict`.
 
 `x` is column-major `f64` with `n_rows` points and `n_cols` features, and `y` has `n_rows` values. Empty input, a slice whose length is not `n_rows * n_cols`, and `NaN` or `Inf` are a `GprError`, not a panic.
 
-Call a model's methods on the value (`fitted.predict(..)`). A call by the type's path without its parameters, such as `FittedGpr::predict(&fitted, ..)`, does not compile (`E0034`), because the models on supplied distances have methods of the same names. Write `<FittedGpr>::predict(&fitted, ..)` instead.
+Call a model's methods on the value (`fitted.predict(..)`). A call by the type's path without its parameters, such as `FittedGpr::predict(&fitted, ..)`, does not compile (`E0034`), because the models on supplied distances have methods of the same names. Name the type parameters the value has instead: `<FittedGpr>::predict(&fitted, ..)` for a model with the default parameters, and `<FittedGpr<Fixed>>::predict(&frozen, ..)` for one from `factor`.
 
 ## Choose a model
 
@@ -83,6 +83,8 @@ fn main() -> Result<(), gprx::GprError> {
 Pass a kernel leaf to `kernel` on a `ScalarDistance` slot, and the kernel it returns reads squared distances you computed, such as a geodesic or graph distance, instead of coordinates. The squared-distance tables are column-major. Every value must be finite and non-negative, and a training table symmetric with a zero diagonal, or the call returns `GprError::InvalidDistance`. `tidy(rel_tol)` on the `DistanceSource` that `from_vec` or `borrow` returns repairs a table that rounding left slightly off.
 
 The rustdoc of [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) covers one table per feature (`ArdDistance`), mixing distances with coordinates (`WithPoints`), and the arguments of the sparse models. [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) shows filling columns on demand (`fill`), and [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) shows how the kernels combine.
+
+The factor of `Sgpr` or `Svgp` reads the `d · n · m` supplied values that a coordinate model computes from `n · d` coordinates, so for an ARD slot it costs more than the coordinate factor. The gradient and the predictions cost no more ([design §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.md#56-supplied-squared-distances-requirements-470)).
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
@@ -299,6 +301,10 @@ fn none(len: usize) -> Result<(), GprError> {
     }
 }
 
+fn no_param(i: usize) -> Result<(), GprError> {
+    Err(GprError::IndexOutOfRange { reason: format!("UnitRbf has no parameter {i}") })
+}
+
 impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
     fn num_params(&self) -> usize { 0 }
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> { none(out.len()) }
@@ -319,9 +325,9 @@ impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
     }
     fn apply_cross(&self, d2: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError> { self.apply(d2, out, Triangle::Full) }
     fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> { out.fill(T::from_f64(1.0)); Ok(()) }
-    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
-    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
-    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
+    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
+    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
+    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
 }
 
 fn main() -> Result<(), GprError> {
@@ -335,7 +341,7 @@ fn main() -> Result<(), GprError> {
 
 ### Handle errors
 
-`GprError` is non-exhaustive, so a `match` on it ends with a catch-all arm. When `fit` fails, the trainer comes back with the error, and you can change it and try again. `Gpr` adds no jitter by default (`JitterPolicy::fixed(0.0)`), while `Sgpr` and `Svgp` retry `K_mm` with jitter growing from `1e-8`. Branch on the variant and its `kind` field, not on the display text. The rustdoc of [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) lists every variant.
+`GprError` is non-exhaustive, so a `match` on it ends with a catch-all arm. When `fit` fails, the trainer comes back with the error, and you can change it and try again. `Gpr` adds no jitter by default (`JitterPolicy::fixed(0.0)`), while `Sgpr` and `Svgp` retry `K_mm` with jitter growing from `1e-8`. Branch with `match` on the variant and its fields, not on the display text. Only `PersistFailed` and `DistanceSlot` have a `kind` field. The rustdoc of [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) lists every variant.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};

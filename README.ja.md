@@ -38,7 +38,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 `x` には、`n_rows` 個の点と `n_cols` 個の特徴を列優先で並べた `f64` を渡す。`y` の長さは `n_rows` にそろえる。入力が空のとき、長さが `n_rows * n_cols` と合わないとき、`NaN` や `Inf` が混じっているときは、パニックせずに `GprError` を返す。
 
-メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` のエラーになり、コンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら `<FittedGpr>::predict(&fitted, ..)` と書く。
+メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` のエラーになり、コンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら、値が持つ型パラメータを書く。既定の型パラメータのモデルなら `<FittedGpr>::predict(&fitted, ..)`、`factor` で作ったモデルなら `<FittedGpr<Fixed>>::predict(&frozen, ..)` と書く。
 
 ## モデルの選び方
 
@@ -83,6 +83,8 @@ fn main() -> Result<(), gprx::GprError> {
 測地線距離やグラフ上の距離のように、座標からは求まらない距離でモデルを作りたいことがある。`ScalarDistance` のスロットを作り、その `kernel` にカーネルの葉を渡すと、返ってきたカーネルは座標の代わりに、呼び出し側で計算した二乗距離を読む。二乗距離の表は列優先で並べる。値はどれも有限で 0 以上でなければならず、学習用の表はさらに対称で、対角が 0 でなければならない。条件から外れると `GprError::InvalidDistance` になる。丸め誤差でわずかにずれただけの表なら、`from_vec` や `borrow` が返す `DistanceSource` に `tidy(rel_tol)` をかけて直せる。
 
 特徴ごとに表を分ける `ArdDistance`、座標を読むカーネルの葉との組み合わせ（`WithPoints`）、疎なモデルに渡す引数は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc で説明している。列を必要になったときに埋める `fill` の例は [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) に、カーネルの組み合わせ方の例は [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) の rustdoc にある。
+
+疎なモデル（`Sgpr` と `Svgp`）では、計算量が座標のモデルと少し異なる。座標のモデルは距離の組を `n · d` 個の座標から計算するが、距離のモデルの因子分解は与えられた `d · n · m` 個の値を読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルより大きくなる。一方、勾配と予測の計算量は座標のモデルを上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
@@ -299,6 +301,10 @@ fn none(len: usize) -> Result<(), GprError> {
     }
 }
 
+fn no_param(i: usize) -> Result<(), GprError> {
+    Err(GprError::IndexOutOfRange { reason: format!("UnitRbf has no parameter {i}") })
+}
+
 impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
     fn num_params(&self) -> usize { 0 }
     fn get_params(&self, out: &mut [f64]) -> Result<(), GprError> { none(out.len()) }
@@ -319,9 +325,9 @@ impl<T: KernelScalar> KernelTerm<T> for UnitRbf {
     }
     fn apply_cross(&self, d2: MatRef<'_, T>, out: MatMut<'_, T>) -> Result<(), GprError> { self.apply(d2, out, Triangle::Full) }
     fn fill_diag(&self, out: &mut [T]) -> Result<(), GprError> { out.fill(T::from_f64(1.0)); Ok(()) }
-    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
-    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
-    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { none(i + 1) }
+    fn grad(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
+    fn hess(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
+    fn hess_points(&self, _: MatRef<'_, T>, _: MatMut<'_, T>, i: usize, _: usize, _: Triangle) -> Result<(), GprError> { no_param(i) }
 }
 
 fn main() -> Result<(), GprError> {
@@ -335,7 +341,7 @@ fn main() -> Result<(), GprError> {
 
 ### エラーを扱う
 
-`GprError` には今後 variant が増えうるので（non-exhaustive）、`match` の最後には残りをまとめて受ける分岐を置く。`fit` が失敗したときはトレーナーがエラーと一緒に戻ってくるので、設定を変えてもう一度試せる。既定の jitter は `Gpr` では 0（`JitterPolicy::fixed(0.0)`）だが、`Sgpr` と `Svgp` は `K_mm` の分解に失敗すると、`1e-8` から大きくしていく jitter を対角に足してやり直す。どのエラーかを判断するときは、表示用の文字列ではなく、variant とその `kind` フィールドを見る。variant の一覧は [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) の rustdoc にある。
+`GprError` には今後 variant が増えうるので（non-exhaustive）、`match` の最後には残りをまとめて受ける分岐を置く。`fit` が失敗したときはトレーナーがエラーと一緒に戻ってくるので、設定を変えてもう一度試せる。既定の jitter は `Gpr` では 0（`JitterPolicy::fixed(0.0)`）だが、`Sgpr` と `Svgp` は `K_mm` の分解に失敗すると、`1e-8` から大きくしていく jitter を対角に足してやり直す。どのエラーかを判断するときは、表示用の文字列ではなく、variant とそのフィールドで `match` する。`kind` フィールドを持つのは `PersistFailed` と `DistanceSlot` だけだ。variant の一覧は [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) の rustdoc にある。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
