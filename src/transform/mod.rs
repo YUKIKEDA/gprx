@@ -5,6 +5,24 @@
 //! Stack several maps with [`Pipeline`] (`X`) or [`TargetPipeline`] (`y`).
 //! Assign a map per feature with [`ColumnwiseInput`].
 //!
+//! Pass an unfitted map to `with_input_transform` or `with_target_transform`
+//! before `fit`; the model fits the map on the training data. The defaults
+//! are [`IdentityInput`] and [`IdentityTarget`].
+//!
+//! | Type | Role |
+//! | --- | --- |
+//! | [`IdentityInput`], [`IdentityTarget`] | no change; `fit` returns the same map |
+//! | [`StandardizeInput`] | per-feature mean and standard deviation; fits to [`FittedStandardizeInput`] (`mean`, `std`) |
+//! | [`StandardizeTarget`] | one mean and standard deviation for `y`; fits to [`FittedStandardizeTarget`] (`mean`, `std`) |
+//! | [`MinMaxInput`] | per-feature map into a range: `new` is `[0, 1]`, `with_feature_range(lo, hi)` sets another; fits to [`FittedMinMaxInput`] (`min`, `max`, `feature_range`) |
+//! | [`MinMaxTarget`] | the same for `y`; fits to [`FittedMinMaxTarget`] |
+//! | [`Pipeline`] | `Pipeline::new().then(step)`, each map fitted on the output of the one before; fits to [`FittedPipeline`] |
+//! | [`TargetPipeline`] | the same for `y`; fits to [`FittedTargetPipeline`] |
+//! | [`ColumnwiseInput`] | `new().then(map)` assigns the next feature; fits to [`FittedColumnwiseInput`] |
+//!
+//! The concrete maps also have an inherent `fit`: input maps take
+//! `(x, n_rows, n_cols)` and target maps take `y`.
+//!
 //! A map of your own implements [`UnfittedTransform`] and [`Transform`]
 //! (`X`), or [`UnfittedTarget`] and [`TargetTransform`] (`y`); the examples
 //! on [`UnfittedTransform`] and [`UnfittedTarget`] show one each, used on a

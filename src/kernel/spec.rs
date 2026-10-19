@@ -42,7 +42,9 @@ pub struct ParameterBinding {
 /// Built-in leaves are stored directly. Sum and product nest until
 /// [`Self::compile`] flattens associative chains into [`super::CompiledKernel`].
 /// `S` is [`NoSupply`] for every tree a caller builds: a coordinate tree.
-/// `+` builds [`Self::Sum`] and `*` builds [`Self::Product`]. The example on
+/// `+` builds [`Self::Sum`] and `*` builds [`Self::Product`]. `*` binds
+/// tighter than `+`, so `c * k + k2` is a scaled kernel plus another kernel.
+/// The example on
 /// [`super::KernelTerm`] builds a [`Self::Custom`] leaf.
 ///
 /// # Examples

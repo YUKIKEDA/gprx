@@ -519,6 +519,12 @@ where
     /// capacity is unchanged. `α` is not solved here. The first later read solves it.
     /// The last remaining point cannot be deleted.
     ///
+    /// A model on supplied distances removes the point from the training
+    /// squares it keeps, in place. Once the model has grown, neither an
+    /// insert nor a delete allocates, except that a large delete on a Rayon
+    /// pool of more than one worker queues one job beside the factor's
+    /// update.
+    ///
     /// # Errors
     ///
     /// Returns [`GprError::InsufficientData`] when `n == 1`,

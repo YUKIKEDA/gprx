@@ -53,6 +53,21 @@ pub struct OptResult {
 /// [`FastSimulatedAnnealing`] only [`crate::Objective`]. Every one searches
 /// inside [`crate::Objective::fill_intervals`].
 ///
+/// A trainer holds one optimizer as its type parameter, and
+/// `with_optimizer` replaces it:
+///
+/// | Type | Search | Setters |
+/// | --- | --- | --- |
+/// | [`Lbfgs`] | L-BFGS, Moré–Thuente line search. Needs [`crate::Differentiable`] | `new`: 100 iterations, tolerance `sqrt(ε)`, history 10. `with_max_iterations`, `with_tolerance`, `with_history_size`, `with_restarts(n, seed)` |
+/// | [`NelderMead`] | derivative-free. Needs [`crate::Objective`] | `with_max_iterations`, `with_tolerance`, `with_restarts` |
+/// | [`TrustRegion`] | uses the Hessian. Needs [`crate::TwiceDifferentiable`] | `with_max_iterations`, `with_tolerance`, `with_restarts`, `with_radii(initial, max)` |
+/// | [`FastSimulatedAnnealing`] | Cauchy proposals, Metropolis, Ingber cooling. Needs [`crate::Objective`] | `with_max_iterations`, `with_restarts`, `with_initial_temperature`, `with_cooling_rate`, `with_seed`, `with_boundary` |
+/// | [`Fixed`] | no search: `factor` only. Not an `Optimizer` | unit struct |
+/// | [`Adam`] | mini-batch, [`crate::Svgp`] only. Not an `Optimizer` | `with_learning_rate`, `with_beta1`, `with_beta2`, `with_epsilon`, `with_batch_size`, `with_epochs`, `with_seed` |
+///
+/// `with_restarts(n, seed)` adds `n` extra log-uniform starts and keeps the
+/// lowest value; the first start is the model's `θ`.
+///
 /// A user optimizer implements this generically over the capability it
 /// needs. It can read the intervals and call a built-in optimizer on the
 /// same objective.

@@ -10,6 +10,25 @@
 //! transforms need no setup; a custom kernel leaf or a caller-defined
 //! transform is rebuilt by a restore function registered in a
 //! [`PersistRegistry`].
+//!
+//! A load returns an enum with one variant per precision (and, for the
+//! models that update online, per factor kind). Every variant's model is
+//! [`Fixed`]; call `with_optimizer` on the matched model,
+//! then `refit`, to search again.
+//!
+//! | Enum | Variants |
+//! | --- | --- |
+//! | [`LoadedGpr`] | `Double`, `Single`, `Mixed`, `Reevaluate`, `OnlineDouble`, `OnlineSingle`, `OnlineMixed`, `OnlineReevaluate` |
+//! | [`LoadedSgpr`] | the same eight names; `Double` is `FittedSgpr<Fixed>`, and the online variants are `OnlineSgpr<Fixed, _>` |
+//! | [`LoadedSvgp`] | `Double`, `Single`, `Mixed`, `Reevaluate`; no online variant |
+//! | [`LoadedDistanceGpr<C>`](LoadedDistanceGpr) | the eight names of [`LoadedGpr`], over the models of `DistanceKernel<C>`; `C` is `DistanceOnly` or `WithPoints`, named at `load` |
+//! | [`LoadedDistanceSgpr<C>`](LoadedDistanceSgpr) | the eight names of [`LoadedSgpr`], over the models of `DistanceKernel<C>` |
+//! | [`LoadedDistanceSvgp<C>`](LoadedDistanceSvgp) | the four names of [`LoadedSvgp`], over `FittedSvgp<_, DistanceKernel<C>>` |
+//!
+//! `predict` and `predict_with` on the enum return `f64`, including when the
+//! file was written in `f32`. `is_online` is `true` for a file an
+//! [`OnlineGpr`] or [`OnlineSgpr`](crate::OnlineSgpr)
+//! wrote.
 
 /// Runs `$call` in the arm of the precision `$kind`, with `$fitted` (and
 /// `$online`) the variants of `$loaded` of that precision. Each arm names

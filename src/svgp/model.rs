@@ -24,7 +24,13 @@ use super::fitted::FittedSvgp;
 /// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`.
 /// [`Svgp<Adam>::fit`] starts from that prior and runs mini-batch Adam.
 /// [`Self::with_optimizer`] switches the type parameter; there is no fit
-/// flag.
+/// flag. [`Adam`] does not implement [`crate::Optimizer`], so [`crate::Gpr`]
+/// and [`crate::Sgpr`] cannot take it.
+///
+/// A failed `fit` or `factor` returns the trainer with the [`GprError`], so
+/// a caller can match `Err((trainer, err))` and try again. There is no
+/// `From` conversion of that pair into [`GprError`]: write
+/// `.map_err(|(_, e)| e)?`.
 ///
 /// `K` selects how the inducing points are given. A [`KernelSpec`] model
 /// takes their coordinates `Z` (column-major, `m` points by `d` features)

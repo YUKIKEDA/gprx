@@ -3,6 +3,34 @@
 //! Built-in leaves are enum arms. User distance leaves implement [`KernelTerm`]
 //! and enter the tree as [`KernelSpec::Custom`].
 //!
+//! Each built-in leaf stores its positive parameters as `log`. `new` takes
+//! user units, and the `from_log_*` constructors take the optimizer
+//! coordinate. `bounds` / `with_bounds` use an open [`Interval`](crate::Interval)
+//! (default [`Interval::DEFAULT_POSITIVE`](crate::Interval::DEFAULT_POSITIVE),
+//! `(1e-5, 1e5)`).
+//!
+//! | Leaf | Construct | Parameters |
+//! | --- | --- | --- |
+//! | [`RbfKernel`] | `new(ℓ)` | isotropic lengthscale |
+//! | [`RbfArdKernel`] | `new(&[ℓ_d])` | one lengthscale per feature ([`ArdLengthscales`]) |
+//! | [`MaternKernel`] | `new(ℓ, nu)` | lengthscale; [`MaternNu`] `Half`, `ThreeHalves`, or `FiveHalves` is fixed, not optimized |
+//! | [`MaternArdKernel`] | `new(&[ℓ_d], nu)` | ARD lengthscales, fixed `ν` |
+//! | [`PeriodicKernel`] | `new(ℓ, period)` | lengthscale and period |
+//! | [`RationalQuadraticKernel`] | `new(ℓ, alpha)` | lengthscale and `α` |
+//! | [`RationalQuadraticArdKernel`] | `new(&[ℓ_d], alpha)` | ARD lengthscales, then `α` |
+//! | [`ConstantKernel`] | `new(c)` | signal variance; multiply by another leaf for `c · k` |
+//! | [`LinearKernel`] | `new(variance)` | `σ² xᵀ x'` |
+//! | [`WhiteKernel`] | `new(variance)` | diagonal nugget |
+//!
+//! Observation noise belongs in [`GaussianLikelihood`](crate::GaussianLikelihood);
+//! a large likelihood noise and a large [`WhiteKernel`] count the noise twice.
+//!
+//! The evaluators of a leaf and of a [`CompiledKernel`] (`apply`,
+//! `apply_cross`, `grad`, `hess`, …) take `faer` matrix views (`MatRef` /
+//! `MatMut`): add `faer = "0.24"` to `Cargo.toml` to call them. A leaf
+//! evaluates `exp` with [`Accurate`](crate::Accurate); a [`CompiledKernel`]
+//! takes the [`KernelMath`](crate::KernelMath) type as its `M` parameter.
+//!
 //! A model can also read squared distances the caller supplies instead of
 //! computing them from coordinates. A slot ([`ScalarDistance`], or
 //! [`ArdDistance`] with one table per dimension) names such a supply, its
@@ -11,6 +39,26 @@
 //! [`DistanceKernel<WithPoints>`] also holds coordinate leaves of a
 //! [`KernelSpec`]. [`ModelKernel`] is what the models accept: a coordinate
 //! [`KernelSpec`] or a [`DistanceKernel`].
+//!
+//! A model of a [`DistanceKernel`] takes one [`DistanceSource`] per slot
+//! instead of coordinates (and as well as them for [`WithPoints`]). `n` is
+//! the training count, `q` the query count, and `inducing` the training
+//! indices of the inducing points of [`Sgpr`](crate::Sgpr) /
+//! [`Svgp`](crate::Svgp):
+//!
+//! | Model | `fit` / `factor` | `predict` family | Covariance and `sample` |
+//! | --- | --- | --- | --- |
+//! | `Gpr`, [`DistanceOnly`] | `(sources, n, y)` | `(sources, q)` | `(cross, square, q)` |
+//! | `Gpr`, [`WithPoints`] | `(sources, n, x, n_cols, y)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+//! | `Sgpr` / `Svgp`, [`DistanceOnly`] | `(sources, n, y, inducing)` | `(sources, q)` | `(cross, square, q)` |
+//! | `Sgpr` / `Svgp`, [`WithPoints`] | `(sources, n, x, n_cols, y, inducing)` | `(sources, xs, q, n_cols)` | `(cross, square, xs, q, n_cols)` |
+//!
+//! A training source of `Gpr` is the `n × n` square among the training
+//! points; one of `Sgpr` / `Svgp` is the `n × m` block from the training
+//! points to the inducing points. A prediction source (`cross`) is the
+//! `n × q` block from the training points to the queries for `Gpr`, and the
+//! `m × q` block from the inducing points for `Sgpr` / `Svgp`; `square` is
+//! the `q × q` block among the queries.
 //!
 //! Isotropic RBF, Matérn, Periodic, and rational quadratic evaluate from a
 //! squared-Euclidean distance matrix (Periodic then takes the square root). ARD RBF, ARD

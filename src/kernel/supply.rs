@@ -1189,7 +1189,22 @@ pub trait DistanceFill: Send + Sync {
 /// Binds a supply of squared distances to one slot for one call.
 ///
 /// Made by [`ScalarDistance`] and [`ArdDistance`]. A model call takes one
-/// source per slot of its kernel, in any order.
+/// source per slot of its kernel, in any order. How a source is made
+/// decides what the model copies:
+///
+/// | Source | Copy |
+/// | --- | --- |
+/// | `from_vec(d2)` / `from_vecs(blocks)` | moved into the call. An `f64` model keeps the tables as its store, so a fit copies nothing, and an ARD slot then holds `d · n²` values instead of its packed `d · n(n+1)/2` (an ARD table that [`Self::tidy`] repairs is packed instead). An `f32` model casts them into a buffer of its own, packed for ARD; a [`MixedPrecision`](crate::MixedPrecision) model keeps the `f64` tables and adds that cast |
+/// | `from_slice(d2)` / `from_slices(blocks)` | copied at the call, then handled as `from_vec` / `from_vecs`: an `f64` model keeps the copy (`d · n²` for an ARD slot). `borrow` fits without that copy |
+/// | `borrow(d2)` / `borrow(blocks)` | read in place by the `predict` of an `f64` model, cast once by an `f32` model, and copied by a fit (an ARD square straight into its packed triangles) |
+/// | `fill(&filler)` | written by [`DistanceFill::fill_column`]; a fit fills the model's store once, a prediction fills scratch |
+///
+/// Tables are column-major: the pair `(i, j)` is at `i + j * n_rows`. A
+/// [`MixedPrecision`](crate::MixedPrecision) model keeps the training `d²`
+/// in `f64` next to its `f32` copy, so its `f64` refinement reads the values
+/// the caller gave. A prediction binds its sources on buffers the model
+/// keeps, so a `predict_into` allocates nothing once a call of the same
+/// shape has run.
 ///
 /// See the example on [`ScalarDistance`].
 pub struct DistanceSource<'a> {

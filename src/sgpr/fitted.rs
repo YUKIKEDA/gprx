@@ -602,7 +602,8 @@ where
     /// Stores the kernel, likelihood, kernel `exp`, `K_mm` jitter policy,
     /// precision, transforms (unfitted and fitted), the original `X`, `y`,
     /// and `Z`, and `Z` in transformed coordinates. The factors are
-    /// not stored; [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
+    /// not stored, and a sparse model has no `save_with_factor`;
+    /// [`crate::LoadedSgpr::load`] factors the system again at the saved `θ`
     /// and `Z`. Caller-defined kernels and transforms need their
     /// `persist_id` / `persist_state` and a [`crate::PersistRegistry`] entry.
     /// The optimizer and the inducing-point search are not stored.

@@ -28,6 +28,11 @@ use crate::kernel::NoSupply;
 /// searches `θ` and `Z` together. [`Sgpr<Fixed, I>::factor`] prepares the
 /// VFE system at the current `θ` with no search.
 ///
+/// A failed `fit` or `factor` returns the trainer with the [`GprError`], so
+/// a caller can match `Err((trainer, err))` and try again. There is no
+/// `From` conversion of that pair into [`GprError`]: write
+/// `.map_err(|(_, e)| e)?`.
+///
 /// `K` selects how the inducing points are given. A [`KernelSpec`] model
 /// takes their coordinates `Z` (column-major, `m` points by `d` features)
 /// next to the training `X`. A [`crate::kernel::DistanceKernel`] model has
@@ -475,8 +480,10 @@ where
     ///
     /// `x` and `z` are column-major. The initial `Z` is the start of the
     /// joint search. Params are kernel `θ`, likelihood `θ`, then column-major
-    /// `Z`. Coordinate intervals are the training box opened by a slack of
-    /// 10% of each feature range, at least `0.1`.
+    /// `Z`. Each coordinate of `Z` stays inside an interval built from the
+    /// training inputs after the input transform: their range in that
+    /// feature, opened on each side by 10% of the range and at least `0.1`,
+    /// with the lower end moved down to `0` when it is above `0`.
     ///
     /// # Errors
     ///
