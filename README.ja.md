@@ -84,7 +84,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 特徴ごとに表を分ける `ArdDistance`、座標を読むカーネルの葉との組み合わせ（`WithPoints`）、疎なモデルに渡す引数は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc で説明している。列を必要になったときに埋める `fill` の例は [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) に、カーネルの組み合わせ方の例は [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) の rustdoc にある。
 
-`Sgpr` と `Svgp` の因子分解は、座標のモデルなら `n · d` 個の座標から計算する距離の組を、与えられた `d · n · m` 個の値として読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルの因子分解より大きくなる。一方、勾配と予測の計算量は、座標のモデルの計算量を上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
+`Sgpr` と `Svgp` の因子分解は、座標のモデルなら `n · d` 個の座標から計算する点の組ごとの二乗距離を、与えられた `d · n · m` 個の値として読む。そのため ARD のスロットでは、因子分解の計算量が座標のモデルの因子分解の計算量より大きくなる。一方、勾配と予測の計算量は、座標のモデルの計算量を上回らない（[設計 §5.6](https://github.com/YUKIKEDA/gprx/blob/main/docs/design.ja.md#56-与えられた二乗距離-要件470)）。
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
