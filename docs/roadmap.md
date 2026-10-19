@@ -6,7 +6,7 @@ Acceptance text stays on each Issue. This file keeps ID, title, Issue, and statu
 
 ## Current work
 
-D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491)) is done: 0.2.0 is on crates.io (tag `v0.2.0`). C3-3 ([#535](https://github.com/YUKIKEDA/gprx/issues/535)) is done: the workflows run on `actions/checkout` v7 (Node.js 24) and CI passed on Ubuntu 26.04. C4 ([#539](https://github.com/YUKIKEDA/gprx/issues/539)) is open: the README becomes a quick start and short how-tos, and rustdoc covers the public API.
+D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470)) and D2 ([#503](https://github.com/YUKIKEDA/gprx/issues/503), what the D1 review left) are done. C3-1 ([#491](https://github.com/YUKIKEDA/gprx/issues/491)) is done: 0.2.0 is on crates.io (tag `v0.2.0`). C3-3 ([#535](https://github.com/YUKIKEDA/gprx/issues/535)) is done: the workflows run on `actions/checkout` v7 (Node.js 24) and CI passed on Ubuntu 26.04. C4 ([#539](https://github.com/YUKIKEDA/gprx/issues/539)) is done: the README is a quick start and short how-tos, and rustdoc covers the public API.
 
 ## Dependencies
 
@@ -259,9 +259,9 @@ Phase 3 follows 2b. Early phase 4 can run in parallel after 1b. Phase 5 cannot c
 
 | ID | Kind | Title | Issue | Status |
 | --- | --- | --- | --- | --- |
-| C4-1 | Docs | Map every README paragraph to its home; move the facts rustdoc lacks into rustdoc | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | open |
-| C4-2 | Docs | reader-docs and publish-review: public items covered in rustdoc, README by task | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | open |
-| C4-3 | Docs | README.md and README.ja.md as quick start and how-to | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | open |
+| C4-1 | Docs | Map every README paragraph to its home; move the facts rustdoc lacks into rustdoc | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | done |
+| C4-2 | Docs | reader-docs and publish-review: public items covered in rustdoc, README by task | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | done |
+| C4-3 | Docs | README.md and README.ja.md as quick start and how-to | [#539](https://github.com/YUKIKEDA/gprx/issues/539) | done |
 
 ## D1 (supplied squared distances, [#470](https://github.com/YUKIKEDA/gprx/issues/470))
 
