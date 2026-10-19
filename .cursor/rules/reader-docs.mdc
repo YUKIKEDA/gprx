@@ -20,7 +20,7 @@ Order:
 4. What a caller needs in order to make that call
 5. Choosing a model
 6. How-to, one subsection per task
-7. A link to the API reference on docs.rs (`https://docs.rs/gprx`), with links to its module entry points
+7. A link to the API reference on docs.rs (`https://docs.rs/gprx`), with links to its module entry points. The line may say that every public item has a usage example, on its own page or on the item its rustdoc links to (`See the example on X`, `.cursor/rules/rust-docs.mdc`)
 8. One link to the comparison doc
 9. License
 
@@ -38,7 +38,7 @@ Every item in that set has a rustdoc usage example (`.cursor/rules/rust-docs.mdc
 
 The README covers what a new reader does first, by task: the first example, the points a caller otherwise gets wrong, how to choose a model, then one how-to per task. The tasks are: choose and combine kernels; use your own distance matrix; inducing points for large data (`Sgpr`); minibatch training (`Svgp`); add and remove points later; fix hyperparameters or choose an optimizer; transform inputs and targets; save and load; speed, memory, and precision; write your own kernel; handle errors; set the thread count. The owner chose this split on 2026-10-19: the README teaches tasks, and rustdoc is the reference.
 
-A how-to is a few sentences and one `rust` block. The block is a program that runs as a doctest, uses `?` and not `unwrap`, names the types it uses, and shows one task. The prose links to docs.rs for the rest of that task. A README block is not a reference: it does not list every method of a type. English and Japanese use the same blocks.
+A how-to is a few sentences and one `rust` block. The block is a program that runs as a doctest, uses `?` and not `unwrap`, names the types it uses, and shows one task. A task named with "and" or "or", such as "fix hyperparameters or choose an optimizer" or "speed, memory, and precision", is one task: its block may show each of the options the name lists, once each. The prose links to docs.rs for the rest of that task. A README block is not a reference: it does not list every method of a type. English and Japanese use the same blocks.
 
 When the families differ, say which type the method belongs to. When the item has a default that changes the result, include that default.
 

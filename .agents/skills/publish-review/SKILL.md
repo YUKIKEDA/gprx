@@ -47,6 +47,8 @@ Fail a page when any of these is true:
 - Gemini has not inspected a Japanese page in reader-docs, the agent that edited the page scored or rewrote that Japanese, Gemini reports that the page is a gloss of the English, or a bare word in reader-docs Japanese vocabulary remains
 - A public item an external crate can name with default features has no rustdoc usage example (`.cursor/rules/rust-docs.mdc`). `internals` is outside that list. An item is what a `use` path names (reader-docs "Public API usage"); methods and variants are judged on their rustdoc. The saved-file schema stays in the persist-format doc
 - A README how-to block does not run as a doctest, uses `unwrap`, or shows more than one task, or a task in the reader-docs task list has no how-to
+- A README how-to block is a reference: it lists every method of a type instead of showing its task
+- A docs.rs link in the README does not resolve to a page of the items of the version being published. Check each against `cargo doc --no-deps` of the commit being published
 
 ## Report
 
