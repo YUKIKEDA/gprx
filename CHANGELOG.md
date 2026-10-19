@@ -5,7 +5,7 @@ All notable changes to gprx are listed here. The format follows
 version may break the public API (the default-feature items an external
 crate can name); `gprx::internals` is outside that contract.
 
-## [0.2.0]
+## [0.2.0] - 2026-10-19
 
 ### Breaking
 
