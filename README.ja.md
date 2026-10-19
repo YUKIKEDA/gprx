@@ -2,9 +2,11 @@
 
 # gprx
 
-gprx は、Rust でガウス過程回帰を行うクレートである。全学習点を使う厳密な GPR、スパース GPR（VFE）、SVGP の 3 つを備えている。`Gpr` は学習前のトレーナーである。`Gpr::fit` はこのトレーナーを消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化したうえで `FittedGpr` を返す。`Sgpr` と `Svgp` も、同じ部品で組み立てられている。厳密な GPR とスパース GPR のモデルは学習後もオンラインで更新でき、どのモデルもディレクトリへ保存して読み込める。カーネルに渡す入力は座標でもよいし、呼び出し側が求めた二乗距離でもよい。
+gprx は、Rust でガウス過程回帰を行うクレートである。全学習点を使う厳密な GPR、スパース GPR（VFE）、SVGP の 3 つを備えている。`Gpr` は学習前のトレーナーである。`Gpr::fit` はこのトレーナーを値で受け取って消費し、負の対数周辺尤度を既定の `Lbfgs` で最小化したうえで `FittedGpr` を返す。`Sgpr` と `Svgp` も、同じカーネルと尤度を受け取って組み立てる。厳密な GPR とスパース GPR のモデルは学習後もオンラインで更新でき、どのモデルもディレクトリへ保存して読み込める。カーネルに渡す入力は座標でもよいし、呼び出し側が求めた二乗距離でもよい。
 
-入力 `X` は列優先で並べる。`n` 個の点と `d` 個の特徴があるなら、全行の特徴 0 を先に置き、そのあとに特徴 1 を続ける。`fit` はトレーナーを値で受け取って消費する。観測ノイズの大きさは `GaussianLikelihood` が持つ。公開 API として約束しているのは、**0.2.0**（タグ `v0.2.0`）のうち既定のフィーチャで使える部分である。MSRV は 1.88 とする。0.x のあいだは、マイナー版の更新でもこの API に互換性のない変更が入ることがある。0.1.0 から 0.2.0 で何が変わり、どう移行すればよいかは[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にまとめてある。`internals`（`bench-internals` と `insert-stages`）は、この約束に含まれない。
+入力 `x` は列優先で並べる。`n` 個の点と `d` 個の特徴があるなら、全行の特徴 0 を先に置き、そのあとに特徴 1 を続ける。観測ノイズの大きさは `GaussianLikelihood` が持つ。
+
+公開 API として約束しているのは、**0.2.0**（タグ `v0.2.0`）のうち既定のフィーチャで使える部分である。MSRV は 1.88 とする。0.x のあいだは、マイナー版の更新でもこの API に互換性のない変更が入ることがある。0.1.0 から 0.2.0 で何が変わり、どう移行すればよいかは[変更履歴](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md)（英語）にまとめてある。`gprx::internals` モジュールは、フィーチャ `bench-internals` か `insert-stages` を有効にしたときだけ現れ、この約束には含まれない。
 
 ```toml
 [dependencies]
@@ -32,11 +34,11 @@ fn main() -> Result<(), gprx::GprError> {
 
 ## 最初に知っておくこと
 
-`fit` と `factor` が失敗すると、エラーと一緒にトレーナーが戻ってくる。戻り値の型は `Result<Fitted, (Trainer, GprError)>` である。`Gpr` なら `?` でそのまま受けられ、トレーナーは捨てられて `GprError` だけが呼び出し元へ伝わる。`Sgpr` と `Svgp` にはこの変換がないので、以下の例のように `.map_err(|(_, e)| e)?` と書く。
+`fit` と `factor` が失敗すると、エラーと一緒にトレーナーが戻ってくる。戻り値の型は `Result<Fitted, (Trainer, GprError)>` である。`Gpr` には `(Gpr, GprError)` から `GprError` への変換があるので、`?` でそのまま受けられる。このときトレーナーは捨てられ、`GprError` だけが呼び出し元へ伝わる。`Sgpr` と `Svgp` にはこの変換がないので、以下の例のように `.map_err(|(_, e)| e)?` と書く。
 
 `x` には、`n_rows` 個の点と `n_cols` 個の特徴を列優先で並べた `f64` を渡す。`y` の長さは `n_rows` にそろえる。入力が空のとき、長さが `n_rows * n_cols` と合わないとき、`NaN` や `Inf` が混じっているときは、パニックせずに `GprError` を返す。
 
-メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` でコンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら `<FittedGpr>::predict(&fitted, ..)` と書く。
+メソッドは `fitted.predict(..)` のように値に対して呼ぶ。`FittedGpr::predict(&fitted, ..)` のように型パラメータを省いて型のパスから呼ぶと、`E0034` のエラーになり、コンパイルできない。二乗距離を受け取るモデルにも同じ名前のメソッドがあって、どれを指すのかが決まらないからだ。パスで呼びたいなら `<FittedGpr>::predict(&fitted, ..)` と書く。
 
 ## モデルの選び方
 
@@ -54,7 +56,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### カーネルを選ぶ・組み合わせる
 
-カーネルは `+` で足し、`*` で掛ける。`*` は `+` より先に結合する。`RbfArdKernel` のような ARD のカーネルの葉には、特徴ごとに別々の長さスケールがある。用意されているカーネルの葉と、それぞれのパラメータや範囲は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc に一覧がある。
+カーネルは `+` で足し、`*` で掛ける。`*` は `+` より先に結合する。特徴ごとに別々の長さスケールを持たせたいときは、`RbfArdKernel` のような ARD（automatic relevance determination、関連度の自動決定）のカーネルの葉を使う。用意されているカーネルの葉と、それぞれのパラメータや範囲は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc に一覧がある。
 
 ```rust
 use gprx::kernel::{ConstantKernel, KernelSpec, PeriodicKernel, RbfArdKernel, RbfKernel};
@@ -78,7 +80,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 自分の距離行列を使う
 
-測地線距離やグラフ上の距離のように、座標からは求まらない距離でモデルを作りたいことがある。`ScalarDistance` のスロットを作ってカーネルの葉に渡すと、そのカーネルの葉は座標の代わりに、呼び出し側で計算した二乗距離を読む。表は列優先で並べる。値はどれも有限で 0 以上でなければならず、学習用の表はさらに対称で、対角が 0 でなければならない。条件から外れると `GprError::InvalidDistance` になる。丸め誤差でわずかにずれただけの表なら、ソースの `tidy(rel_tol)` で直せる。特徴ごとに表を分ける `ArdDistance`、座標を読むカーネルの葉との組み合わせ（`WithPoints`）、疎なモデルでの使い方、列を必要になったときに埋める `fill` は、[`ScalarDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ScalarDistance.html) の rustdoc で説明している。
+測地線距離やグラフ上の距離のように、座標からは求まらない距離でモデルを作りたいことがある。`ScalarDistance` のスロットを作り、その `kernel` にカーネルの葉を渡すと、返ってきたカーネルは座標の代わりに、呼び出し側で計算した二乗距離を読む。二乗距離の表は列優先で並べる。値はどれも有限で 0 以上でなければならず、学習用の表はさらに対称で、対角が 0 でなければならない。条件から外れると `GprError::InvalidDistance` になる。丸め誤差でわずかにずれただけの表なら、`from_vec` や `borrow` が返す `DistanceSource` に `tidy(rel_tol)` をかけて直せる。
+
+特徴ごとに表を分ける `ArdDistance`、座標を読むカーネルの葉との組み合わせ（`WithPoints`）、疎なモデルに渡す引数は、[`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) の rustdoc で説明している。列を必要になったときに埋める `fill` の例は [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) に、カーネルの組み合わせ方の例は [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) の rustdoc にある。
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
@@ -101,7 +105,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 誘導点で大きなデータを扱う
 
-`Sgpr` には、`y` のあとに誘導点の入力 `z` を渡す。並べ方は `x` と同じ列優先である。誘導点は渡した位置から動かない。`with_inducing(FreeInducing)` を付ければ、ハイパーパラメータと一緒に誘導点の位置も最適化する。
+`Sgpr` には、`y` のあとに誘導点の入力 `z` を渡す。並べ方は `x` と同じ列優先である。誘導点は渡した位置から動かない。`with_inducing(FreeInducing)` を付ければ、ハイパーパラメータと一緒に誘導点の位置も最適化する。そのほかの設定は [`Sgpr`](https://docs.rs/gprx/latest/gprx/struct.Sgpr.html) の rustdoc で説明している。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -124,7 +128,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### ミニバッチで学習する
 
-`Svgp::new` で作ったモデルは、そのままでは学習しない。`factor` は変分事後分布を事前分布と同じ位置に置くだけだ。`with_optimizer(Adam::new())` を付けると、`fit` がミニバッチの Adam でハイパーパラメータと変分事後分布を動かす。`Adam` の既定値は、学習率 `1e-3`、バッチの大きさ 32、エポック数 100、シード 0 である。`Adam` を使えるのは `Svgp` だけだ。
+`Svgp::new` で作ったモデルは、そのままでは学習しない。`factor` は変分事後分布を事前分布と同じ値で初期化するだけだ。`with_optimizer(Adam::new())` を付けると、`fit` がミニバッチの Adam でハイパーパラメータと変分事後分布を最適化する。`Adam` の既定値は、学習率 `1e-3`、バッチの大きさ 32、エポック数 100、シード 0 である。`Adam` を使えるのは `Svgp` だけだ。そのほかの設定は [`Svgp`](https://docs.rs/gprx/latest/gprx/struct.Svgp.html) と [`Adam`](https://docs.rs/gprx/latest/gprx/struct.Adam.html) の rustdoc にある。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -148,7 +152,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 点をあとから追加・削除する
 
-`into_online` で変えたモデルは、ハイパーパラメータをそのままにして、1 点ずつ分解を更新する。`OnlineGpr` なら 1 回の更新は `O(n²)` で済む。`insert` が返す `PointId` を `delete` に渡すと、その点を取り除ける。最後に残った 1 点は削除できない。今ある点でハイパーパラメータを探し直したくなったら `refit` を呼ぶ。`OnlineSgpr` では、誘導点も `insert_inducing` と `delete_inducing` で増やしたり減らしたりできる。
+`into_online` で変えたモデルは、ハイパーパラメータをそのままにして、1 点ずつ分解を更新する。`OnlineGpr` なら 1 回の更新は `O(n²)` で済む。`insert` が返す `PointId` を `delete` に渡すと、その点を取り除ける。最後に残った 1 点は削除できない。今ある点でハイパーパラメータを探し直したくなったら `refit` を呼ぶ。`OnlineSgpr` では、誘導点も `insert_inducing` と `delete_inducing` で増やしたり減らしたりできる。`point_ids` など、ほかのメソッドは [`OnlineGpr`](https://docs.rs/gprx/latest/gprx/struct.OnlineGpr.html) と [`OnlineSgpr`](https://docs.rs/gprx/latest/gprx/struct.OnlineSgpr.html) の rustdoc で説明している。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -170,7 +174,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### ハイパーパラメータを固定する・最適化器を選ぶ
 
-`Gpr::new` と `Sgpr::new` は `Lbfgs` でハイパーパラメータを探す。`with_optimizer` で `NelderMead`、`TrustRegion`、`FastSimulatedAnnealing` に替えることもでき、どれにも専用の設定メソッドがある。与えた値のまま使いたいなら `with_optimizer(Fixed)` とする。このモデルには `fit` がなく、代わりに `factor` を呼ぶ。探索してよい範囲は、カーネルの葉や `GaussianLikelihood` の `with_bounds` で狭められる。最適化器どうしの違いと、自分で最適化器を書く方法は、[`Optimizer`](https://docs.rs/gprx/latest/gprx/trait.Optimizer.html) の rustdoc にまとめてある。
+`Gpr::new` と `Sgpr::new` は `Lbfgs` でハイパーパラメータを探す。`Lbfgs` は、`with_max_iterations` で変えない限り 100 回の反復で止まる。`with_optimizer` で `NelderMead`、`TrustRegion`、`FastSimulatedAnnealing` に替えることもでき、どれにも専用の設定メソッドがある。与えた値のまま使いたいなら `with_optimizer(Fixed)` とする。このモデルには `fit` がなく、代わりに `factor` を呼ぶ。探索してよい範囲は、カーネルの葉や `GaussianLikelihood` の `with_bounds` で狭められる。最適化器どうしの違いと、自分で最適化器を書く方法は、[`Optimizer`](https://docs.rs/gprx/latest/gprx/trait.Optimizer.html) の rustdoc にまとめてある。
 
 ```rust
 use std::num::NonZeroU32;
@@ -199,7 +203,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 入力と目的変数を変換する
 
-変換は、まだ fit していない状態で `fit` の前に渡す。モデルは学習データで変換を fit し、予測のたびにクエリにも同じ変換をかけ、予測値を `y` の元の単位に戻して返す。事前平均は 0 なので、`y` が 0 の近くに集まっていないなら `StandardizeTarget` を使う。値を決まった範囲に収める min-max 変換、変換の連結、列ごとに違う変換、自作の変換に必要なトレイトは [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/) にある。
+変換は、学習前のトレーナーに `with_input_transform` と `with_target_transform` で渡す。渡さなければ、`x` と `y` はそのままモデルに入る。モデルは変換のパラメータを学習データから求め、予測のたびにクエリにも同じ変換をかけ、予測値を `y` の元の単位に戻して返す。事前平均は 0 なので、`y` が 0 の近くに集まっていないなら `StandardizeTarget` を使う。値を決まった範囲に収める min-max 変換、変換の連結、列ごとに違う変換、自作の変換に必要なトレイトは [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/) にある。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -223,7 +227,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 保存して読み込む
 
-`save(dir)` は、ディレクトリに `config.json` と `model.safetensors` を書き出す。`LoadedGpr::load` が返す enum は、精度とオンラインかどうかの組み合わせごとに variant が分かれている。`predict` はどの variant でも呼べて、結果は `f64` で返る。型のついたモデルが要るときは、variant で分岐して取り出す。`FittedGpr::save_with_factor` はコレスキー因子も書き出すので、読み込むときに分解し直さずに済む。`LoadedSgpr`、`LoadedSvgp`、二乗距離のモデルを読むローダー、自作のカーネルや変換を登録する `PersistRegistry` は [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/) にある。ファイルの形式は [persist-format.ja.md](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md) で説明している。
+`save(dir)` は、ディレクトリに `config.json` と `model.safetensors` を書き出す。`LoadedGpr::load` が返す enum は、精度とオンラインかどうかの組み合わせごとに variant が分かれている。`predict` はどの variant でも呼べて、結果は `f64` で返る。型のついたモデルが要るときは、variant で分岐して取り出す。`FittedGpr::save_with_factor` はコレスキー因子も書き出すので、読み込むときに分解し直さずに済む。読み込んだ `FittedGpr` と `OnlineGpr` は、`with_optimizer` のあとに `refit` を呼べばハイパーパラメータを探し直せる。読み込んだ SGPR と SVGP のモデルにはその手段がないので、探し直すときはそのカーネルと尤度を新しい `Sgpr` か `Svgp` に渡す。`LoadedSgpr`、`LoadedSvgp`、二乗距離を受け取るモデルのローダー、自作のカーネルや変換を登録する `PersistRegistry` は [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/) にある。ファイルの形式は [persist-format.ja.md](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.ja.md) で説明している。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -248,7 +252,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 速さとメモリ、f32 と混合精度
 
-既定の `with_prefer_speed` では、学習点どうしの距離をカーネルを組み立て直すたびに使い回し、勾配の計算に使う `n × n` 行列もコレスキー因子とは別に持つ。`with_prefer_memory` にすると、距離を毎回計算し直し、勾配用の行列をコレスキー因子の上に書いて、あとで分解し直す。そのぶん `n × n` 行列 1 つ分のメモリが減る。`with_math(KernelExp::FastApprox)` は、カーネルの `exp` を多項式で近似する。`f64` での相対誤差は、`f64::exp` に対して `2^{-23}` 以内に収まる。`SinglePrecision` は `f32` で値を持って分解し、予測も `f32` で返す。`MixedPrecision` は `f32` で分解したあと `f64` で補正し、予測は `f64` で返す。`Sgpr` と `Svgp` にも `with_precision` と `with_math` がある。精度ごとの違いは [`GpScalar`](https://docs.rs/gprx/latest/gprx/trait.GpScalar.html) の rustdoc で比べている。
+既定の `with_prefer_speed` では、学習点どうしの距離を一度だけ計算し、カーネルを組み立て直すたびに使い回す。勾配の計算に使う `n × n` 行列も、コレスキー因子とは別に持つ。`with_prefer_memory` にすると、距離を毎回計算し直し、勾配用の行列をコレスキー因子の上に書いて、あとで分解し直す。そのぶん `n × n` 行列 1 つ分のメモリが減る。
+
+既定の `KernelExp::Accurate` は、カーネルの `exp` を標準の `exp` で計算する。`with_math(KernelExp::FastApprox)` にすると多項式で近似し、`f64` での相対誤差は `f64::exp` に対して `2^{-23}` 以内に収まる。精度の既定は `DoublePrecision` で、値の保持も分解も予測も `f64` で行う。`SinglePrecision` は `f32` で値を持って分解し、予測も `f32` で返す。`MixedPrecision` は `f32` で分解したあと `f64` で補正し、予測は `f64` で返す。`Sgpr` と `Svgp` にも `with_precision` と `with_math` がある。精度ごとの違いは [`GpScalar`](https://docs.rs/gprx/latest/gprx/trait.GpScalar.html) の rustdoc で比べている。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -275,7 +281,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### 自分のカーネルを書く
 
-自作のカーネルの葉は、`Clone + Debug + Send + Sync + 'static` を満たす型に、すべての `T: KernelScalar` について `KernelTerm<T>` を実装して作る。できたら `KernelSpec::custom` でカーネルに入れる。カーネルの葉は二乗距離を `faer` の行列で受け取るので、依存に `faer = "0.24"` を加える。疎なモデルは、これとは別の微分のメソッド（`grad_cross` と `hess_cross`、`FreeInducing` ではさらに `*_wrt_sq_dist` の系統）も呼ぶ。これらを実装しないままだと、既定の実装が `GprError::CoordGradientUnsupported` を返す。保存できるようにするには `persist_id` と `persist_state` も実装する（依存に `serde_json = "1"` が要る）。パラメータを持つカーネルの葉に、すべての微分と保存・読み込みまで実装した例は、[`KernelTerm`](https://docs.rs/gprx/latest/gprx/kernel/trait.KernelTerm.html) の rustdoc にある。
+自作のカーネルの葉は、`Clone + Debug + Send + Sync + 'static` を満たす型に、すべての `T: KernelScalar` について `KernelTerm<T>` を実装して作る。その型の値を `KernelSpec::custom` に渡せば、カーネルに組み込める。カーネルの葉は二乗距離を `faer` の行列で受け取るので、依存に `faer = "0.24"` を加える。疎なモデルは、下の例で実装しているメソッドのほかに、別の微分のメソッド（`grad_cross` と `hess_cross`、`FreeInducing` ではさらに `*_wrt_sq_dist` の系統）も呼ぶ。これらを実装しないままだと、既定の実装が `GprError::CoordGradientUnsupported` を返す。保存できるようにするには `persist_id` と `persist_state` も実装する（依存に `serde_json = "1"` が要る）。パラメータを持つカーネルの葉に、すべての微分と保存・読み込みまで実装した例は、[`KernelTerm`](https://docs.rs/gprx/latest/gprx/kernel/trait.KernelTerm.html) の rustdoc にある。
 
 ```rust
 use faer::{MatMut, MatRef};
@@ -329,7 +335,7 @@ fn main() -> Result<(), GprError> {
 
 ### エラーを扱う
 
-`GprError` には今後 variant が増えうるので（non-exhaustive）、`match` の最後には残りをまとめて受ける分岐を置く。`fit` が失敗したときはトレーナーがエラーと一緒に戻ってくるので、設定を変えてもう一度試せる。どのエラーかを判断するときは、表示用の文字列ではなく、variant とその `kind` フィールドを見る。
+`GprError` には今後 variant が増えうるので（non-exhaustive）、`match` の最後には残りをまとめて受ける分岐を置く。`fit` が失敗したときはトレーナーがエラーと一緒に戻ってくるので、設定を変えてもう一度試せる。既定の jitter は `Gpr` では 0（`JitterPolicy::fixed(0.0)`）だが、`Sgpr` と `Svgp` は `K_mm` の分解に失敗すると、`1e-8` から大きくしていく jitter を対角に足してやり直す。どのエラーかを判断するときは、表示用の文字列ではなく、variant とその `kind` フィールドを見る。variant の一覧は [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) の rustdoc にある。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -357,9 +363,9 @@ fn main() -> Result<(), GprError> {
 }
 ```
 
-### スレッド数
+### スレッド数を決める
 
-gprx には `n_jobs` のような設定がなく、プロセス全体で共有する Rayon のプールで動く。スレッド数を変えるには、プロセスを起動する前に `RAYON_NUM_THREADS` を設定するか、最初の fit や predict より前にグローバルプールを作る。後者には依存に `rayon = "1"` が要る。グローバルプールを作れるのは一度だけで、スレッドを 1 つにすると計算はすべて逐次になる。線形代数のバックエンドは、そのうち問題の大きさに見合った数のスレッドだけを使う。数の決め方は[クレートの rustdoc](https://docs.rs/gprx/latest/gprx/) に書いてある。
+gprx には `n_jobs` のような設定がなく、プロセス全体で共有する Rayon のプールで動く。スレッド数を変えるには、プロセスを起動する前に `RAYON_NUM_THREADS` を設定するか、最初の fit や predict より前にグローバルプールを作る。後者には依存に `rayon = "1"` が要る。グローバルプールを作れるのは、1 つのプロセスで一度だけである。スレッドを 1 つにすれば、計算はすべて逐次になる。線形代数のバックエンドは、プールのスレッドのうち、問題の大きさに見合った数だけを使う。その数の決め方は[クレートの rustdoc](https://docs.rs/gprx/latest/gprx/) に書いてある。
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -381,7 +387,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 公開しているすべての項目について、使用例つきの API リファレンスが [docs.rs](https://docs.rs/gprx) にある（英語）。入口は次の 4 つである。
 
-- [`gprx`](https://docs.rs/gprx/latest/gprx/): モデル（`Gpr`、`Sgpr`、`Svgp` と、それぞれの学習済み版とオンライン版）、`GaussianLikelihood`、最適化器、精度、`GprError`
+- [`gprx`](https://docs.rs/gprx/latest/gprx/): モデル（`Gpr`、`Sgpr`、`Svgp` とそれぞれの学習済み版、オンライン版の `OnlineGpr` と `OnlineSgpr`）、`GaussianLikelihood`、最適化器、精度、`GprError`
 - [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/): カーネルの葉、`KernelSpec`、二乗距離の受け渡し、`KernelTerm`
 - [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/): 入力と目的変数の変換
 - [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/): ローダーと `PersistRegistry`

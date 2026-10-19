@@ -2,9 +2,11 @@ English | [日本語](README.ja.md)
 
 # gprx
 
-Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. The same blocks build `Sgpr` and `Svgp`. Exact and sparse GPR models also update online, and every model saves to and loads from a directory. A kernel reads coordinates, or squared distances you supply.
+Gaussian process regression in Rust: exact GPR, sparse GPR (VFE), and SVGP. `Gpr` is the unfitted trainer. `Gpr::fit` consumes it, minimizes the negative log marginal likelihood with the default `Lbfgs`, and returns `FittedGpr`. `Sgpr` and `Svgp` take the same kernel and likelihood. Exact and sparse GPR models also update online, and every model saves to and loads from a directory. A kernel reads coordinates, or squared distances you supply.
 
-`X` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. `fit` consumes the trainer. Observation noise lives in `GaussianLikelihood`. **0.2.0** (tag `v0.2.0`) is the default-feature public API. The MSRV is 1.88. A 0.x minor may break that API: what 0.2.0 changed from 0.1.0, and how to move, is in the [changelog](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md). `internals` (`bench-internals` and `insert-stages`) is outside that contract.
+The input `x` is column-major: `n` points by `d` features, feature 0 for every row, then feature 1. Observation noise lives in `GaussianLikelihood`.
+
+**0.2.0** (tag `v0.2.0`) is the default-feature public API. The MSRV is 1.88. A 0.x minor may break that API: what 0.2.0 changed from 0.1.0, and how to move, is in the [changelog](https://github.com/YUKIKEDA/gprx/blob/main/CHANGELOG.md). The `gprx::internals` module, present only with the `bench-internals` or `insert-stages` feature, is outside that contract.
 
 ```toml
 [dependencies]
@@ -54,7 +56,7 @@ Each block below is a complete program. It needs only `gprx = "0.2"` unless it s
 
 ### Choose and combine kernels
 
-`+` adds two kernels and `*` multiplies them. `*` binds tighter than `+`. An ARD leaf such as `RbfArdKernel` has one lengthscale per feature. The leaves, their parameters, and their bounds are listed in the rustdoc of [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/).
+`+` adds two kernels and `*` multiplies them. `*` binds tighter than `+`. An ARD (automatic relevance determination) leaf such as `RbfArdKernel` has one lengthscale per feature. The leaves, their parameters, and their bounds are listed in the rustdoc of [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/).
 
 ```rust
 use gprx::kernel::{ConstantKernel, KernelSpec, PeriodicKernel, RbfArdKernel, RbfKernel};
@@ -78,7 +80,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Use your own distance matrix
 
-A `ScalarDistance` slot lets a kernel leaf read squared distances you computed, such as a geodesic or graph distance, instead of coordinates. Tables are column-major. Every value must be finite and non-negative, and a training table symmetric with a zero diagonal, or the call returns `GprError::InvalidDistance`. `tidy(rel_tol)` on a source repairs a table that rounding left slightly off. The rustdoc of [`ScalarDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ScalarDistance.html) covers one table per feature (`ArdDistance`), mixing distances with coordinates (`WithPoints`), the sparse models, and filling columns on demand (`fill`).
+Pass a kernel leaf to `kernel` on a `ScalarDistance` slot, and the kernel it returns reads squared distances you computed, such as a geodesic or graph distance, instead of coordinates. The squared-distance tables are column-major. Every value must be finite and non-negative, and a training table symmetric with a zero diagonal, or the call returns `GprError::InvalidDistance`. `tidy(rel_tol)` on the `DistanceSource` that `from_vec` or `borrow` returns repairs a table that rounding left slightly off.
+
+The rustdoc of [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/) covers one table per feature (`ArdDistance`), mixing distances with coordinates (`WithPoints`), and the arguments of the sparse models. [`ArdDistance`](https://docs.rs/gprx/latest/gprx/kernel/struct.ArdDistance.html) shows filling columns on demand (`fill`), and [`DistanceKernel`](https://docs.rs/gprx/latest/gprx/kernel/struct.DistanceKernel.html) shows how the kernels combine.
 
 ```rust
 use gprx::kernel::{RbfKernel, ScalarDistance};
@@ -101,7 +105,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Inducing points for large data
 
-`Sgpr` takes inducing inputs `z`, column-major like `x`, after `y`. They stay where you put them. `with_inducing(FreeInducing)` moves them together with the hyperparameters.
+`Sgpr` takes inducing inputs `z`, column-major like `x`, after `y`. They stay where you put them. `with_inducing(FreeInducing)` moves them together with the hyperparameters. The rustdoc of [`Sgpr`](https://docs.rs/gprx/latest/gprx/struct.Sgpr.html) covers the rest of its settings.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -124,7 +128,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Minibatch training
 
-`Svgp::new` does not train: `factor` places the variational posterior at the prior. `with_optimizer(Adam::new())` makes `fit` run minibatch Adam on the hyperparameters and that posterior. `Adam` defaults to learning rate `1e-3`, batch 32, 100 epochs, and seed 0. `Adam` works only with `Svgp`.
+`Svgp::new` does not train: `factor` sets the variational posterior equal to the prior. `with_optimizer(Adam::new())` makes `fit` optimize the hyperparameters and that posterior with minibatch Adam. `Adam` defaults to learning rate `1e-3`, batch 32, 100 epochs, and seed 0. `Adam` works only with `Svgp`. The rustdoc of [`Svgp`](https://docs.rs/gprx/latest/gprx/struct.Svgp.html) and [`Adam`](https://docs.rs/gprx/latest/gprx/struct.Adam.html) covers the other settings.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -148,7 +152,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Add and remove points later
 
-`into_online` keeps the hyperparameters and updates the factor by one point at a time, in `O(n²)` for `OnlineGpr`. `insert` returns a `PointId`. `delete` takes it back. The last point cannot be deleted. `refit` searches the hyperparameters again on the current points. `OnlineSgpr` also adds and removes inducing points (`insert_inducing`, `delete_inducing`).
+`into_online` keeps the hyperparameters and updates the factor by one point at a time, in `O(n²)` for `OnlineGpr`. `insert` returns a `PointId`. `delete` takes it back. The last point cannot be deleted. `refit` searches the hyperparameters again on the current points. `OnlineSgpr` also adds and removes inducing points (`insert_inducing`, `delete_inducing`). The rustdoc of [`OnlineGpr`](https://docs.rs/gprx/latest/gprx/struct.OnlineGpr.html) and [`OnlineSgpr`](https://docs.rs/gprx/latest/gprx/struct.OnlineSgpr.html) covers the other methods, such as `point_ids`.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -170,7 +174,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Fix hyperparameters or choose an optimizer
 
-`Gpr::new` and `Sgpr::new` search with `Lbfgs`. `with_optimizer` swaps in `NelderMead`, `TrustRegion`, or `FastSimulatedAnnealing`, each with its own setters. `with_optimizer(Fixed)` replaces `fit` with `factor`, which keeps the hyperparameters you gave. `with_bounds` on a kernel leaf or on `GaussianLikelihood` limits where a search may go. The rustdoc of [`Optimizer`](https://docs.rs/gprx/latest/gprx/trait.Optimizer.html) compares the optimizers and shows how to write your own.
+`Gpr::new` and `Sgpr::new` search with `Lbfgs`, which stops after 100 iterations unless you set `with_max_iterations`. `with_optimizer` swaps in `NelderMead`, `TrustRegion`, or `FastSimulatedAnnealing`, each with its own setters. `with_optimizer(Fixed)` replaces `fit` with `factor`, which keeps the hyperparameters you gave. `with_bounds` on a kernel leaf or on `GaussianLikelihood` limits where a search may go. The rustdoc of [`Optimizer`](https://docs.rs/gprx/latest/gprx/trait.Optimizer.html) compares the optimizers and shows how to write your own.
 
 ```rust
 use std::num::NonZeroU32;
@@ -199,7 +203,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Transform inputs and targets
 
-Pass an unfitted map before `fit`. The model fits it on the training data, applies it to every query, and returns predictions in the original units of `y`. The prior mean is zero, so use `StandardizeTarget` when `y` is not centred near zero. [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/) also has min-max scaling, pipelines, per-column maps, and the traits for a map of your own.
+Pass an unfitted map to the trainer with `with_input_transform` or `with_target_transform`. Without one, `x` and `y` reach the model unchanged. The model fits the map on the training data, applies it to every query, and returns predictions in the original units of `y`. The prior mean is zero, so use `StandardizeTarget` when `y` is not centred near zero. [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/) also has min-max scaling, pipelines, per-column maps, and the traits for a map of your own.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -223,7 +227,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Save and load
 
-`save(dir)` writes `config.json` and `model.safetensors`. `LoadedGpr::load` returns an enum with one variant per precision and online state. `predict` works on any variant and returns `f64`. Match a variant to get the typed model back. `FittedGpr::save_with_factor` also writes the Cholesky factor, so loading does not factor again. `LoadedSgpr`, `LoadedSvgp`, and the loaders for models on supplied distances are in [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/), with `PersistRegistry` for kernels and transforms of your own. The file format is documented in [persist-format.md](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md).
+`save(dir)` writes `config.json` and `model.safetensors`. `LoadedGpr::load` returns an enum with one variant per precision and online state. `predict` works on any variant and returns `f64`. Match a variant to get the typed model back. `FittedGpr::save_with_factor` also writes the Cholesky factor, so loading does not factor again. A loaded `FittedGpr` or `OnlineGpr` searches again with `with_optimizer` and then `refit`; a loaded SGPR or SVGP model cannot, so give its kernel and likelihood to a new `Sgpr` or `Svgp`. `LoadedSgpr`, `LoadedSvgp`, and the loaders for models on supplied distances are in [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/), with `PersistRegistry` for kernels and transforms of your own. The file format is documented in [persist-format.md](https://github.com/YUKIKEDA/gprx/blob/main/docs/persist-format.md).
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -248,7 +252,9 @@ fn main() -> Result<(), gprx::GprError> {
 
 ### Speed, memory, and precision
 
-`with_prefer_speed` (the default) keeps the training distances between kernel builds and a separate `n × n` gradient matrix. `with_prefer_memory` recomputes the distances and writes the gradient matrix over the Cholesky factor, which saves one `n × n` matrix and factors again afterwards. `with_math(KernelExp::FastApprox)` evaluates the kernel `exp` with a polynomial, within a relative `2^{-23}` of `f64::exp` on `f64`. `SinglePrecision` stores and factors in `f32` and predicts `f32`. `MixedPrecision` factors in `f32`, refines in `f64`, and predicts `f64`. `Sgpr` and `Svgp` take `with_precision` and `with_math` too. The rustdoc of [`GpScalar`](https://docs.rs/gprx/latest/gprx/trait.GpScalar.html) compares the precisions.
+`with_prefer_speed` (the default) keeps the training distances between kernel builds and a separate `n × n` gradient matrix. `with_prefer_memory` recomputes the distances and writes the gradient matrix over the Cholesky factor, which saves one `n × n` matrix and factors again afterwards.
+
+The default `KernelExp::Accurate` evaluates the kernel with the standard `exp`. `with_math(KernelExp::FastApprox)` evaluates the kernel `exp` with a polynomial, within a relative `2^{-23}` of `f64::exp` on `f64`. A model stores, factors, and predicts in `f64` by default (`DoublePrecision`). `SinglePrecision` stores and factors in `f32` and predicts `f32`. `MixedPrecision` factors in `f32`, refines in `f64`, and predicts `f64`. `Sgpr` and `Svgp` take `with_precision` and `with_math` too. The rustdoc of [`GpScalar`](https://docs.rs/gprx/latest/gprx/trait.GpScalar.html) compares the precisions.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -329,7 +335,7 @@ fn main() -> Result<(), GprError> {
 
 ### Handle errors
 
-`GprError` is non-exhaustive, so a `match` on it ends with a catch-all arm. When `fit` fails, the trainer comes back with the error, and you can change it and try again. Branch on the variant and its `kind` field, not on the display text.
+`GprError` is non-exhaustive, so a `match` on it ends with a catch-all arm. When `fit` fails, the trainer comes back with the error, and you can change it and try again. `Gpr` adds no jitter by default (`JitterPolicy::fixed(0.0)`), while `Sgpr` and `Svgp` retry `K_mm` with jitter growing from `1e-8`. Branch on the variant and its `kind` field, not on the display text. The rustdoc of [`GprError`](https://docs.rs/gprx/latest/gprx/enum.GprError.html) lists every variant.
 
 ```rust
 use gprx::kernel::{KernelSpec, RbfKernel};
@@ -381,7 +387,7 @@ fn main() -> Result<(), gprx::GprError> {
 
 Every public item has a usage example in the API reference on [docs.rs](https://docs.rs/gprx). Start from:
 
-- [`gprx`](https://docs.rs/gprx/latest/gprx/): the models (`Gpr`, `Sgpr`, `Svgp` and their fitted and online forms), `GaussianLikelihood`, the optimizers, the precisions, and `GprError`.
+- [`gprx`](https://docs.rs/gprx/latest/gprx/): the models (`Gpr`, `Sgpr`, `Svgp`, their fitted forms, and the online `OnlineGpr` and `OnlineSgpr`), `GaussianLikelihood`, the optimizers, the precisions, and `GprError`.
 - [`gprx::kernel`](https://docs.rs/gprx/latest/gprx/kernel/): kernel leaves, `KernelSpec`, supplied distances, and `KernelTerm`.
 - [`gprx::transform`](https://docs.rs/gprx/latest/gprx/transform/): input and target maps.
 - [`gprx::persist`](https://docs.rs/gprx/latest/gprx/persist/): loaders and `PersistRegistry`.
