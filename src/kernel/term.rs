@@ -45,9 +45,10 @@ use super::Triangle;
 /// [`crate::Sgpr`] or [`crate::Svgp`] on a leaf that omits a derivative it
 /// needs returns [`GprError::CoordGradientUnsupported`].
 ///
-/// The methods take `faer` matrix views and [`Self::persist_state`] returns
-/// a `serde_json::Value`: an implementation adds `faer = "0.24"` and
-/// `serde_json = "1"` to its `Cargo.toml`.
+/// The methods take `faer` matrix views, so an implementation adds
+/// `faer = "0.24"` to its `Cargo.toml`. [`Self::persist_state`] returns a
+/// `serde_json::Value` and has a default body, so `serde_json = "1"` is
+/// needed only by an implementation that overrides it.
 ///
 /// # Errors
 ///

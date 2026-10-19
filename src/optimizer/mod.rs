@@ -65,7 +65,8 @@ pub struct OptResult {
 /// | [`Fixed`] | no search: `factor` only. Not an `Optimizer` | unit struct |
 /// | [`Adam`] | mini-batch, [`crate::Svgp`] only. Not an `Optimizer` | `with_learning_rate`, `with_beta1`, `with_beta2`, `with_epsilon`, `with_batch_size`, `with_epochs`, `with_seed` |
 ///
-/// `with_restarts(n, seed)` adds `n` extra log-uniform starts and keeps the
+/// `with_restarts(n, seed)` adds `n` extra starts, drawn log-uniform in each
+/// interval with `lo > 0` and uniform in any other, and keeps the
 /// lowest value; the first start is the model's `θ`.
 ///
 /// A user optimizer implements this generically over the capability it

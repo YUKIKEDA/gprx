@@ -194,7 +194,7 @@ flowchart LR
 
 A model of a `DistanceKernel<C>` moves the same way and loads through `LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` ([persist-format.md §10](persist-format.md#10-models-on-supplied-distances)).
 
-A loaded model is prediction-ready and carries `Fixed`, so it does not store a search. To train it again, call `with_optimizer` and then `refit` on the typed model. What each `save` writes is in [persist-format.md](persist-format.md).
+A loaded model is prediction-ready and carries `Fixed`, so it does not store a search. To search a `LoadedGpr` or `LoadedDistanceGpr` model again, call `with_optimizer` and then `refit` on the typed model. A loaded SGPR or SVGP model has no `with_optimizer`: to train again, give its kernel and likelihood to a new `Sgpr` or `Svgp` with the training data. What each `save` writes is in [persist-format.md](persist-format.md).
 
 Inside one call, the order is fixed: input map → target map → kernel and likelihood at `θ` → factor → `α` → predict. A fitted model keeps the `X` and `y` you passed, untransformed, together with the fitted transforms, and applies the transforms again to each query ([design §2](design.md#2-architecture), [§5.5](design.md#55-preprocessing-pipeline)).
 

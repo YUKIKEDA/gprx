@@ -8,7 +8,8 @@ use crate::error::GprError;
 ///
 /// Kingma defaults: step size `1e-3`, `β1 = 0.9`, `β2 = 0.999`, `ε = 1e-8`,
 /// batch size 32, 100 epochs, seed 0. Bias correction is always on. This type
-/// does not implement [`super::Optimizer`]; [`crate::Gpr`] cannot take it.
+/// does not implement [`super::Optimizer`], so a `Gpr<Adam>` or `Sgpr<Adam>`
+/// has no `fit` and no `factor`.
 ///
 /// # Examples
 ///

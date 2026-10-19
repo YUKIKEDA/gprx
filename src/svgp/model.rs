@@ -24,8 +24,9 @@ use super::fitted::FittedSvgp;
 /// (`mean = 0`, `L = I`) at the current kernel and likelihood `θ`.
 /// [`Svgp<Adam>::fit`] starts from that prior and runs mini-batch Adam.
 /// [`Self::with_optimizer`] switches the type parameter; there is no fit
-/// flag. [`Adam`] does not implement [`crate::Optimizer`], so [`crate::Gpr`]
-/// and [`crate::Sgpr`] cannot take it.
+/// flag. [`Adam`] does not implement [`crate::Optimizer`]: `with_optimizer`
+/// on [`crate::Gpr`] or [`crate::Sgpr`] accepts it, but the resulting
+/// `Gpr<Adam>` or `Sgpr<Adam>` has no `fit` and no `factor`.
 ///
 /// A failed `fit` or `factor` returns the trainer with the [`GprError`], so
 /// a caller can match `Err((trainer, err))` and try again. There is no

@@ -14,7 +14,7 @@ The examples in this file are real output of `save` (a fit of 8 points, then `sa
   model.safetensors    the numbers: X, y, and (per model) Z, q(u), L, α
 ```
 
-`save` creates `<dir>` (and parents) if it is missing and replaces the two files. Each file is written to a temporary file in `<dir>` and renamed over its name, `model.safetensors` first and `config.json` last, so a reader sees the old file or the new one, and a save that fails part way leaves the previous `config.json`. Nothing else is left behind. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To train it again, call `with_optimizer` and then `refit` on the typed model.
+`save` creates `<dir>` (and parents) if it is missing and replaces the two files. Each file is written to a temporary file in `<dir>` and renamed over its name, `model.safetensors` first and `config.json` last, so a reader sees the old file or the new one, and a save that fails part way leaves the previous `config.json`. Nothing else is left behind. The solver and the Cholesky buffer policy are not stored: a loaded model is `Fixed` and uses `CholeskyBuffer::Retain`. To search a `LoadedGpr` or `LoadedDistanceGpr` model again, call `with_optimizer` and then `refit` on the typed model. A loaded SGPR or SVGP model has no `with_optimizer`: to train again, give its kernel and likelihood to a new `Sgpr` or `Svgp` with the training data.
 
 ## 2. Which model is in the directory
 

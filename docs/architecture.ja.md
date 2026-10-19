@@ -199,7 +199,7 @@ flowchart LR
 
 `DistanceKernel<C>` を使うモデルも同じ順に状態が移り、読み込みには `LoadedDistanceGpr<C>` / `LoadedDistanceSgpr<C>` / `LoadedDistanceSvgp<C>` を使う（[persist-format.ja.md 10 節](persist-format.ja.md#10-呼び出し側が二乗距離を与えるモデル)）。
 
-読み込んだモデルはそのまま予測に使える。ただし最適化器の型は `Fixed` で、ハイパーパラメータを探索する最適化器は保持していない。もう一度学習したいときは、`LoadedGpr` などの variant から具体的なモデル（`FittedGpr` など）を取り出し、それに対して `with_optimizer` で最適化器を指定し、`refit` を呼ぶ。各 `save` が何を書くかは [persist-format.ja.md](persist-format.ja.md) にまとめてある。
+読み込んだモデルはそのまま予測に使える。ただし最適化器の型は `Fixed` で、ハイパーパラメータを探索する最適化器は保持していない。`LoadedGpr` か `LoadedDistanceGpr` のモデルでハイパーパラメータを探し直したいときは、variant から具体的なモデル（`FittedGpr` など）を取り出し、それに対して `with_optimizer` で最適化器を指定し、`refit` を呼ぶ。読み込んだ SGPR と SVGP のモデルには `with_optimizer` がない。もう一度学習したいときは、そのカーネルと尤度を学習データと一緒に新しい `Sgpr` か `Svgp` に渡す。各 `save` が何を書くかは [persist-format.ja.md](persist-format.ja.md) にまとめてある。
 
 学習と予測の処理は、いつも次の順に進む。
 
