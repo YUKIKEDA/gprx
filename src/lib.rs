@@ -9,6 +9,24 @@
 //! [`kernel::WhiteKernel`] is opt-in composition; using both at large
 //! values double-counts noise.
 //!
+//! `fit` and `factor` return `Result<Fitted, (Trainer, GprError)>`: a failure
+//! hands the trainer back with the error, so a caller can match
+//! `Err((trainer, err))` and try again with the same trainer. On [`Gpr`], `?`
+//! drops the trainer (`From<(Gpr<O, P, K>, GprError)> for GprError`).
+//! [`Sgpr`] and [`Svgp`] have no such conversion: write
+//! `.map_err(|(_, e)| e)?`.
+//!
+//! Call a model's methods on the value (`fitted.predict(..)`). The models of
+//! a [`kernel::KernelSpec`] and of a [`kernel::DistanceKernel`] share method
+//! names (`fit`, `factor`, the `predict` / covariance / `sample` family,
+//! `insert`, `insert_inducing`, and the sparse `into_online` and `save`), so
+//! a call by the type's path without its parameters, such as
+//! `FittedGpr::predict(&fitted, ..)`, does not compile (`E0034`): the path
+//! does not say which of the same-named methods it means. Name the
+//! parameters the value has: `<FittedGpr>::predict(&fitted, ..)` for a
+//! [`FittedGpr`] with the default parameters, `<FittedGpr<Fixed>>::predict(&frozen, ..)`
+//! for one from `factor`.
+//!
 //! Depend on crates.io with `gprx = "0.2"`. The 0.2.0 contract (tag
 //! `v0.2.0`) is the default-feature public API: [`Gpr`], [`Sgpr`], and
 //! [`Svgp`], online updates, supplied squared distances
@@ -44,6 +62,8 @@
 //! let fitted = gpr.fit(&[0.0, 1.0], 2, 1, &[0.0, 1.0]).map_err(|(_, e)| e)?;
 //! let pred = fitted.predict(&[0.5], 1, 1)?;
 //! assert_eq!(pred.mean.len(), 1);
+//! // The same call by path, with the type's default parameters.
+//! assert_eq!(<gprx::FittedGpr>::predict(&fitted, &[0.5], 1, 1)?, pred);
 //! # Ok(())
 //! # }
 //! ```

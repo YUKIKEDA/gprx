@@ -41,7 +41,13 @@ use super::Triangle;
 /// [`crate::Sgpr`] and [`crate::Svgp`] read, the derivatives by the squared
 /// distance ([`Self::grad_wrt_sq_dist`], [`Self::hess_wrt_sq_dist`],
 /// [`Self::grad_wrt_sq_dist_theta`]) that coordinate derivatives read, and
-/// the saved form ([`Self::persist_id`], [`Self::persist_state`]).
+/// the saved form ([`Self::persist_id`], [`Self::persist_state`]). A
+/// [`crate::Sgpr`] or [`crate::Svgp`] on a leaf that omits a derivative it
+/// needs returns [`GprError::CoordGradientUnsupported`].
+///
+/// The methods take `faer` matrix views and [`Self::persist_state`] returns
+/// a `serde_json::Value`: an implementation adds `faer = "0.24"` and
+/// `serde_json = "1"` to its `Cargo.toml`.
 ///
 /// # Errors
 ///

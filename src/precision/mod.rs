@@ -629,6 +629,13 @@ fn f64_cross_means<M: crate::math::KernelMath, S: Supply>(
 /// [`crate::Sgpr`], and [`crate::Svgp`]. It is sealed: only those four
 /// precisions implement it, and its operations are crate-private.
 ///
+/// | Precision | Stores and factors | Predicts |
+/// | --- | --- | --- |
+/// | [`DoublePrecision`] (default) | `f64` | `f64` |
+/// | [`SinglePrecision`] | `f32`, and keeps that factorization | `f32` ([`crate::Prediction`]`<f32>`) |
+/// | [`MixedPrecision`] (= `MixedPrecision<PromoteStorage>`) | `f32`; refines the predict weights in `f64` with the residual from the stored `f32` matrix | `f64` |
+/// | `MixedPrecision<`[`ReevaluateKernel`]`>` | `f32`; refines the predict weights in `f64` with the residual from a fresh `f64` kernel evaluation | `f64` |
+///
 /// # Examples
 ///
 /// ```rust

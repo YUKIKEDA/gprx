@@ -36,6 +36,10 @@ use super::factor::{
 /// likelihood `θ`, the whitened mean vector, then the packed column-major
 /// lower triangle of `L`.
 ///
+/// The predict, covariance, and sample methods match those of
+/// [`crate::FittedGpr`]. There is no `hessian_into`, no leave-one-out, no
+/// online type, and no `refit`: train again with [`crate::Svgp`].
+///
 /// # Examples
 ///
 /// ```rust

@@ -223,7 +223,9 @@ impl<O, P, K: ModelKernel> Gpr<O, P, K> {
     /// Intended to be called before fit.
     ///
     /// A single map or a [`crate::transform::TargetPipeline`]. One-step maps
-    /// still use this method.
+    /// still use this method. The default is the identity. The prior mean is
+    /// zero, so pass [`crate::transform::StandardizeTarget::new`] when `y` is
+    /// not centred near zero.
     ///
     /// See the example on [`Gpr`].
     pub fn with_target_transform(mut self, transform: impl UnfittedTarget + 'static) -> Self {

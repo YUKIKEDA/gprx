@@ -17,6 +17,10 @@ use super::{OptResult, Optimizer, Restarts};
 
 /// Searches hyperparameters with limited-memory BFGS.
 ///
+/// Each step runs a Moré–Thuente line search. It needs
+/// [`crate::Differentiable`]. This is the optimizer of [`crate::Gpr::new`]
+/// and [`crate::Sgpr::new`].
+///
 /// See the example on [`Self::new`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lbfgs {
