@@ -11,7 +11,7 @@ env:
 jobs:
   test:
     name: test (${{ matrix.toolchain }})
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -30,7 +30,7 @@ jobs:
 
   alloc:
     name: alloc (release)
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -38,7 +38,7 @@ jobs:
 
   coverage:
     name: coverage (stable)
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
